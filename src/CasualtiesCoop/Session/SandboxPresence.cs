@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CasualtiesCoop.Game;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
 using Steamworks;
@@ -11,28 +12,37 @@ namespace CasualtiesCoop.Session;
 internal sealed class SandboxPresence : IDisposable
 {
     private const float UpdateInterval = 0.067f;
-    private const float MarkerTimeout = 2f;
+    private const float PoseTimeout = 2f;
+    private const int SoundsPerSecond = 48;
 
     private sealed class RemotePlayer
     {
-        internal uint Sequence;
-        internal Vector2 Target;
+        internal SandboxPosition Pose;
         internal float UpdatedAt;
-        internal TextMeshPro? Marker;
+        internal uint SoundSequence;
+        internal float SoundWindow;
+        internal int SoundCount;
+        internal RemoteBodyView? View;
     }
 
     private readonly SteamLobby lobby;
     private readonly RoomLaunchPlan plan;
     private readonly TMP_FontAsset font;
     private readonly Dictionary<ulong, RemotePlayer> remotes = new();
+    private readonly SandboxAudio audio = new();
     private uint sequence;
+    private uint soundSequence;
     private float nextUpdate;
+
+    internal bool Ready { get; private set; }
+    internal SandboxItems Items { get; }
 
     internal SandboxPresence(SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font)
     {
         this.lobby = lobby;
         this.plan = plan;
         this.font = font;
+        Items = new SandboxItems(lobby, plan, TryGetPosition);
     }
 
     internal bool IsParticipant(CSteamID player, Guid launchId) =>
@@ -45,86 +55,195 @@ internal sealed class SandboxPresence : IDisposable
             return;
         }
 
+        Ready = true;
+        Body body = PlayerCamera.main.body;
         float now = Time.unscaledTime;
+        Vector2 position = body.transform.position;
         if (now >= nextUpdate)
         {
             nextUpdate = now + UpdateInterval;
-            Vector2 position = PlayerCamera.main.body.transform.position;
-            var update = new SandboxPosition(lobby.LocalUser.m_SteamID, ++sequence, position.x, position.y);
-            byte[] frame = SandboxWire.WritePosition(plan.Id, update);
-            if (lobby.IsHost)
-            {
-                Broadcast(frame, lobby.LocalUser);
-            }
-            else
-            {
-                lobby.Link.Send(lobby.Owner, frame, reliable: false);
-            }
+            SendLocal(SandboxWire.WritePosition(plan.Id, CapturePose(body, position)));
         }
 
         foreach (KeyValuePair<ulong, RemotePlayer> entry in remotes)
         {
             RemotePlayer remote = entry.Value;
-            if (now - remote.UpdatedAt > MarkerTimeout)
+            float age = now - remote.UpdatedAt;
+            if (age > PoseTimeout || remote.Pose.Player == 0)
             {
-                if (remote.Marker)
-                {
-                    remote.Marker!.gameObject.SetActive(false);
-                }
+                remote.View?.Hide();
                 continue;
             }
 
-            Vector3 target = new(remote.Target.x, remote.Target.y + 2.4f, -0.1f);
-            if (!remote.Marker)
+            if (remote.View is null && plan.TryGetPlayer(entry.Key, out LaunchPlayer member))
             {
-                remote.Marker = CreateMarker(new CSteamID(entry.Key), target);
+                remote.View = new RemoteBodyView(member.Character, SteamFriends.GetFriendPersonaName(new CSteamID(entry.Key)), font);
+            }
+            remote.View?.Apply(remote.Pose, age);
+        }
+
+        audio.Tick(position);
+        Items.Tick(body);
+    }
+
+    private SandboxPosition CapturePose(Body body, Vector2 origin)
+    {
+        int count = Math.Min(body.limbs.Length, SandboxWire.MaxLimbs);
+        SandboxLimb[] limbs = new SandboxLimb[count];
+        for (int index = 0; index < count; index++)
+        {
+            Limb limb = body.limbs[index];
+            if (!limb || limb.dismembered)
+            {
+                continue;
             }
 
-            TextMeshPro marker = remote.Marker!;
-            if (!marker.gameObject.activeSelf || (marker.transform.position - target).sqrMagnitude > 64f)
+            Transform transform = limb.transform;
+            Vector2 offset = (Vector2)transform.position - origin;
+            Vector3 scale = transform.lossyScale;
+            if (offset.sqrMagnitude <= 256f * 256f)
             {
-                marker.transform.position = target;
-                marker.gameObject.SetActive(true);
-            }
-            else
-            {
-                marker.transform.position = Vector3.Lerp(marker.transform.position, target, Time.unscaledDeltaTime * 15f);
+                limbs[index] = new SandboxLimb(offset.x, offset.y, transform.eulerAngles.z,
+                    Mathf.Min(8, Mathf.Abs(scale.x)), Mathf.Min(8, Mathf.Abs(scale.y)), limb.gameObject.activeInHierarchy);
             }
         }
+
+        Vector2 velocity = body.standing || count < 3 || !body.limbs[2] ? body.rb.velocity : body.limbs[2].rb.velocity;
+        return new SandboxPosition(lobby.LocalUser.m_SteamID, ++sequence, origin.x, origin.y,
+            Mathf.Clamp(velocity.x, -1000f, 1000f), Mathf.Clamp(velocity.y, -1000f, 1000f), body.isRight, body.standing, limbs);
     }
 
     internal bool Receive(CSteamID sender, byte[] bytes)
     {
-        if (!SandboxWire.TryReadPosition(bytes, plan.Id, out SandboxPosition position))
+        return (RoomFrame)bytes[0] switch
         {
-            return true; // Out-of-order position reports can outlive a scene transition.
-        }
+            RoomFrame.SandboxPosition => ReceivePose(sender, bytes),
+            RoomFrame.SandboxSound => ReceiveSound(sender, bytes),
+            _ => Items.Receive(sender, bytes)
+        };
+    }
 
-        bool fromExpectedPeer = lobby.IsHost ? position.Player == sender.m_SteamID : sender == lobby.Owner;
-        if (!fromExpectedPeer || position.Player == lobby.LocalUser.m_SteamID || !plan.TryGetPlayer(position.Player, out _))
-        {
-            return false;
-        }
-
-        if (!remotes.TryGetValue(position.Player, out RemotePlayer remote))
-        {
-            remote = new RemotePlayer();
-            remotes.Add(position.Player, remote);
-        }
-        else if (unchecked((int)(position.Sequence - remote.Sequence)) <= 0)
+    private bool ReceivePose(CSteamID sender, byte[] bytes)
+    {
+        if (!SandboxWire.TryReadPosition(bytes, plan.Id, out SandboxPosition pose))
         {
             return true;
         }
 
-        remote.Sequence = position.Sequence;
-        remote.Target = new Vector2(position.X, position.Y);
+        if (!IsExpectedSource(sender, pose.Player))
+        {
+            return false;
+        }
+
+        if (!remotes.TryGetValue(pose.Player, out RemotePlayer remote))
+        {
+            remote = new RemotePlayer();
+            remotes.Add(pose.Player, remote);
+        }
+        else if (unchecked((int)(pose.Sequence - remote.Pose.Sequence)) <= 0)
+        {
+            return true;
+        }
+
+        remote.Pose = pose;
         remote.UpdatedAt = Time.unscaledTime;
         if (lobby.IsHost)
         {
             Broadcast(bytes, sender);
         }
-
         return true;
+    }
+
+    internal bool TryGetPosition(ulong player, out Vector2 position)
+    {
+        position = default;
+        if (player == lobby.LocalUser.m_SteamID && PlayerCamera.main && PlayerCamera.main.body)
+        {
+            position = PlayerCamera.main.body.transform.position;
+            return Ready;
+        }
+
+        if (remotes.TryGetValue(player, out RemotePlayer remote) && Time.unscaledTime - remote.UpdatedAt <= PoseTimeout)
+        {
+            position = new Vector2(remote.Pose.X, remote.Pose.Y);
+            return true;
+        }
+        return false;
+    }
+
+    internal void CaptureSound(string? key, AudioClip clip, Vector2 origin, AudioSource playback)
+    {
+        if (!Ready || !PlayerCamera.main || !PlayerCamera.main.body)
+        {
+            return;
+        }
+
+        Body body = PlayerCamera.main.body;
+        string clipKey = key ?? audio.GetClipKey(clip, body);
+        var sound = new SandboxSound(lobby.LocalUser.m_SteamID, ++soundSequence, origin.x, origin.y,
+            Mathf.Clamp01(playback.volume), Mathf.Clamp(playback.pitch, 0.05f, 3f), clipKey);
+        if (SandboxWire.WriteSound(plan.Id, sound) is { } frame)
+        {
+            SendLocal(frame);
+        }
+    }
+
+    private bool ReceiveSound(CSteamID sender, byte[] bytes)
+    {
+        if (!SandboxWire.TryReadSound(bytes, plan.Id, out SandboxSound sound))
+        {
+            return true;
+        }
+
+        if (!IsExpectedSource(sender, sound.Player))
+        {
+            return false;
+        }
+
+        if (!Ready || !remotes.TryGetValue(sound.Player, out RemotePlayer remote) ||
+            unchecked((int)(sound.Sequence - remote.SoundSequence)) <= 0 ||
+            !TryGetPosition(sound.Player, out Vector2 emitter) ||
+            (emitter - new Vector2(sound.X, sound.Y)).sqrMagnitude > 24f * 24f)
+        {
+            return true;
+        }
+
+        remote.SoundSequence = sound.Sequence;
+        if (Time.unscaledTime - remote.SoundWindow >= 1f)
+        {
+            remote.SoundWindow = Time.unscaledTime;
+            remote.SoundCount = 0;
+        }
+        if (++remote.SoundCount > SoundsPerSecond)
+        {
+            return true;
+        }
+
+        if (PlayerCamera.main && PlayerCamera.main.body && plan.TryGetPlayer(sound.Player, out LaunchPlayer member))
+        {
+            audio.Play(sound, member.Character, PlayerCamera.main.body.transform.position);
+        }
+        if (lobby.IsHost)
+        {
+            Broadcast(bytes, sender);
+        }
+        return true;
+    }
+
+    private bool IsExpectedSource(CSteamID sender, ulong player) =>
+        (lobby.IsHost ? player == sender.m_SteamID : sender == lobby.Owner) &&
+        player != lobby.LocalUser.m_SteamID && plan.TryGetPlayer(player, out _);
+
+    private void SendLocal(byte[] frame)
+    {
+        if (lobby.IsHost)
+        {
+            Broadcast(frame, lobby.LocalUser);
+        }
+        else
+        {
+            lobby.Link.Send(lobby.Owner, frame, reliable: false);
+        }
     }
 
     private void Broadcast(byte[] frame, CSteamID except)
@@ -139,32 +258,14 @@ internal sealed class SandboxPresence : IDisposable
         }
     }
 
-    private TextMeshPro CreateMarker(CSteamID player, Vector3 at)
-    {
-        GameObject marker = new("Co-op sandbox player marker");
-        marker.transform.position = at;
-        TextMeshPro text = marker.AddComponent<TextMeshPro>();
-        text.font = font;
-        text.text = SteamFriends.GetFriendPersonaName(player);
-        text.richText = false;
-        text.fontSize = 5;
-        text.alignment = TextAlignmentOptions.Center;
-        text.color = new Color32(143, 216, 182, 255);
-        text.rectTransform.sizeDelta = new Vector2(14, 2);
-        text.enableWordWrapping = false;
-        text.overflowMode = TextOverflowModes.Ellipsis;
-        text.sortingOrder = 2000;
-        return text;
-    }
-
     public void Dispose()
     {
+        Ready = false;
+        Items.Dispose();
+        audio.Dispose();
         foreach (RemotePlayer remote in remotes.Values)
         {
-            if (remote.Marker)
-            {
-                UnityEngine.Object.Destroy(remote.Marker!.gameObject);
-            }
+            remote.View?.Dispose();
         }
     }
 }

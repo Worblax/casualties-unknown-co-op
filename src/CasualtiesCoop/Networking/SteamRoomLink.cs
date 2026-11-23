@@ -257,8 +257,9 @@ internal sealed class SteamRoomLink : IDisposable
                         return;
                     }
                 }
-                // An unreliable position can overtake the reliable confirmation after reconnecting.
-                else if (message[0] != (byte)RoomFrame.SandboxPosition && !CompleteHandshakeStep(peer, message))
+                // Unreliable gameplay updates can overtake the reliable confirmation after reconnecting.
+                else if ((RoomFrame)message[0] is not (RoomFrame.SandboxPosition or RoomFrame.SandboxSound or RoomFrame.ItemMotion) &&
+                    !CompleteHandshakeStep(peer, message))
                 {
                     return;
                 }

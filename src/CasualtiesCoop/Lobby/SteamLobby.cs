@@ -12,7 +12,7 @@ internal sealed class SteamLobby : IDisposable
 {
     private const string MemberKey = "cu_member";
     private const string ProtocolKey = "cu_protocol";
-    private const string ProtocolVersion = "5";
+    private const string ProtocolVersion = "6";
     private const string SettingsKey = "cu_settings";
     private const string CreatorKey = "cu_creator";
     private const string VerifiedMembersKey = "cu_verified";

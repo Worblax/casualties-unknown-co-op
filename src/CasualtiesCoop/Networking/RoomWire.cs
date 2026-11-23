@@ -16,12 +16,19 @@ internal enum RoomFrame : byte
     RunPrepared,
     StartSandbox,
     SandboxRejected,
-    SandboxPosition
+    SandboxPosition,
+    SandboxSound,
+    ItemRequest,
+    ItemState,
+    ItemResult,
+    ItemMotion,
+    ItemSyncRequest,
+    ItemSyncDone
 }
 
 internal static class RoomWire
 {
-    internal const int MaxFrameSize = 192;
+    internal const int MaxFrameSize = 768;
     private const int HandshakeSize = 41;
     private const int PlanHeaderSize = 36;
     private const int PlayerSize = 9;

@@ -17,7 +17,7 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.12";
+    internal const string PluginVersion = "0.1.13";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private static CoopPlugin? instance;
@@ -34,6 +34,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
     private float nextMenuProbe;
 
     internal static SteamLobby? Lobby => instance?.lobby;
+    internal static SandboxPresence? ActiveSandbox => instance?.sandboxPresence is { Ready: true } active ? active : null;
     internal static string? PreparationStatus => instance?.launchPreparation?.Status;
     internal static bool CanStartSharedSandbox => instance?.launchPreparation?.CanStartSandbox == true;
     internal static string SteamStatus { get; private set; } = "Waiting for Steam.";
@@ -50,6 +51,8 @@ internal sealed class CoopPlugin : BaseUnityPlugin
             prefix: OwnPatch(nameof(BlockUnderlyingMenu)));
         harmony.Patch(AccessTools.Method(typeof(SaveSystem), nameof(SaveSystem.SaveGame)),
             prefix: OwnPatch(nameof(AllowSave)));
+        SandboxAudioHooks.Install(harmony);
+        SandboxItemHooks.Install(harmony);
         SceneManager.sceneLoaded += OnSceneLoaded;
         AttachMenu(PreRunScript.instance);
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
@@ -89,6 +92,10 @@ internal sealed class CoopPlugin : BaseUnityPlugin
                 if (!wasLoaded)
                 {
                     Logger.LogInfo("Sandbox course loaded. Local console is available.");
+                    if (sandboxPresence is not null)
+                    {
+                        Logger.LogInfo("Shared sandbox movement, spatial audio, and item synchronization active.");
+                    }
                 }
 
                 sandboxPresence?.Tick();
@@ -234,6 +241,13 @@ internal sealed class CoopPlugin : BaseUnityPlugin
                 return true;
 
             case RoomFrame.SandboxPosition:
+            case RoomFrame.SandboxSound:
+            case RoomFrame.ItemRequest:
+            case RoomFrame.ItemState:
+            case RoomFrame.ItemResult:
+            case RoomFrame.ItemMotion:
+            case RoomFrame.ItemSyncRequest:
+            case RoomFrame.ItemSyncDone:
                 return sandboxPresence?.Receive(sender, message) ?? true;
 
             default:
