@@ -5,12 +5,24 @@ using UnityEngine;
 
 namespace CasualtiesCoop;
 
+[Flags]
+internal enum RoomOptions
+{
+    None = 0,
+    PvP = 1,
+    Respawn = 2,
+    KeepItems = 4,
+    KeepCheckpoint = 8,
+    Defaults = Respawn | KeepItems | KeepCheckpoint,
+    All = PvP | Defaults
+}
+
 internal sealed class SteamLobby : IDisposable
 {
     internal const int Capacity = 4;
     private const string ReadyKey = "cu_ready";
     private const string ProtocolKey = "cu_protocol";
-    private const string ProtocolVersion = "2";
+    private const string ProtocolVersion = "3";
     private const string SettingsKey = "cu_settings";
     private const string CreatorKey = "cu_creator";
     private readonly CallResult<LobbyCreated_t> lobbyCreated;
@@ -28,7 +40,10 @@ internal sealed class SteamLobby : IDisposable
     internal bool IsHost => InRoom && SteamMatchmaking.GetLobbyOwner(Current) == LocalUser;
     internal string? Status { get; private set; }
     internal int SelectedCharacter => selectedCharacter;
-    internal string Difficulty => TryGetSettings(out string difficulty, out _) ? difficulty : "normal";
+    internal string Difficulty => TryGetSettings(out string difficulty, out _, out _) ? difficulty : "normal";
+    internal RoomOptions Options => TryGetSettings(out _, out RoomOptions options, out _) ? options : RoomOptions.Defaults;
+    internal int MemberCount => InRoom ? SteamMatchmaking.GetNumLobbyMembers(Current) : 0;
+    internal bool CanStartSolo => IsHost && MemberCount == 1 && IsReady(LocalUser) && IsCharacterUnlocked(selectedCharacter);
 
     internal SteamLobby()
     {
@@ -76,7 +91,7 @@ internal sealed class SteamLobby : IDisposable
     internal bool TryGetReadyCharacter(CSteamID player, out int character)
     {
         character = 0;
-        if (!TryGetSettings(out _, out string revision))
+        if (!TryGetSettings(out _, out _, out string revision))
         {
             return false;
         }
@@ -107,13 +122,25 @@ internal sealed class SteamLobby : IDisposable
     {
         if (IsHost && difficulty != Difficulty && RunSettings.presets.Exists(preset => preset.presetName == difficulty))
         {
-            PublishSettings(difficulty);
+            PublishSettings(difficulty, Options);
+        }
+    }
+
+    internal void ChangeOption(RoomOptions option, bool enabled)
+    {
+        if (IsHost && TryGetSettings(out string difficulty, out RoomOptions options, out _))
+        {
+            RoomOptions updated = enabled ? options | option : options & ~option;
+            if (updated != options)
+            {
+                PublishSettings(difficulty, updated);
+            }
         }
     }
 
     internal void ToggleReady()
     {
-        if (IsCharacterUnlocked(selectedCharacter) && TryGetSettings(out _, out string revision))
+        if (IsCharacterUnlocked(selectedCharacter) && TryGetSettings(out _, out _, out string revision))
         {
             string ready = revision + ":" + selectedCharacter.ToString(CultureInfo.InvariantCulture);
             SteamMatchmaking.SetLobbyMemberData(Current, ReadyKey, IsReady(LocalUser) ? "0" : ready);
@@ -126,7 +153,28 @@ internal sealed class SteamLobby : IDisposable
         {
             SteamMatchmaking.LeaveLobby(Current);
             Current = CSteamID.Nil;
+            Status = null;
         }
+    }
+
+    internal void StartSoloPreview(PreRunScript menu)
+    {
+        if (!CanStartSolo)
+        {
+            return;
+        }
+
+        if (PlayerPrefs.GetInt("didbasiccourse") == 0)
+        {
+            menu.StartRun(); // Use the game's tutorial prompt and leave the room open.
+            return;
+        }
+
+        menu.ApplyPreset(Difficulty);
+        menu.SelectCharacter(selectedCharacter);
+        CoopPlugin.BeginSoloPreview();
+        menu.StartRun();
+        Leave();
     }
 
     private void Join(CSteamID id)
@@ -159,7 +207,7 @@ internal sealed class SteamLobby : IDisposable
 
         Current = new CSteamID(result.m_ulSteamIDLobby);
         if (!SteamMatchmaking.SetLobbyData(Current, CreatorKey, LocalUser.m_SteamID.ToString(CultureInfo.InvariantCulture)) ||
-            !PublishSettings("normal") ||
+            !PublishSettings("normal", RoomOptions.Defaults) ||
             !SteamMatchmaking.SetLobbyData(Current, ProtocolKey, ProtocolVersion))
         {
             Leave();
@@ -199,9 +247,11 @@ internal sealed class SteamLobby : IDisposable
         Status = null;
     }
 
-    private bool PublishSettings(string difficulty)
+    private bool PublishSettings(string difficulty, RoomOptions options)
     {
-        bool published = SteamMatchmaking.SetLobbyData(Current, SettingsKey, difficulty + ":" + Guid.NewGuid().ToString("N"));
+        string settings = difficulty + ":" + ((int)options).ToString(CultureInfo.InvariantCulture) +
+            ":" + Guid.NewGuid().ToString("N");
+        bool published = SteamMatchmaking.SetLobbyData(Current, SettingsKey, settings);
         if (!published)
         {
             Status = "Could not update room settings.";
@@ -210,25 +260,28 @@ internal sealed class SteamLobby : IDisposable
         return published;
     }
 
-    private bool TryGetSettings(out string difficulty, out string revision)
+    private bool TryGetSettings(out string difficulty, out RoomOptions options, out string revision)
     {
         difficulty = "";
+        options = RoomOptions.Defaults;
         revision = "";
         if (!InRoom)
         {
             return false;
         }
 
-        string settings = SteamMatchmaking.GetLobbyData(Current, SettingsKey);
-        int separator = settings.IndexOf(':');
-        if (separator <= 0)
+        string[] fields = SteamMatchmaking.GetLobbyData(Current, SettingsKey).Split(':');
+        if (fields.Length != 3 || fields[0].Length == 0 ||
+            !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out int flags) ||
+            (flags & ~(int)RoomOptions.All) != 0 || !Guid.TryParseExact(fields[2], "N", out _))
         {
             return false;
         }
 
-        difficulty = settings.Substring(0, separator);
-        revision = settings.Substring(separator + 1);
-        return Guid.TryParseExact(revision, "N", out _);
+        difficulty = fields[0];
+        options = (RoomOptions)flags;
+        revision = fields[2];
+        return true;
     }
 
     private void OnMembershipChanged(LobbyChatUpdate_t update)
@@ -246,7 +299,7 @@ internal sealed class SteamLobby : IDisposable
         }
         else if (IsHost && update.m_ulSteamIDUserChanged != LocalUser.m_SteamID)
         {
-            PublishSettings(Difficulty);
+            PublishSettings(Difficulty, Options);
         }
     }
 

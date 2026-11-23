@@ -8,26 +8,40 @@ namespace CasualtiesCoop;
 
 public sealed class CoopMenuView : MonoBehaviour
 {
-    private const float PanelWidth = 410f;
-    private const float PanelHeight = 492f;
+    private const float PanelWidth = 820f;
+    private const float PanelHeight = 565f;
+    private static readonly (RoomOptions Option, string Label)[] RoomToggles =
+    {
+        (RoomOptions.PvP, "PvP"),
+        (RoomOptions.Respawn, "Respawn on the next layer"),
+        (RoomOptions.KeepItems, "Keep some items after death"),
+        (RoomOptions.KeepCheckpoint, "Keep checkpoint after team wipe")
+    };
+
     private readonly RawImage[] avatars = new RawImage[SteamLobby.Capacity];
     private readonly TextMeshProUGUI[] members = new TextMeshProUGUI[SteamLobby.Capacity];
     private PreRunScript? menu;
     private Canvas? canvas;
     private GameObject? root;
     private RectTransform? panel;
+    private GameObject? backdrop;
     private Button? createButton;
     private Button? inviteButton;
     private Button? readyButton;
     private Button? leaveButton;
     private Button? difficultyButton;
+    private Button? startButton;
+    private readonly Toggle[] ruleToggles = new Toggle[RoomToggles.Length];
     private Button[] characters = Array.Empty<Button>();
     private TextMeshProUGUI? status;
     private TextMeshProUGUI? difficulty;
     private TextMeshProUGUI? readyLabel;
+    private TextMeshProUGUI? startHint;
     private LobbyAvatars? images;
     private float nextRefresh;
     private CSteamID previousRoom;
+
+    internal bool PanelOpen => panel && panel!.gameObject.activeInHierarchy;
 
     internal void Install(PreRunScript owner)
     {
@@ -36,52 +50,69 @@ public sealed class CoopMenuView : MonoBehaviour
         images = new LobbyAvatars();
         RectTransform group = CreateRect("CasualtiesCoop", canvas.transform);
         root = group.gameObject;
-        group.anchorMin = Vector2.one;
-        group.anchorMax = Vector2.one;
-        group.pivot = Vector2.one;
-        group.anchoredPosition = new Vector2(-24, -24);
-        group.sizeDelta = new Vector2(PanelWidth, PanelHeight + 56);
+        Stretch(group);
         group.SetAsLastSibling();
 
         RectTransform launch = CreateRect("Co-op entry", group);
-        Place(launch, PanelWidth - 156, 0, 156, 44);
+        launch.anchorMin = Vector2.one;
+        launch.anchorMax = Vector2.one;
+        launch.pivot = Vector2.one;
+        launch.anchoredPosition = new Vector2(-24, -24);
+        launch.sizeDelta = new Vector2(180, 50);
         AddButton(launch, "Co-op", TogglePanel, out _);
 
+        RectTransform dimmer = CreateRect("Co-op modal backdrop", group);
+        Stretch(dimmer);
+        backdrop = dimmer.gameObject;
+        dimmer.gameObject.AddComponent<Image>().color = new Color32(7, 12, 13, 190);
+
         panel = CreateRect("Co-op panel", group);
-        Place(panel, 0, 56, PanelWidth, PanelHeight);
+        panel.anchorMin = panel.anchorMax = panel.pivot = new Vector2(0.5f, 0.5f);
+        panel.sizeDelta = new Vector2(PanelWidth, PanelHeight);
         Image background = panel.gameObject.AddComponent<Image>();
         background.color = new Color32(17, 27, 28, 252);
 
-        AddLabel(panel, "Steam co-op", 20, 12, 280, 28, 24);
-        AddAction("Close", 320, 12, 70, 30, TogglePanel, out _);
-        status = AddLabel(panel, "", 20, 46, 370, 50, 16);
+        AddLabel(panel, "Steam co-op", 28, 22, 440, 42, 32);
+        AddAction("Close", 688, 24, 104, 40, TogglePanel, out _);
+        status = AddLabel(panel, "", 28, 72, 764, 44, 19);
+        AddLabel(panel, "Players", 28, 130, 342, 28, 23);
+        AddLabel(panel, "Room settings", 436, 130, 356, 28, 23);
         for (int index = 0; index < members.Length; index++)
         {
-            int y = 105 + index * 38;
+            int y = 174 + index * 43;
             RectTransform avatar = CreateRect("Avatar", panel);
-            Place(avatar, 20, y, 30, 30);
+            Place(avatar, 28, y, 34, 34);
             avatars[index] = avatar.gameObject.AddComponent<RawImage>();
             avatars[index].raycastTarget = false;
-            members[index] = AddLabel(panel, "", 62, y, 330, 30, 17);
+            members[index] = AddLabel(panel, "", 75, y, 334, 36, 18);
         }
 
-        difficulty = AddLabel(panel, "", 20, 266, 225, 36, 17);
-        difficultyButton = AddAction("Change", 268, 266, 122, 36, NextDifficulty, out _);
+        difficulty = AddLabel(panel, "", 436, 174, 220, 38, 18);
+        difficultyButton = AddAction("Change", 688, 174, 104, 38, NextDifficulty, out _);
+        for (int index = 0; index < ruleToggles.Length; index++)
+        {
+            var rule = RoomToggles[index];
+            ruleToggles[index] = AddRuleToggle(rule.Label, 436, 231 + index * 41, rule.Option);
+        }
+
+        AddLabel(panel, "Your character", 28, 351, 342, 30, 19);
         characters = new Button[SteamLobby.CharacterCount];
         for (int index = 0; index < characters.Length; index++)
         {
             int character = index;
-            float width = 362f / characters.Length;
-            characters[index] = AddAction($"Character {index + 1}", 20 + index * width, 320,
-                width - 5, 44, () => CoopPlugin.Lobby?.SelectCharacter(character), out _);
+            float width = 380f / characters.Length;
+            characters[index] = AddAction($"Character {index + 1}", 28 + index * width, 390,
+                width - 7, 50, () => CoopPlugin.Lobby?.SelectCharacter(character), out _);
         }
 
-        createButton = AddAction("Create Steam room", 20, 400, 370, 42, () => CoopPlugin.Lobby?.Create(), out _);
-        inviteButton = AddAction("Invite friends", 20, 400, 119, 42, () => CoopPlugin.Lobby?.Invite(), out _);
-        readyButton = AddAction("Ready", 146, 400, 119, 42, () => CoopPlugin.Lobby?.ToggleReady(), out var readyText);
+        startHint = AddLabel(panel, "", 28, 452, 764, 40, 16);
+        createButton = AddAction("Create Steam room", 28, 500, 274, 44, () => CoopPlugin.Lobby?.Create(), out _);
+        inviteButton = AddAction("Invite friends", 28, 500, 164, 44, () => CoopPlugin.Lobby?.Invite(), out _);
+        readyButton = AddAction("Ready", 207, 500, 155, 44, () => CoopPlugin.Lobby?.ToggleReady(), out var readyText);
         readyLabel = readyText;
-        leaveButton = AddAction("Leave room", 272, 400, 118, 42, () => CoopPlugin.Lobby?.Leave(), out _);
-        panel.gameObject.SetActive(false);
+        leaveButton = AddAction("Leave room", 377, 500, 154, 44, () => CoopPlugin.Lobby?.Leave(), out _);
+        startButton = AddAction("Start", 602, 500, 190, 44, () => CoopPlugin.Lobby?.StartSoloPreview(menu!), out _);
+        SetPanelOpen(false);
     }
 
     private void Update()
@@ -92,8 +123,9 @@ public sealed class CoopMenuView : MonoBehaviour
         }
 
         CoopPlugin.TickMenu();
-        bool visible = !menu!.contentWarning.activeInHierarchy && !ScrollableText.textExists &&
-            !menu.creditsScreen.activeInHierarchy && !menu.runSettingsScreen.activeInHierarchy;
+        bool visible = !menu!.contentWarning.activeInHierarchy && !menu.tutorialWarning.activeInHierarchy &&
+            !ScrollableText.textExists && !menu.creditsScreen.activeInHierarchy &&
+            !menu.runSettingsScreen.activeInHierarchy && !SettingsMenu.instance;
         root!.SetActive(visible);
         if (!visible || Time.unscaledTime < nextRefresh)
         {
@@ -105,7 +137,7 @@ public sealed class CoopMenuView : MonoBehaviour
         if (lobby is { InRoom: true } && lobby.Current != previousRoom)
         {
             previousRoom = lobby.Current;
-            panel!.gameObject.SetActive(true);
+            SetPanelOpen(true);
         }
         else if (lobby is not { InRoom: true })
         {
@@ -120,10 +152,22 @@ public sealed class CoopMenuView : MonoBehaviour
 
     private void TogglePanel()
     {
-        panel!.gameObject.SetActive(!panel.gameObject.activeSelf);
+        SetPanelOpen(!panel!.gameObject.activeSelf);
         if (panel.gameObject.activeSelf)
         {
             Refresh(CoopPlugin.Lobby);
+        }
+    }
+
+    private void SetPanelOpen(bool open)
+    {
+        backdrop!.SetActive(open);
+        panel!.gameObject.SetActive(open);
+        if (open && canvas!.transform is RectTransform bounds)
+        {
+            float scale = Mathf.Min(1f, (bounds.rect.width - 48) / PanelWidth,
+                (bounds.rect.height - 48) / PanelHeight);
+            panel.localScale = Vector3.one * Mathf.Max(0.25f, scale);
         }
     }
 
@@ -131,7 +175,7 @@ public sealed class CoopMenuView : MonoBehaviour
     {
         bool inRoom = lobby is { InRoom: true };
         bool isHost = inRoom && lobby!.IsHost;
-        int count = inRoom ? SteamMatchmaking.GetNumLobbyMembers(lobby!.Current) : 0;
+        int count = lobby?.MemberCount ?? 0;
         status!.text = lobby?.Status ?? (inRoom ? $"Players {count}/{SteamLobby.Capacity}" :
             lobby is null ? CoopPlugin.SteamStatus : "Start a room and invite your team.");
 
@@ -140,8 +184,22 @@ public sealed class CoopMenuView : MonoBehaviour
         inviteButton!.gameObject.SetActive(isHost);
         readyButton!.gameObject.SetActive(inRoom);
         leaveButton!.gameObject.SetActive(inRoom);
+        startButton!.gameObject.SetActive(isHost);
+        startButton.interactable = isHost && lobby!.CanStartSolo;
         difficulty!.gameObject.SetActive(inRoom);
         difficultyButton!.gameObject.SetActive(isHost);
+        startHint!.text = inRoom
+            ? count > 1 ? "Launching a shared run is still in development."
+                : "Start opens a solo preview. Room options are preview controls. Saving is disabled."
+            : "";
+        RoomOptions options = lobby?.Options ?? RoomOptions.Defaults;
+        for (int index = 0; index < ruleToggles.Length; index++)
+        {
+            Toggle toggle = ruleToggles[index];
+            toggle.gameObject.SetActive(inRoom);
+            toggle.interactable = isHost;
+            toggle.SetIsOnWithoutNotify((options & RoomToggles[index].Option) != 0);
+        }
 
         for (int index = 0; index < members.Length; index++)
         {
@@ -228,6 +286,9 @@ public sealed class CoopMenuView : MonoBehaviour
         label.font = menu!.versionText.font;
         label.text = value;
         label.fontSize = size;
+        label.enableAutoSizing = true;
+        label.fontSizeMin = Mathf.Max(12, size - 5);
+        label.fontSizeMax = size;
         label.color = new Color32(222, 239, 231, 255);
         label.richText = false;
         label.raycastTarget = false;
@@ -241,6 +302,32 @@ public sealed class CoopMenuView : MonoBehaviour
         RectTransform rect = (RectTransform)item.transform;
         rect.SetParent(parent, false);
         return rect;
+    }
+
+    private Toggle AddRuleToggle(string label, float x, float y, RoomOptions option)
+    {
+        RectTransform row = CreateRect(label, panel!);
+        Place(row, x, y, 352, 34);
+        Image background = row.gameObject.AddComponent<Image>();
+        background.color = new Color32(34, 53, 51, 255);
+        Toggle toggle = row.gameObject.AddComponent<Toggle>();
+        toggle.targetGraphic = background;
+        RectTransform check = CreateRect("Check", row);
+        Place(check, 9, 9, 16, 16);
+        Image indicator = check.gameObject.AddComponent<Image>();
+        indicator.color = new Color32(143, 216, 182, 255);
+        indicator.raycastTarget = false;
+        toggle.graphic = indicator;
+        AddLabel(row, label, 35, 2, 308, 29, 17).alignment = TextAlignmentOptions.MidlineLeft;
+        toggle.onValueChanged.AddListener(value => CoopPlugin.Lobby?.ChangeOption(option, value));
+        return toggle;
+    }
+
+    private static void Stretch(RectTransform rect)
+    {
+        rect.anchorMin = Vector2.zero;
+        rect.anchorMax = Vector2.one;
+        rect.offsetMin = rect.offsetMax = Vector2.zero;
     }
 
     private static void Place(RectTransform rect, float x, float y, float width, float height)

@@ -1,11 +1,9 @@
 ﻿using System;
 using System.Reflection;
-using System.Collections;
 using BepInEx;
 using HarmonyLib;
 using Steamworks;
 using UnityEngine;
-using UnityEngine.LowLevel;
 using UnityEngine.SceneManagement;
 
 namespace CasualtiesCoop;
@@ -14,19 +12,17 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.8";
+    internal const string PluginVersion = "0.1.9";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private static CoopPlugin? instance;
     private Harmony? harmony;
     private SteamLobby? lobby;
+    private CoopMenuView? view;
     private bool lobbyInitializationFailed;
     private bool previousRunInBackground;
-    private Coroutine? menuObserver;
-    private float nextCanvasProbe;
-    private bool reportedCanvas;
-    private float nextPlayerLoopProbe;
-    private bool reportedPlayerLoop;
+    private bool soloPreview;
+    private float nextMenuProbe;
 
     internal static SteamLobby? Lobby => instance?.lobby;
     internal static string SteamStatus { get; private set; } = "Waiting for Steam.";
@@ -37,137 +33,78 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         gameObject.hideFlags = HideFlags.HideAndDontSave;
         previousRunInBackground = Application.runInBackground;
         Application.runInBackground = true;
-        Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
 
         harmony = new Harmony(PluginId);
-        MethodInfo attach = AccessTools.Method(typeof(CoopPlugin), nameof(AttachMenu));
-        HarmonyMethod postfix = new(attach);
-        harmony.Patch(AccessTools.Method(typeof(PreRunScript), "Awake"), postfix: postfix);
-        harmony.Patch(AccessTools.Method(typeof(PreRunScript), "Update"), postfix: postfix);
+        harmony.Patch(AccessTools.PropertyGetter(typeof(AdaptiveButton), nameof(AdaptiveButton.overlayActive)),
+            prefix: OwnPatch(nameof(BlockUnderlyingMenu)));
+        harmony.Patch(AccessTools.Method(typeof(SaveSystem), nameof(SaveSystem.SaveGame)),
+            prefix: OwnPatch(nameof(AllowSave)));
         SceneManager.sceneLoaded += OnSceneLoaded;
-        Canvas.preWillRenderCanvases += ObserveCanvas;
-        InstallPlayerLoopObserver();
         AttachMenu(PreRunScript.instance);
-        menuObserver = StartCoroutine(ObserveMenus());
-        Logger.LogInfo("Native co-op menu hooks installed.");
+        Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
     }
 
-    private void InstallPlayerLoopObserver()
+    private static HarmonyMethod OwnPatch(string method) => new(AccessTools.Method(typeof(CoopPlugin), method));
+
+    private void Update()
     {
-        PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
-        PlayerLoopSystem[] phases = loop.subSystemList;
-        int update = Array.FindIndex(phases, phase => phase.type == typeof(UnityEngine.PlayerLoop.Update));
-        if (update < 0)
+        if (!view && Time.unscaledTime >= nextMenuProbe)
         {
-            Logger.LogWarning("Co-op could not locate Unity's Update phase.");
-            return;
-        }
-
-        PlayerLoopSystem[] children = phases[update].subSystemList ?? Array.Empty<PlayerLoopSystem>();
-        Array.Resize(ref children, children.Length + 1);
-        children[children.Length - 1] = new PlayerLoopSystem
-        {
-            type = typeof(CoopPlugin),
-            updateDelegate = ObservePlayerLoop
-        };
-        phases[update].subSystemList = children;
-        PlayerLoop.SetPlayerLoop(loop);
-        Logger.LogInfo("Co-op registered its Unity player-loop observer.");
-    }
-
-    private void ObservePlayerLoop()
-    {
-        if (!reportedPlayerLoop)
-        {
-            reportedPlayerLoop = true;
-            Logger.LogInfo("Co-op received a Unity player-loop frame.");
-        }
-
-        if (Time.realtimeSinceStartup >= nextPlayerLoopProbe)
-        {
-            nextPlayerLoopProbe = Time.realtimeSinceStartup + 0.35f;
-            PreRunScript menu = PreRunScript.instance;
-            AttachMenu(menu ? menu : FindObjectOfType<PreRunScript>());
+            nextMenuProbe = Time.unscaledTime + 0.35f;
+            AttachMenu(PreRunScript.instance);
         }
     }
 
-    private static void RemovePlayerLoopObserver()
+    private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
-        PlayerLoopSystem[] phases = loop.subSystemList;
-        int update = Array.FindIndex(phases, phase => phase.type == typeof(UnityEngine.PlayerLoop.Update));
-        if (update >= 0 && phases[update].subSystemList is { } children)
+        if (scene.name == "PreGen")
         {
-            phases[update].subSystemList = Array.FindAll(children, child => child.type != typeof(CoopPlugin));
-            PlayerLoop.SetPlayerLoop(loop);
-        }
-    }
-
-    private IEnumerator ObserveMenus()
-    {
-        string? lastScene = null;
-        while (true)
-        {
-            string scene = SceneManager.GetActiveScene().name;
-            PreRunScript menu = PreRunScript.instance;
-            if (!menu && SceneManager.sceneCount > 0)
-            {
-                menu = FindObjectOfType<PreRunScript>(true);
-            }
-
-            if (lastScene != scene)
-            {
-                lastScene = scene;
-                Logger.LogInfo($"Co-op menu observer: scene '{scene}', menu found: {(bool)menu}.");
-            }
-
-            AttachMenu(menu);
-            yield return new WaitForSecondsRealtime(0.35f);
-        }
-    }
-
-    private void ObserveCanvas()
-    {
-        if (!reportedCanvas)
-        {
-            reportedCanvas = true;
-            Logger.LogInfo("Co-op received a native canvas render callback.");
+            soloPreview = false;
         }
 
-        PreRunScript menu = PreRunScript.instance;
-        if (!menu && Time.realtimeSinceStartup >= nextCanvasProbe)
-        {
-            nextCanvasProbe = Time.realtimeSinceStartup + 0.5f;
-            menu = FindObjectOfType<PreRunScript>();
-        }
-
-        AttachMenu(menu);
-    }
-
-    private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
-    {
-        instance?.Logger.LogDebug($"Checking scene {scene.name} for the co-op menu.");
         AttachMenu(PreRunScript.instance);
     }
 
-    private static void AttachMenu(PreRunScript? __instance)
+    private void AttachMenu(PreRunScript? menu)
     {
-        if (!__instance || !__instance!.mainCanvas || __instance.TryGetComponent<CoopMenuView>(out _))
+        if (view || !menu || !menu!.mainCanvas)
         {
             return;
         }
 
         try
         {
-            CoopMenuView view = __instance.gameObject.AddComponent<CoopMenuView>();
-            view.Install(__instance);
-            instance?.Logger.LogInfo("Native Co-op button attached to the main menu canvas.");
+            view = menu.gameObject.AddComponent<CoopMenuView>();
+            view.Install(menu);
+            Logger.LogInfo("Native Co-op button attached to the main menu canvas.");
         }
         catch (Exception ex)
         {
-            instance?.Logger.LogError($"Co-op menu attachment failed: {ex}");
+            Logger.LogError($"Co-op menu attachment failed: {ex}");
         }
     }
+
+    private static bool BlockUnderlyingMenu(ref bool __result)
+    {
+        if (instance?.view is not { PanelOpen: true })
+        {
+            return true;
+        }
+
+        __result = true;
+        return false;
+    }
+
+    internal static void BeginSoloPreview()
+    {
+        if (instance is { } plugin)
+        {
+            plugin.soloPreview = true;
+            plugin.Logger.LogInfo("Starting a solo co-op preview with checkpoint writes disabled.");
+        }
+    }
+
+    private static bool AllowSave() => instance is not { soloPreview: true };
 
     internal static void TickMenu()
     {
@@ -219,13 +156,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
-        RemovePlayerLoopObserver();
-        if (menuObserver is not null)
-        {
-            StopCoroutine(menuObserver);
-        }
         SceneManager.sceneLoaded -= OnSceneLoaded;
-        Canvas.preWillRenderCanvases -= ObserveCanvas;
         harmony?.UnpatchSelf();
         Application.runInBackground = previousRunInBackground;
         lobby?.Dispose();
