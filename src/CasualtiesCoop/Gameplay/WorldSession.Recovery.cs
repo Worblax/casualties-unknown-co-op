@@ -1,18 +1,20 @@
 using System;
 using System.Collections.Generic;
+using CasualtiesCoop.Gameplay.Characters;
+using CasualtiesCoop.Gameplay.Recovery;
 using CasualtiesCoop.Networking;
-using Steamworks;
+using CasualtiesCoop.Session;
 using UnityEngine;
 
-namespace CasualtiesCoop.Session;
+namespace CasualtiesCoop.Gameplay;
 
-internal sealed partial class SandboxPresence
+internal sealed partial class WorldSession
 {
     private const float RecoveryRetry = 1f;
-    private readonly HashSet<CSteamID> returningPeers = new();
-    private readonly Dictionary<CSteamID, (SandboxResumeState State, byte[] Message)> recoveryReceipts = new();
+    private readonly HashSet<ulong> returningPeers = new();
+    private readonly Dictionary<ulong, (SessionRejoinState State, byte[] Message)> recoveryReceipts = new();
     private Guid recoveryAttempt;
-    private SandboxResumeState? recoveryState;
+    private SessionRejoinState? recoveryState;
     private float nextRecoverySend;
     private float nextRecoveryNotice;
     private bool positionRestored;
@@ -21,17 +23,17 @@ internal sealed partial class SandboxPresence
     internal bool WaitingForRecovery => recoveryAttempt != Guid.Empty;
     internal RoomLaunchPlan Plan => plan;
 
-    private void OnRecoveryPeerChanged(CSteamID peer, bool connected)
+    private void OnRecoveryPeerChanged(ulong peer, bool connected)
     {
-        if (lobby.Owner == lobby.LocalUser)
+        if (peers.IsHost)
         {
-            if (plan.TryGetPlayer(peer.m_SteamID, out _))
+            if (plan.TryGetPlayer(peer, out _))
             {
                 returningPeers.Add(peer);
                 recoveryReceipts.Remove(peer);
             }
         }
-        else if (peer == lobby.Owner && !connected)
+        else if (peer == peers.Host && !connected)
         {
             recoveryAttempt = Guid.NewGuid();
             recoveryState = null;
@@ -44,25 +46,25 @@ internal sealed partial class SandboxPresence
         }
     }
 
-    internal bool ReceiveRecovery(CSteamID peer, byte[] bytes)
+    internal bool ReceiveRecovery(ulong peer, byte[] bytes)
     {
-        RoomFrame frame = (RoomFrame)bytes[0];
-        if (lobby.IsHost)
+        MessageKind frame = (MessageKind)bytes[0];
+        if (peers.IsHost)
         {
-            if (!plan.TryGetPlayer(peer.m_SteamID, out _) || frame is not (RoomFrame.SandboxResumeRequest or RoomFrame.SandboxResumeApplied))
+            if (!plan.TryGetPlayer(peer, out _) || frame is not (MessageKind.SessionRejoinRequest or MessageKind.SessionRejoinApplied))
             {
                 return false;
             }
 
-            Guid attempt = SandboxResumeWire.ReadReference(bytes, frame, plan.Id);
+            Guid attempt = SessionRejoinWire.ReadReference(bytes, frame, plan.Id);
             if (attempt != Guid.Empty && Ready)
             {
-                if (frame == RoomFrame.SandboxResumeRequest)
+                if (frame == MessageKind.SessionRejoinRequest)
                 {
                     OfferRecovery(peer, attempt);
                 }
                 else if (recoveryReceipts.TryGetValue(peer, out var receipt) && receipt.State.Attempt == attempt &&
-                    lobby.Link.Send(peer, SandboxResumeWire.WriteReference(RoomFrame.SandboxResumeCommitted, plan.Id, attempt)) &&
+                    peers.Send(peer, SessionRejoinWire.WriteReference(MessageKind.SessionRejoinCommitted, plan.Id, attempt)) &&
                     returningPeers.Remove(peer))
                 {
                     log.LogInfo("A returning sandbox guest applied the snapshot. Control was released.");
@@ -71,18 +73,18 @@ internal sealed partial class SandboxPresence
             return true;
         }
 
-        if (peer != lobby.Owner)
+        if (peer != peers.Host)
         {
             return false;
         }
 
-        if (frame == RoomFrame.SandboxResumeState && SandboxResumeWire.TryReadState(bytes, plan.Id, out SandboxResumeState state) &&
+        if (frame == MessageKind.SessionRejoinState && SessionRejoinWire.TryReadState(bytes, plan.Id, out SessionRejoinState state) &&
             state.Attempt == recoveryAttempt && recoveryState is null)
         {
             RestoreFrom(state);
         }
-        else if (frame == RoomFrame.SandboxResumeCommitted && recoveryAcknowledged && WaitingForRecovery &&
-            SandboxResumeWire.ReadReference(bytes, frame, plan.Id) == recoveryAttempt)
+        else if (frame == MessageKind.SessionRejoinCommitted && recoveryAcknowledged && WaitingForRecovery &&
+            SessionRejoinWire.ReadReference(bytes, frame, plan.Id) == recoveryAttempt)
         {
             recoveryAttempt = Guid.Empty;
             recoveryState = null;
@@ -96,7 +98,7 @@ internal sealed partial class SandboxPresence
         return true;
     }
 
-    private void OfferRecovery(CSteamID peer, Guid attempt)
+    private void OfferRecovery(ulong peer, Guid attempt)
     {
         if (!returningPeers.Contains(peer))
         {
@@ -105,13 +107,13 @@ internal sealed partial class SandboxPresence
 
         if (!recoveryReceipts.TryGetValue(peer, out var receipt) || receipt.State.Attempt != attempt)
         {
-            remotes.TryGetValue(peer.m_SteamID, out RemotePlayer? remote);
-            SandboxPosition previous = remote?.Pose ?? default;
+            remotes.TryGetValue(peer, out RemotePlayer? remote);
+            CharacterPose previous = remote?.Pose ?? default;
             bool hasPosition = previous.Player != 0 && IsWorldPosition(new Vector2(previous.X, previous.Y));
-            SandboxResumeState state = new(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
-                lights.LastSequence(peer.m_SteamID), Items.LastOperation(peer.m_SteamID), Fluids.LastDrink(peer),
+            SessionRejoinState state = new(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
+                lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer),
                 previous.X, previous.Y, hasPosition);
-            if (SandboxResumeWire.WriteState(state) is not { } message)
+            if (SessionRejoinWire.WriteState(state) is not { } message)
             {
                 return;
             }
@@ -121,10 +123,10 @@ internal sealed partial class SandboxPresence
             Fluids.ResendNearby(peer);
             log.LogInfo("Preparing the reserved sandbox seat for a returning guest.");
         }
-        lobby.Link.Send(peer, receipt.Message);
+        peers.Send(peer, receipt.Message);
     }
 
-    internal void RestoreFrom(SandboxResumeState state)
+    internal void RestoreFrom(SessionRejoinState state)
     {
         recoveryAttempt = state.Attempt;
         recoveryState = state;
@@ -168,7 +170,7 @@ internal sealed partial class SandboxPresence
 
         if (recoveryState is not { } state)
         {
-            SendRecovery(RoomFrame.SandboxResumeRequest, now);
+            SendRecovery(MessageKind.SessionRejoinRequest, now);
             return;
         }
 
@@ -185,16 +187,16 @@ internal sealed partial class SandboxPresence
 
         if (Items.RecoveryComplete() && (!state.HasPosition || Fluids.HasSnapshotNear(new Vector2(state.X, state.Y))))
         {
-            recoveryAcknowledged |= SendRecovery(RoomFrame.SandboxResumeApplied, now);
+            recoveryAcknowledged |= SendRecovery(MessageKind.SessionRejoinApplied, now);
         }
     }
 
-    private bool SendRecovery(RoomFrame frame, float now)
+    private bool SendRecovery(MessageKind frame, float now)
     {
         if (now >= nextRecoverySend)
         {
             nextRecoverySend = now + RecoveryRetry;
-            return lobby.Link.Send(lobby.Owner, SandboxResumeWire.WriteReference(frame, plan.Id, recoveryAttempt));
+            return peers.Send(peers.Host, SessionRejoinWire.WriteReference(frame, plan.Id, recoveryAttempt));
         }
         return false;
     }

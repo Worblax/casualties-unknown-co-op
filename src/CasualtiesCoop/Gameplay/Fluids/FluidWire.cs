@@ -1,7 +1,8 @@
+using CasualtiesCoop.Networking;
 using System;
 using System.Buffers.Binary;
 
-namespace CasualtiesCoop.Networking;
+namespace CasualtiesCoop.Gameplay.Fluids;
 
 internal static class FluidWire
 {
@@ -13,7 +14,7 @@ internal static class FluidWire
 
     internal static byte[] WriteChunk(Guid session, int x, int y, uint version, ReadOnlySpan<byte> cells)
     {
-        byte[] frame = SandboxWire.NewFrame(RoomFrame.FluidChunk, session, HeaderSize + PackedSize);
+        byte[] frame = GameplayWire.NewFrame(MessageKind.FluidChunk, session, HeaderSize + PackedSize);
         WriteCell(frame.AsSpan(17), x, y);
         BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(21), version);
         cells.CopyTo(frame.AsSpan(HeaderSize));
@@ -24,7 +25,7 @@ internal static class FluidWire
     {
         x = y = offset = 0;
         version = 0;
-        if (frame.Length != HeaderSize + PackedSize || !SandboxWire.HasHeader(frame, RoomFrame.FluidChunk, session))
+        if (frame.Length != HeaderSize + PackedSize || !GameplayWire.HasHeader(frame, MessageKind.FluidChunk, session))
         {
             return false;
         }
@@ -58,22 +59,22 @@ internal static class FluidWire
         return (byte)(value & 7);
     }
 
-    internal static byte[] WriteDrink(RoomFrame frame, Guid session, ulong operation, int x, int y, byte liquid)
+    internal static byte[] WriteDrink(MessageKind frame, Guid session, ulong operation, int x, int y, byte liquid)
     {
-        byte[] message = SandboxWire.NewFrame(frame, session, DrinkSize);
+        byte[] message = GameplayWire.NewFrame(frame, session, DrinkSize);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), operation);
         WriteCell(message.AsSpan(25), x, y);
         message[29] = liquid;
         return message;
     }
 
-    internal static bool TryReadDrink(byte[] message, RoomFrame frame, Guid session, out ulong operation,
+    internal static bool TryReadDrink(byte[] message, MessageKind frame, Guid session, out ulong operation,
         out int x, out int y, out byte liquid)
     {
         operation = 0;
         x = y = 0;
         liquid = 0;
-        if (message.Length != DrinkSize || !SandboxWire.HasHeader(message, frame, session))
+        if (message.Length != DrinkSize || !GameplayWire.HasHeader(message, frame, session))
         {
             return false;
         }
@@ -86,7 +87,7 @@ internal static class FluidWire
 
     internal static byte[] WritePush(Guid session, int x, int y, byte direction)
     {
-        byte[] message = SandboxWire.NewFrame(RoomFrame.FluidPush, session, PushSize);
+        byte[] message = GameplayWire.NewFrame(MessageKind.FluidPush, session, PushSize);
         WriteCell(message.AsSpan(17), x, y);
         message[21] = direction;
         return message;
@@ -96,7 +97,7 @@ internal static class FluidWire
     {
         x = y = 0;
         direction = 0;
-        if (message.Length != PushSize || !SandboxWire.HasHeader(message, RoomFrame.FluidPush, session))
+        if (message.Length != PushSize || !GameplayWire.HasHeader(message, MessageKind.FluidPush, session))
         {
             return false;
         }

@@ -1,11 +1,12 @@
 using System;
 using System.Reflection;
+using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Audio;
 
-internal static class SandboxAudioHooks
+internal static class CharacterAudioHooks
 {
     private static int emitterDepth;
     private static int resourceDepth;
@@ -33,10 +34,10 @@ internal static class SandboxAudioHooks
             prefix: Patch(nameof(EnterTalker)), finalizer: Patch(nameof(LeaveEmitter)));
     }
 
-    private static HarmonyMethod Patch(string name) => new(typeof(SandboxAudioHooks), name);
+    private static HarmonyMethod Patch(string name) => new(typeof(CharacterAudioHooks), name);
 
     private static bool IsLocal(Body? body) =>
-        CoopPlugin.ActiveSandbox is not null && body && PlayerCamera.main && body == PlayerCamera.main.body;
+        CoopRuntime.ActiveWorld is not null && body && PlayerCamera.main && body == PlayerCamera.main.body;
 
     private static void EnterBody(Body __instance, AudioSource ___slideSource, out (int Depth, bool Sliding) __state)
     {
@@ -51,7 +52,7 @@ internal static class SandboxAudioHooks
     {
         if (!__state.Sliding && ___slideSource && ___slideSource.isPlaying && ___slideSource.clip && IsLocal(__instance))
         {
-            CoopPlugin.ActiveSandbox?.CaptureSound("slide", ___slideSource.clip, __instance.transform.position, ___slideSource);
+            CoopRuntime.ActiveWorld?.CaptureSound("slide", ___slideSource.clip, __instance.transform.position, ___slideSource);
         }
     }
 
@@ -87,7 +88,7 @@ internal static class SandboxAudioHooks
 
     private static void Capture(string? key, Vector2 position, Transform? follow, AudioSource? playback)
     {
-        if (CoopPlugin.ActiveSandbox is not { } sandbox || !playback || !playback!.clip ||
+        if (CoopRuntime.ActiveWorld is not { } sandbox || !playback || !playback!.clip ||
             !PlayerCamera.main || !PlayerCamera.main.body)
         {
             return;

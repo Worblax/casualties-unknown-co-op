@@ -1,16 +1,20 @@
 using System;
 using System.Collections.Generic;
 using BepInEx.Logging;
-using CasualtiesCoop.Game;
-using CasualtiesCoop.Lobby;
+using CasualtiesCoop.Gameplay.Audio;
+using CasualtiesCoop.Gameplay.Characters;
+using CasualtiesCoop.Gameplay.Fluids;
+using CasualtiesCoop.Gameplay.Items;
+using CasualtiesCoop.Gameplay.Lighting;
 using CasualtiesCoop.Networking;
+using CasualtiesCoop.Session;
 using Steamworks;
 using TMPro;
 using UnityEngine;
 
-namespace CasualtiesCoop.Session;
+namespace CasualtiesCoop.Gameplay;
 
-internal sealed partial class SandboxPresence : IDisposable
+internal sealed partial class WorldSession : IDisposable
 {
     private const float UpdateInterval = 0.067f;
     private const float PoseTimeout = 2f;
@@ -18,43 +22,43 @@ internal sealed partial class SandboxPresence : IDisposable
 
     private sealed class RemotePlayer
     {
-        internal SandboxPosition Pose;
+        internal CharacterPose Pose;
         internal float UpdatedAt;
         internal uint SoundSequence;
         internal float SoundWindow;
         internal int SoundCount;
-        internal RemoteBodyView? View;
+        internal RemoteCharacterView? View;
     }
 
-    private readonly SteamLobby lobby;
+    private readonly SessionPeers peers;
     private readonly RoomLaunchPlan plan;
     private readonly TMP_FontAsset font;
     private readonly ManualLogSource log;
     private readonly Dictionary<ulong, RemotePlayer> remotes = new();
-    private readonly SandboxAudio audio = new();
-    private readonly SandboxLights lights;
+    private readonly SpatialCharacterAudio audio = new();
+    private readonly LightReplication lights;
     private uint sequence;
     private uint soundSequence;
     private float nextUpdate;
 
     internal bool Ready { get; private set; }
-    internal SandboxItems Items { get; }
-    internal SandboxFluids Fluids { get; }
+    internal SharedItemReplication Items { get; }
+    internal TerrainFluidReplication Fluids { get; }
 
-    internal SandboxPresence(SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font, ManualLogSource log)
+    internal WorldSession(SessionPeers peers, RoomLaunchPlan plan, TMP_FontAsset font, ManualLogSource log)
     {
-        this.lobby = lobby;
+        this.peers = peers;
         this.plan = plan;
         this.font = font;
         this.log = log;
-        Items = new SandboxItems(lobby, plan, TryGetPosition);
-        Fluids = new SandboxFluids(lobby, plan, TryGetPosition);
-        lights = new SandboxLights(lobby, plan, TryGetPosition, SendLocal, Broadcast);
-        lobby.Link.PeerChanged += OnRecoveryPeerChanged;
+        Items = new SharedItemReplication(peers, TryGetPosition);
+        Fluids = new TerrainFluidReplication(peers, TryGetPosition);
+        lights = new LightReplication(peers, TryGetPosition, SendLocal, Broadcast);
+        peers.ConnectionChanged += OnRecoveryPeerChanged;
     }
 
-    internal bool IsParticipant(CSteamID player, Guid launchId) =>
-        launchId == plan.Id && plan.TryGetPlayer(player.m_SteamID, out _);
+    internal bool IsParticipant(ulong player, Guid launchId) =>
+        launchId == plan.Id && plan.TryGetPlayer(player, out _);
 
     internal void Tick()
     {
@@ -66,12 +70,24 @@ internal sealed partial class SandboxPresence : IDisposable
         Ready = true;
         Body body = PlayerCamera.main.body;
         TickRecovery(body);
+        Items.Tick(body);
+        Fluids.Tick();
+    }
+
+    internal void TickPresentation()
+    {
+        if (!Ready || !PlayerCamera.main || !PlayerCamera.main.body)
+        {
+            return;
+        }
+
+        Body body = PlayerCamera.main.body;
         float now = Time.unscaledTime;
         Vector2 position = body.transform.position;
         if (!WaitingForRecovery && now >= nextUpdate)
         {
             nextUpdate = now + UpdateInterval;
-            SendLocal(SandboxWire.WritePosition(plan.Id, CapturePose(body, position)));
+            SendLocal(CharacterPoseWire.Write(plan.Id, CapturePose(body, position)));
         }
 
         lights.Tick(body);
@@ -87,20 +103,18 @@ internal sealed partial class SandboxPresence : IDisposable
 
             if (remote.View is null && plan.TryGetPlayer(entry.Key, out LaunchPlayer member))
             {
-                remote.View = new RemoteBodyView(member.Character, SteamFriends.GetFriendPersonaName(new CSteamID(entry.Key)), font);
+                remote.View = new RemoteCharacterView(member.Character, SteamFriends.GetFriendPersonaName(new CSteamID(entry.Key)), font);
             }
             remote.View?.Apply(remote.Pose, age);
         }
 
         audio.Tick(position);
-        Items.Tick(body);
-        Fluids.Tick();
     }
 
-    private SandboxPosition CapturePose(Body body, Vector2 origin)
+    private CharacterPose CapturePose(Body body, Vector2 origin)
     {
-        int count = Math.Min(body.limbs.Length, SandboxWire.MaxLimbs);
-        SandboxLimb[] limbs = new SandboxLimb[count];
+        int count = Math.Min(body.limbs.Length, CharacterPoseWire.MaxLimbs);
+        LimbPose[] limbs = new LimbPose[count];
         for (int index = 0; index < count; index++)
         {
             Limb limb = body.limbs[index];
@@ -114,39 +128,43 @@ internal sealed partial class SandboxPresence : IDisposable
             Vector3 scale = transform.lossyScale;
             if (offset.sqrMagnitude <= 256f * 256f)
             {
-                limbs[index] = new SandboxLimb(offset.x, offset.y, transform.eulerAngles.z,
+                limbs[index] = new LimbPose(offset.x, offset.y, transform.eulerAngles.z,
                     Mathf.Min(8, Mathf.Abs(scale.x)), Mathf.Min(8, Mathf.Abs(scale.y)), limb.gameObject.activeInHierarchy);
             }
         }
 
         Vector2 velocity = body.standing || count < 3 || !body.limbs[2] ? body.rb.velocity : body.limbs[2].rb.velocity;
-        return new SandboxPosition(lobby.LocalUser.m_SteamID, ++sequence, origin.x, origin.y,
+        return new CharacterPose(peers.LocalPlayer, ++sequence, origin.x, origin.y,
             Mathf.Clamp(velocity.x, -1000f, 1000f), Mathf.Clamp(velocity.y, -1000f, 1000f), body.isRight, body.standing, limbs);
     }
 
-    internal bool Receive(CSteamID sender, byte[] bytes)
+    internal bool Receive(ulong sender, byte[] bytes)
     {
-        RoomFrame frame = (RoomFrame)bytes[0];
-        if (lobby.IsHost && returningPeers.Contains(sender) &&
-            (frame != RoomFrame.ItemSyncRequest || !recoveryReceipts.ContainsKey(sender)))
+        MessageKind frame = (MessageKind)bytes[0];
+        if (frame is >= MessageKind.SessionRejoinRequest and <= MessageKind.SessionRejoinCommitted)
+        {
+            return ReceiveRecovery(sender, bytes);
+        }
+        if (peers.IsHost && returningPeers.Contains(sender) &&
+            (frame != MessageKind.ItemSyncRequest || !recoveryReceipts.ContainsKey(sender)))
         {
             return true;
         }
 
         return frame switch
         {
-            RoomFrame.SandboxPosition => ReceivePose(sender, bytes),
-            RoomFrame.SandboxSound => ReceiveSound(sender, bytes),
-            RoomFrame.FluidChunk or RoomFrame.FluidPush or RoomFrame.FluidDrinkRequest or RoomFrame.FluidDrinkResult =>
-                !Ready || (WaitingForRecovery && frame == RoomFrame.FluidPush) || Fluids.Receive(sender, bytes),
-            RoomFrame.SandboxLights => lights.Receive(sender, bytes),
+            MessageKind.CharacterPose => ReceivePose(sender, bytes),
+            MessageKind.CharacterSound => ReceiveSound(sender, bytes),
+            MessageKind.FluidChunk or MessageKind.FluidPush or MessageKind.FluidDrinkRequest or MessageKind.FluidDrinkResult =>
+                !Ready || (WaitingForRecovery && frame == MessageKind.FluidPush) || Fluids.Receive(sender, bytes),
+            MessageKind.LightSnapshot => lights.Receive(sender, bytes),
             _ => Items.Receive(sender, bytes)
         };
     }
 
-    private bool ReceivePose(CSteamID sender, byte[] bytes)
+    private bool ReceivePose(ulong sender, byte[] bytes)
     {
-        if (!SandboxWire.TryReadPosition(bytes, plan.Id, out SandboxPosition pose))
+        if (!CharacterPoseWire.TryRead(bytes, plan.Id, out CharacterPose pose))
         {
             return true;
         }
@@ -168,7 +186,7 @@ internal sealed partial class SandboxPresence : IDisposable
 
         remote.Pose = pose;
         remote.UpdatedAt = Time.unscaledTime;
-        if (lobby.IsHost)
+        if (peers.IsHost)
         {
             Broadcast(bytes, sender);
         }
@@ -178,15 +196,15 @@ internal sealed partial class SandboxPresence : IDisposable
     internal bool TryGetPosition(ulong player, out Vector2 position)
     {
         position = default;
-        if (player == lobby.LocalUser.m_SteamID && PlayerCamera.main && PlayerCamera.main.body)
+        if (player == peers.LocalPlayer && PlayerCamera.main && PlayerCamera.main.body)
         {
             position = PlayerCamera.main.body.transform.position;
             return Ready;
         }
 
-        if (lobby.IsHost && returningPeers.Contains(new CSteamID(player)))
+        if (peers.IsHost && returningPeers.Contains(player))
         {
-            if (recoveryReceipts.TryGetValue(new CSteamID(player), out var receipt) && receipt.State.HasPosition)
+            if (recoveryReceipts.TryGetValue(player, out var receipt) && receipt.State.HasPosition)
             {
                 position = new Vector2(receipt.State.X, receipt.State.Y);
                 return true;
@@ -211,17 +229,17 @@ internal sealed partial class SandboxPresence : IDisposable
 
         Body body = PlayerCamera.main.body;
         string clipKey = key ?? audio.GetClipKey(clip, body);
-        var sound = new SandboxSound(lobby.LocalUser.m_SteamID, ++soundSequence, origin.x, origin.y,
+        var sound = new CharacterSound(peers.LocalPlayer, ++soundSequence, origin.x, origin.y,
             Mathf.Clamp01(playback.volume), Mathf.Clamp(playback.pitch, 0.05f, 3f), clipKey);
-        if (SandboxWire.WriteSound(plan.Id, sound) is { } frame)
+        if (CharacterSoundWire.Write(plan.Id, sound) is { } frame)
         {
             SendLocal(frame);
         }
     }
 
-    private bool ReceiveSound(CSteamID sender, byte[] bytes)
+    private bool ReceiveSound(ulong sender, byte[] bytes)
     {
-        if (!SandboxWire.TryReadSound(bytes, plan.Id, out SandboxSound sound))
+        if (!CharacterSoundWire.TryRead(bytes, plan.Id, out CharacterSound sound))
         {
             return true;
         }
@@ -254,37 +272,37 @@ internal sealed partial class SandboxPresence : IDisposable
         {
             audio.Play(sound, member.Character, PlayerCamera.main.body.transform.position);
         }
-        if (lobby.IsHost)
+        if (peers.IsHost)
         {
             Broadcast(bytes, sender);
         }
         return true;
     }
 
-    private bool IsExpectedSource(CSteamID sender, ulong player) =>
-        (lobby.IsHost ? player == sender.m_SteamID : sender == lobby.Owner) &&
-        player != lobby.LocalUser.m_SteamID && plan.TryGetPlayer(player, out _);
+    private bool IsExpectedSource(ulong sender, ulong player) =>
+        (peers.IsHost ? player == sender : sender == peers.Host) &&
+        player != peers.LocalPlayer && plan.TryGetPlayer(player, out _);
 
     private void SendLocal(byte[] frame)
     {
-        if (lobby.IsHost)
+        if (peers.IsHost)
         {
-            Broadcast(frame, lobby.LocalUser);
+            Broadcast(frame, peers.LocalPlayer);
         }
         else if (!WaitingForRecovery)
         {
-            lobby.Link.Send(lobby.Owner, frame, reliable: false);
+            peers.Send(peers.Host, frame, reliable: false);
         }
     }
 
-    private void Broadcast(byte[] frame, CSteamID except)
+    private void Broadcast(byte[] frame, ulong except)
     {
         foreach (LaunchPlayer player in plan.Players)
         {
-            CSteamID id = new(player.SteamId);
-            if (id != lobby.LocalUser && id != except)
+            ulong id = player.SteamId;
+            if (id != peers.LocalPlayer && id != except)
             {
-                lobby.Link.Send(id, frame, reliable: false);
+                peers.Send(id, frame, reliable: false);
             }
         }
     }
@@ -292,7 +310,7 @@ internal sealed partial class SandboxPresence : IDisposable
     public void Dispose()
     {
         Ready = false;
-        lobby.Link.PeerChanged -= OnRecoveryPeerChanged;
+        peers.ConnectionChanged -= OnRecoveryPeerChanged;
         Items.Dispose();
         Fluids.Dispose();
         lights.Dispose();
@@ -301,5 +319,6 @@ internal sealed partial class SandboxPresence : IDisposable
         {
             remote.View?.Dispose();
         }
+        peers.Dispose();
     }
 }

@@ -1,22 +1,19 @@
 using System;
 using System.Collections.Generic;
-using CasualtiesCoop.Game;
-using CasualtiesCoop.Lobby;
+using CasualtiesCoop.Gameplay.Characters;
 using CasualtiesCoop.Networking;
-using Steamworks;
+using CasualtiesCoop.Session;
 using UnityEngine;
 
-namespace CasualtiesCoop.Session;
+namespace CasualtiesCoop.Gameplay.Items;
 
-internal sealed class SandboxItems : IDisposable
+internal sealed class SharedItemReplication : IDisposable
 {
     private const int ItemLimit = 256;
     private const float UpdateInterval = 0.10f;
     private const float RetryInterval = 1f;
     private const float ReconcileInterval = 8f;
     private const float PickupRange = 10f;
-
-    internal delegate bool PlayerPosition(ulong player, out Vector2 position);
 
     private sealed class Entry
     {
@@ -31,10 +28,9 @@ internal sealed class SandboxItems : IDisposable
         internal bool SnapNextMotion;
     }
 
-    private readonly SteamLobby lobby;
-    private readonly RoomLaunchPlan plan;
-    private readonly PlayerPosition playerPosition;
-    private readonly SandboxItemObjects objects = new();
+    private readonly SessionPeers peers;
+    private readonly PlayerPositionLookup playerPosition;
+    private readonly SharedItemObjects objects = new();
     private readonly bool host;
     private readonly Dictionary<ulong, Entry> entries = new();
     private readonly Dictionary<int, Entry> sceneItems = new();
@@ -50,16 +46,15 @@ internal sealed class SandboxItems : IDisposable
     private bool restoringFreshBody;
     private bool applying;
 
-    internal SandboxItems(SteamLobby lobby, RoomLaunchPlan plan, PlayerPosition playerPosition)
+    internal SharedItemReplication(SessionPeers peers, PlayerPositionLookup playerPosition)
     {
-        this.lobby = lobby;
-        this.plan = plan;
+        this.peers = peers;
         this.playerPosition = playerPosition;
-        host = lobby.IsHost;
-        lobby.Link.PeerChanged += OnPeerChanged;
+        host = peers.IsHost;
+        peers.ConnectionChanged += OnPeerChanged;
     }
 
-    private ulong LocalId => lobby.LocalUser.m_SteamID;
+    private ulong LocalId => peers.LocalPlayer;
 
     internal ulong LastOperation(ulong player) => receipts.TryGetValue(player, out var receipt) ? receipt.Operation : 0;
 
@@ -94,7 +89,7 @@ internal sealed class SandboxItems : IDisposable
     {
         body = localBody;
         float now = Time.unscaledTime;
-        if (lobby.IsHost)
+        if (peers.IsHost)
         {
             if (now >= nextUpdate)
             {
@@ -122,7 +117,7 @@ internal sealed class SandboxItems : IDisposable
         if (now >= nextSync)
         {
             nextSync = now + (synced ? ReconcileInterval : RetryInterval);
-            lobby.Link.Send(lobby.Owner, SandboxWire.NewFrame(RoomFrame.ItemSyncRequest, plan.Id, 17));
+            peers.Send(peers.Host, GameplayWire.NewFrame(MessageKind.ItemSyncRequest, peers.SessionId, 17));
         }
 
         if (synced && pending is { } request && now >= nextResend)
@@ -187,7 +182,7 @@ internal sealed class SandboxItems : IDisposable
 
     internal bool HandleWorldUpdate(Item item)
     {
-        if (!lobby.IsHost || !TryGetEntry(item, out Entry entry) || entry.State.Owner != 0 || entry.State.Removed)
+        if (!peers.IsHost || !TryGetEntry(item, out Entry entry) || entry.State.Owner != 0 || entry.State.Removed)
         {
             return true;
         }
@@ -223,7 +218,7 @@ internal sealed class SandboxItems : IDisposable
 
     private bool IsNearAPlayer(Vector2 at)
     {
-        foreach (LaunchPlayer player in plan.Players)
+        foreach (LaunchPlayer player in peers.Players)
         {
             if (playerPosition(player.SteamId, out Vector2 position) && (position - at).sqrMagnitude <= 60f * 60f)
             {
@@ -239,7 +234,7 @@ internal sealed class SandboxItems : IDisposable
 
     private bool CanRequest()
     {
-        if (lobby.IsHost || (synced && pending is null && lobby.Link.GetState(lobby.Owner) == RoomLinkState.Verified))
+        if (peers.IsHost || (synced && pending is null && peers.IsVerified(peers.Host)))
         {
             return true;
         }
@@ -258,7 +253,7 @@ internal sealed class SandboxItems : IDisposable
             Slot = (byte)slot,
             Location = at
         };
-        if (lobby.IsHost)
+        if (peers.IsHost)
         {
             FinishLocal(request, Execute(LocalId, request));
         }
@@ -272,30 +267,30 @@ internal sealed class SandboxItems : IDisposable
     private void SendRequest(SharedItemRequest request)
     {
         nextResend = Time.unscaledTime + RetryInterval;
-        lobby.Link.Send(lobby.Owner, ItemWire.WriteRequest(plan.Id, request));
+        peers.Send(peers.Host, ItemWire.WriteRequest(peers.SessionId, request));
     }
 
-    internal bool Receive(CSteamID sender, byte[] bytes)
+    internal bool Receive(ulong sender, byte[] bytes)
     {
-        RoomFrame frame = (RoomFrame)bytes[0];
-        if (lobby.IsHost)
+        MessageKind frame = (MessageKind)bytes[0];
+        if (peers.IsHost)
         {
-            if (!plan.TryGetPlayer(sender.m_SteamID, out _))
+            if (!peers.TryGetPlayer(sender, out _))
             {
                 return false;
             }
 
             switch (frame)
             {
-                case RoomFrame.ItemSyncRequest:
-                    if (body && bytes.Length == 17 && SandboxWire.HasHeader(bytes, frame, plan.Id))
+                case MessageKind.ItemSyncRequest:
+                    if (body && bytes.Length == 17 && GameplayWire.HasHeader(bytes, frame, peers.SessionId))
                     {
                         SendSnapshot(sender);
                     }
                     return true;
 
-                case RoomFrame.ItemRequest:
-                    if (body && ItemWire.TryReadRequest(bytes, plan.Id, out SharedItemRequest request))
+                case MessageKind.ItemRequest:
+                    if (body && ItemWire.TryReadRequest(bytes, peers.SessionId, out SharedItemRequest request))
                     {
                         Respond(sender, request);
                     }
@@ -306,23 +301,23 @@ internal sealed class SandboxItems : IDisposable
             }
         }
 
-        if (sender != lobby.Owner)
+        if (sender != peers.Host)
         {
             return false;
         }
 
         switch (frame)
         {
-            case RoomFrame.ItemState:
-            case RoomFrame.ItemMotion:
-                if (ItemWire.TryReadState(bytes, frame, plan.Id, out SharedItemState state))
+            case MessageKind.ItemState:
+            case MessageKind.ItemMotion:
+                if (ItemWire.TryReadState(bytes, frame, peers.SessionId, out SharedItemState state))
                 {
                     ReceiveState(frame, state);
                 }
                 return true;
 
-            case RoomFrame.ItemResult:
-                if (ItemWire.TryReadResult(bytes, plan.Id, out ulong operation, out ItemDecision decision) &&
+            case MessageKind.ItemResult:
+                if (ItemWire.TryReadResult(bytes, peers.SessionId, out ulong operation, out ItemDecision decision) &&
                     pending is { } local && local.Operation == operation)
                 {
                     pending = null;
@@ -330,8 +325,8 @@ internal sealed class SandboxItems : IDisposable
                 }
                 return true;
 
-            case RoomFrame.ItemSyncDone:
-                if (bytes.Length == 17 && SandboxWire.HasHeader(bytes, frame, plan.Id))
+            case MessageKind.ItemSyncDone:
+                if (bytes.Length == 17 && GameplayWire.HasHeader(bytes, frame, peers.SessionId))
                 {
                     synced = true;
                 }
@@ -342,21 +337,21 @@ internal sealed class SandboxItems : IDisposable
         }
     }
 
-    private void SendSnapshot(CSteamID player)
+    private void SendSnapshot(ulong player)
     {
         foreach (Entry item in entries.Values)
         {
-            if (!lobby.Link.Send(player, ItemWire.WriteState(RoomFrame.ItemState, plan.Id, item.State)))
+            if (!peers.Send(player, ItemWire.WriteState(MessageKind.ItemState, peers.SessionId, item.State)))
             {
                 return;
             }
         }
-        lobby.Link.Send(player, SandboxWire.NewFrame(RoomFrame.ItemSyncDone, plan.Id, 17));
+        peers.Send(player, GameplayWire.NewFrame(MessageKind.ItemSyncDone, peers.SessionId, 17));
     }
 
-    private void Respond(CSteamID sender, SharedItemRequest request)
+    private void Respond(ulong sender, SharedItemRequest request)
     {
-        ulong player = sender.m_SteamID;
+        ulong player = sender;
         if (!receipts.TryGetValue(player, out var receipt) || request.Operation > receipt.Operation)
         {
             receipt = (request.Operation, Execute(player, request));
@@ -367,9 +362,9 @@ internal sealed class SandboxItems : IDisposable
         {
             if (entries.TryGetValue(request.ItemId, out Entry item))
             {
-                lobby.Link.Send(sender, ItemWire.WriteState(RoomFrame.ItemState, plan.Id, item.State));
+                peers.Send(sender, ItemWire.WriteState(MessageKind.ItemState, peers.SessionId, item.State));
             }
-            lobby.Link.Send(sender, ItemWire.WriteResult(plan.Id, request.Operation, receipt.Decision));
+            peers.Send(sender, ItemWire.WriteResult(peers.SessionId, request.Operation, receipt.Decision));
         }
     }
 
@@ -407,8 +402,8 @@ internal sealed class SandboxItems : IDisposable
             return ItemDecision.OutOfReach;
         }
 
-        if (!plan.TryGetPlayer(player, out LaunchPlayer member) ||
-            RemoteBodyView.LoadCharacter(member.Character) is not { } template || request.Slot >= template.slots.Length ||
+        if (!peers.TryGetPlayer(player, out LaunchPlayer member) ||
+            RemoteCharacterView.LoadCharacter(member.Character) is not { } template || request.Slot >= template.slots.Length ||
             (item.Stats.onlyHoldInHands && !template.slots[request.Slot].isHand) || IsOccupied(player, request.Slot))
         {
             return ItemDecision.SlotOccupied;
@@ -553,7 +548,7 @@ internal sealed class SandboxItems : IDisposable
                         Definition = item.id,
                         Slot = ItemWire.NoSlot,
                         Condition = item.condition,
-                        Location = SandboxItemObjects.Read(item)
+                        Location = SharedItemObjects.Read(item)
                     }
                 };
                 Track(entry, item);
@@ -585,15 +580,6 @@ internal sealed class SandboxItems : IDisposable
             {
                 SampleWorldItem(entry, now);
             }
-            else if (entry.State.Owner != LocalId && !lobby.HasMember(new CSteamID(entry.State.Owner)))
-            {
-                ItemLocation last = entry.State.Location;
-                if (playerPosition(entry.State.Owner, out Vector2 at))
-                {
-                    last = new ItemLocation(at.x, at.y, last.Angle);
-                }
-                PutInWorld(entry, last);
-            }
         }
     }
 
@@ -601,7 +587,7 @@ internal sealed class SandboxItems : IDisposable
     {
         Item item = entry.Item!;
         ItemLocation old = entry.State.Location;
-        ItemLocation at = SandboxItemObjects.Read(item);
+        ItemLocation at = SharedItemObjects.Read(item);
         bool moving = new Vector2(at.VelocityX, at.VelocityY).sqrMagnitude > 0.0025f || Mathf.Abs(at.Spin) > 0.5f;
         bool stopped = entry.WasMoving && !moving;
         bool changed = new Vector2(at.X - old.X, at.Y - old.Y).sqrMagnitude > 0.0001f ||
@@ -625,12 +611,12 @@ internal sealed class SandboxItems : IDisposable
 
     private void Publish(SharedItemState state, bool reliable)
     {
-        byte[] message = ItemWire.WriteState(reliable ? RoomFrame.ItemState : RoomFrame.ItemMotion, plan.Id, state);
-        foreach (LaunchPlayer participant in plan.Players)
+        byte[] message = ItemWire.WriteState(reliable ? MessageKind.ItemState : MessageKind.ItemMotion, peers.SessionId, state);
+        foreach (LaunchPlayer participant in peers.Players)
         {
             if (participant.SteamId != LocalId)
             {
-                lobby.Link.Send(new CSteamID(participant.SteamId), message, reliable);
+                peers.Send(participant.SteamId, message, reliable);
             }
         }
     }
@@ -644,16 +630,16 @@ internal sealed class SandboxItems : IDisposable
 
     private bool TryGetEntry(Item item, out Entry entry) => sceneItems.TryGetValue(item.GetInstanceID(), out entry);
 
-    private void ReceiveState(RoomFrame frame, SharedItemState state)
+    private void ReceiveState(MessageKind frame, SharedItemState state)
     {
-        if (state.Owner != 0 && !plan.TryGetPlayer(state.Owner, out _))
+        if (state.Owner != 0 && !peers.TryGetPlayer(state.Owner, out _))
         {
             return;
         }
 
         if (!entries.TryGetValue(state.Id, out Entry entry))
         {
-            if (frame == RoomFrame.ItemState && entries.Count < ItemLimit)
+            if (frame == MessageKind.ItemState && entries.Count < ItemLimit)
             {
                 entries.Add(state.Id, new Entry { State = state });
             }
@@ -662,7 +648,7 @@ internal sealed class SandboxItems : IDisposable
 
         if (entry.State.Definition != state.Definition || state.Revision < entry.State.Revision ||
             (state.Revision == entry.State.Revision && state.Sample < entry.State.Sample) ||
-            (frame == RoomFrame.ItemMotion && (state.Revision != entry.State.Revision || entry.State.Owner != 0 ||
+            (frame == MessageKind.ItemMotion && (state.Revision != entry.State.Revision || entry.State.Owner != 0 ||
                 state.Owner != 0 || state.Removed || entry.State.Removed)))
         {
             return;
@@ -786,9 +772,9 @@ internal sealed class SandboxItems : IDisposable
         }
     }
 
-    private void OnPeerChanged(CSteamID player, bool _)
+    private void OnPeerChanged(ulong player, bool _)
     {
-        if (player == lobby.Owner && !lobby.IsHost)
+        if (player == peers.Host && !peers.IsHost)
         {
             synced = false;
             nextSync = 0;
@@ -797,7 +783,7 @@ internal sealed class SandboxItems : IDisposable
 
     public void Dispose()
     {
-        lobby.Link.PeerChanged -= OnPeerChanged;
+        peers.ConnectionChanged -= OnPeerChanged;
         if (!host)
         {
             foreach (Entry entry in entries.Values)

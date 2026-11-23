@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
-using CasualtiesCoop.Networking;
+using CasualtiesCoop.Gameplay.Characters;
 using UnityEngine;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Audio;
 
-internal sealed class SandboxAudio : IDisposable
+internal sealed class SpatialCharacterAudio : IDisposable
 {
     private const float HearDistance = 30f;
     private const int MaxPlayback = 48;
@@ -46,7 +46,7 @@ internal sealed class SandboxAudio : IDisposable
         }
     }
 
-    internal void Play(SandboxSound sound, byte character, Vector2 listener)
+    internal void Play(CharacterSound sound, byte character, Vector2 listener)
     {
         Vector2 origin = new(sound.X, sound.Y);
         if ((origin - listener).sqrMagnitude >= HearDistance * HearDistance || playing.Count >= MaxPlayback)
@@ -59,7 +59,7 @@ internal sealed class SandboxAudio : IDisposable
         {
             if (sound.Clip == "@voice")
             {
-                clip = RemoteBodyView.LoadCharacter(character)?.GetComponent<Talker>()?.talkSoundCustom;
+                clip = RemoteCharacterView.LoadCharacter(character)?.GetComponent<Talker>()?.talkSoundCustom;
             }
             else if (!sound.Clip.StartsWith("@", StringComparison.Ordinal))
             {

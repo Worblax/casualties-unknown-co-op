@@ -1,10 +1,11 @@
 using System;
+using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Fluids;
 
-internal static class SandboxFluidHooks
+internal static class TerrainFluidHooks
 {
     private static (RangeI X, RangeI Y)? activeStrip;
 
@@ -25,7 +26,7 @@ internal static class SandboxFluidHooks
         harmony.Patch(AccessTools.Method(typeof(FluidManager), nameof(FluidManager.IncrMove)), postfix: Patch(nameof(FlowCreated)));
     }
 
-    private static HarmonyMethod Patch(string name) => new(typeof(SandboxFluidHooks), name);
+    private static HarmonyMethod Patch(string name) => new(typeof(TerrainFluidHooks), name);
 
     private static void Prefix(Harmony harmony, Type type, string method, string patch, params Type[] types) =>
         harmony.Patch(AccessTools.Method(type, method, types), prefix: Patch(patch));
@@ -48,13 +49,13 @@ internal static class SandboxFluidHooks
         return false;
     }
 
-    private static bool Simulation(FluidManager __instance) => CoopPlugin.ActiveSandbox?.Fluids.TryStep(__instance) != true;
+    private static bool Simulation(FluidManager __instance) => CoopRuntime.ActiveWorld?.Fluids.TryStep(__instance) != true;
 
-    private static bool AllowWorldWrite() => CoopPlugin.ActiveSandbox?.Fluids.IsGuest != true;
+    private static bool AllowWorldWrite() => CoopRuntime.ActiveWorld?.Fluids.IsGuest != true;
 
     private static bool AllowFluidTool(Item item) => !item || item.id != "spacedrain" || AllowWorldWrite();
 
-    private static bool Drink(Vector2Int pos, Body body) => CoopPlugin.ActiveSandbox?.Fluids.AllowDrink(pos, body) ?? true;
+    private static bool Drink(Vector2Int pos, Body body) => CoopRuntime.ActiveWorld?.Fluids.AllowDrink(pos, body) ?? true;
 
     private static bool ContainerUpdate(WaterContainerItem __instance, SpriteRenderer ___fillRenderer, SpriteRenderer ____renderer)
     {
@@ -75,7 +76,7 @@ internal static class SandboxFluidHooks
     {
         if (__instance.liquidPushing && ___waterMoveCount == 0)
         {
-            CoopPlugin.ActiveSandbox?.Fluids.NoteFlow(__instance, direction, pos);
+            CoopRuntime.ActiveWorld?.Fluids.NoteFlow(__instance, direction, pos);
         }
     }
 

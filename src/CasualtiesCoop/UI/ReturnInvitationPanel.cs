@@ -9,7 +9,7 @@ using UnityEngine.UI;
 
 namespace CasualtiesCoop.UI;
 
-internal sealed class SandboxReturnPanel : MonoBehaviour
+internal sealed class ReturnInvitationPanel : MonoBehaviour
 {
     private const float Width = 270;
     private const float RowHeight = 43;
@@ -19,7 +19,7 @@ internal sealed class SandboxReturnPanel : MonoBehaviour
     private string? result;
     private float nextRefresh;
 
-    internal static SandboxReturnPanel Attach(PauseHandler pause, SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font)
+    internal static ReturnInvitationPanel Attach(PauseHandler pause, SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font)
     {
         GameObject root = new("Co-op return invitations", typeof(RectTransform));
         RectTransform rect = (RectTransform)root.transform;
@@ -28,7 +28,7 @@ internal sealed class SandboxReturnPanel : MonoBehaviour
         rect.anchoredPosition = new Vector2(-24, -24);
         rect.sizeDelta = new Vector2(Width, (plan.Players.Count - 1) * RowHeight);
 
-        SandboxReturnPanel panel = root.AddComponent<SandboxReturnPanel>();
+        ReturnInvitationPanel panel = root.AddComponent<ReturnInvitationPanel>();
         panel.lobby = lobby;
         foreach (LaunchPlayer player in plan.Players)
         {

@@ -32,11 +32,11 @@ internal sealed class SteamRoomLink : IDisposable
         internal readonly CSteamID Id;
         internal readonly HSteamNetConnection Connection;
         internal readonly float Deadline = Time.unscaledTime + HandshakeTimeout;
-        internal RoomFrame Expected;
+        internal MessageKind Expected;
         internal bool Connected;
-        internal bool Verified => Expected == RoomFrame.None;
+        internal bool Verified => Expected == MessageKind.None;
 
-        internal Peer(CSteamID id, HSteamNetConnection connection, RoomFrame expected)
+        internal Peer(CSteamID id, HSteamNetConnection connection, MessageKind expected)
         {
             Id = id;
             Connection = connection;
@@ -154,7 +154,7 @@ internal sealed class SteamRoomLink : IDisposable
             HSteamNetConnection connection = SteamNetworkingSockets.ConnectP2P(ref identity, VirtualPort, 0, NoOptions);
             if (connection != HSteamNetConnection.Invalid)
             {
-                peers.Add(new Peer(host, connection, RoomFrame.HostWelcome));
+                peers.Add(new Peer(host, connection, MessageKind.HostWelcome));
             }
 
             Status = connection == HSteamNetConnection.Invalid ? "Could not reach the host. Retrying…" : "Connecting to the host…";
@@ -195,7 +195,7 @@ internal sealed class SteamRoomLink : IDisposable
                 }
 
                 peer.Connected = true;
-                if (!Hosting && !SendHandshake(peer, RoomFrame.GuestHello))
+                if (!Hosting && !SendHandshake(peer, MessageKind.GuestHello))
                 {
                     Drop(peer, LinkFailed, "Could not send the room handshake.");
                 }
@@ -231,7 +231,7 @@ internal sealed class SteamRoomLink : IDisposable
         }
 
         incompatible.Remove(player);
-        peers.Add(new Peer(player, connection, RoomFrame.GuestHello));
+        peers.Add(new Peer(player, connection, MessageKind.GuestHello));
     }
 
     private void Receive(Peer peer)
@@ -265,8 +265,8 @@ internal sealed class SteamRoomLink : IDisposable
                     }
                 }
                 // Unreliable gameplay updates can overtake the reliable confirmation after reconnecting.
-                else if ((RoomFrame)message[0] is not (RoomFrame.SandboxPosition or RoomFrame.SandboxSound or RoomFrame.ItemMotion or
-                    RoomFrame.FluidChunk or RoomFrame.FluidPush or RoomFrame.SandboxLights) &&
+                else if ((MessageKind)message[0] is not (MessageKind.CharacterPose or MessageKind.CharacterSound or MessageKind.ItemMotion or
+                    MessageKind.FluidChunk or MessageKind.FluidPush or MessageKind.LightSnapshot) &&
                     !CompleteHandshakeStep(peer, message))
                 {
                     return;
@@ -296,19 +296,19 @@ internal sealed class SteamRoomLink : IDisposable
             return false;
         }
 
-        RoomFrame response = peer.Expected switch
+        MessageKind response = peer.Expected switch
         {
-            RoomFrame.GuestHello => RoomFrame.HostWelcome,
-            RoomFrame.HostWelcome => RoomFrame.GuestConfirm,
-            _ => RoomFrame.None
+            MessageKind.GuestHello => MessageKind.HostWelcome,
+            MessageKind.HostWelcome => MessageKind.GuestConfirm,
+            _ => MessageKind.None
         };
-        if (response != RoomFrame.None && !SendHandshake(peer, response))
+        if (response != MessageKind.None && !SendHandshake(peer, response))
         {
             Drop(peer, LinkFailed, "Could not confirm the Steam room handshake.");
             return false;
         }
 
-        peer.Expected = peer.Expected == RoomFrame.GuestHello ? RoomFrame.GuestConfirm : RoomFrame.None;
+        peer.Expected = peer.Expected == MessageKind.GuestHello ? MessageKind.GuestConfirm : MessageKind.None;
         if (peer.Verified)
         {
             Status = null;
@@ -319,7 +319,7 @@ internal sealed class SteamRoomLink : IDisposable
         return true;
     }
 
-    private bool SendHandshake(Peer peer, RoomFrame frame) =>
+    private bool SendHandshake(Peer peer, MessageKind frame) =>
         Send(peer, RoomWire.Handshake(frame, room.m_SteamID, gameBuild, modBuild));
 
     private static bool Send(Peer peer, byte[] message, bool reliable = true)

@@ -1,14 +1,12 @@
 using System;
 using System.Collections.Generic;
-using CasualtiesCoop.Game;
-using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
-using Steamworks;
+using CasualtiesCoop.Session;
 using UnityEngine;
 
-namespace CasualtiesCoop.Session;
+namespace CasualtiesCoop.Gameplay.Fluids;
 
-internal sealed class SandboxFluids : IDisposable
+internal sealed class TerrainFluidReplication : IDisposable
 {
     private const int ZoneSize = 128;
     private const int StripHeight = 16;
@@ -32,20 +30,19 @@ internal sealed class SandboxFluids : IDisposable
         internal float LastFull;
     }
 
-    private readonly SteamLobby lobby;
-    private readonly RoomLaunchPlan plan;
-    private readonly SandboxItems.PlayerPosition playerPosition;
+    private readonly SessionPeers peers;
+    private readonly PlayerPositionLookup playerPosition;
     private readonly bool host;
     private readonly HashSet<Vector2Int> uniqueZones = new();
     private readonly List<Vector2Int> zones = new();
     private readonly Dictionary<Vector2Int, Chunk> chunks = new();
-    private readonly Dictionary<CSteamID, Dictionary<Vector2Int, SentChunk>> subscriptions = new();
+    private readonly Dictionary<ulong, Dictionary<Vector2Int, SentChunk>> subscriptions = new();
     private readonly Dictionary<Vector2Int, uint> applied = new();
     private readonly List<(Vector2Int Key, Chunk Chunk, SentChunk? Sent)> candidates = new();
     private readonly List<Vector2Int> expired = new();
     private readonly Dictionary<Vector2Int, (Vector2Int Cell, byte Direction)> flow = new();
     private readonly List<GameObject> receivedPushers = new();
-    private readonly Dictionary<CSteamID, (ulong Operation, Vector2Int Cell, byte Liquid, float At)> drinks = new();
+    private readonly Dictionary<ulong, (ulong Operation, Vector2Int Cell, byte Liquid, float At)> drinks = new();
     private byte[,]? cells;
     private WorldGeneration? world;
     private int strip;
@@ -56,18 +53,17 @@ internal sealed class SandboxFluids : IDisposable
     private float nextDrinkRetry;
     private bool applyingDrink;
 
-    internal SandboxFluids(SteamLobby lobby, RoomLaunchPlan plan, SandboxItems.PlayerPosition playerPosition)
+    internal TerrainFluidReplication(SessionPeers peers, PlayerPositionLookup playerPosition)
     {
-        this.lobby = lobby;
-        this.plan = plan;
+        this.peers = peers;
         this.playerPosition = playerPosition;
-        host = lobby.IsHost;
-        lobby.Link.PeerChanged += OnPeerChanged;
+        host = peers.IsHost;
+        peers.ConnectionChanged += OnPeerChanged;
     }
 
     internal bool IsGuest => !host && IsBound(FluidManager.main);
 
-    internal ulong LastDrink(CSteamID player) => drinks.TryGetValue(player, out var receipt) ? receipt.Operation : 0;
+    internal ulong LastDrink(ulong player) => drinks.TryGetValue(player, out var receipt) ? receipt.Operation : 0;
 
     internal void BeginRecovery(ulong confirmedDrink)
     {
@@ -76,7 +72,7 @@ internal sealed class SandboxFluids : IDisposable
         applied.Clear();
     }
 
-    internal void ResendNearby(CSteamID player)
+    internal void ResendNearby(ulong player)
     {
         subscriptions.Remove(player);
         nextNetwork = 0;
@@ -140,10 +136,10 @@ internal sealed class SandboxFluids : IDisposable
 
         nextNetwork = now + NetworkInterval;
         scanRound++;
-        foreach (LaunchPlayer player in plan.Players)
+        foreach (LaunchPlayer player in peers.Players)
         {
-            CSteamID peer = new(player.SteamId);
-            if (peer != lobby.LocalUser && lobby.Link.GetState(peer) == RoomLinkState.Verified &&
+            ulong peer = player.SteamId;
+            if (peer != peers.LocalPlayer && peers.IsVerified(peer) &&
                 playerPosition(player.SteamId, out Vector2 position))
             {
                 SendNearby(peer, world!.WorldToBlockPos(position), now);
@@ -192,7 +188,7 @@ internal sealed class SandboxFluids : IDisposable
 
         uniqueZones.Clear();
         zones.Clear();
-        foreach (LaunchPlayer player in plan.Players)
+        foreach (LaunchPlayer player in peers.Players)
         {
             if (!playerPosition(player.SteamId, out Vector2 position))
             {
@@ -226,7 +222,7 @@ internal sealed class SandboxFluids : IDisposable
             int toY = Math.Min(cells.GetLength(1) - 1, zone.y * ZoneSize + strip + StripHeight);
             if (fromX < toX && fromY < toY)
             {
-                SandboxFluidHooks.Step(manager, new RangeI(fromX, toX), new RangeI(fromY, toY));
+                TerrainFluidHooks.Step(manager, new RangeI(fromX, toX), new RangeI(fromY, toY));
             }
         }
 
@@ -240,7 +236,7 @@ internal sealed class SandboxFluids : IDisposable
         return y != 0 ? y : a.x.CompareTo(b.x);
     }
 
-    private void SendNearby(CSteamID peer, Vector2Int center, float now)
+    private void SendNearby(ulong peer, Vector2Int center, float now)
     {
         if (!subscriptions.TryGetValue(peer, out Dictionary<Vector2Int, SentChunk> sent))
         {
@@ -291,8 +287,8 @@ internal sealed class SandboxFluids : IDisposable
         {
             var update = candidates[index];
             bool reliable = update.Sent is null || now - update.Sent.LastFull >= RepairInterval;
-            byte[] frame = FluidWire.WriteChunk(plan.Id, update.Key.x, update.Key.y, update.Chunk.Version, update.Chunk.Cells);
-            if (!lobby.Link.Send(peer, frame, reliable))
+            byte[] frame = FluidWire.WriteChunk(peers.SessionId, update.Key.x, update.Key.y, update.Chunk.Version, update.Chunk.Cells);
+            if (!peers.Send(peer, frame, reliable))
             {
                 continue;
             }
@@ -343,17 +339,17 @@ internal sealed class SandboxFluids : IDisposable
         return chunk;
     }
 
-    internal bool Receive(CSteamID sender, byte[] frame)
+    internal bool Receive(ulong sender, byte[] frame)
     {
-        RoomFrame kind = (RoomFrame)frame[0];
+        MessageKind kind = (MessageKind)frame[0];
         if (host)
         {
-            if (kind != RoomFrame.FluidDrinkRequest || !plan.TryGetPlayer(sender.m_SteamID, out _))
+            if (kind != MessageKind.FluidDrinkRequest || !peers.TryGetPlayer(sender, out _))
             {
                 return false;
             }
 
-            if (IsBound(FluidManager.main) && FluidWire.TryReadDrink(frame, kind, plan.Id,
+            if (IsBound(FluidManager.main) && FluidWire.TryReadDrink(frame, kind, peers.SessionId,
                     out ulong id, out int x, out int y, out byte expected))
             {
                 RespondToDrink(sender, id, new Vector2Int(x, y), expected);
@@ -361,7 +357,7 @@ internal sealed class SandboxFluids : IDisposable
             return true;
         }
 
-        if (sender != lobby.Owner)
+        if (sender != peers.Host)
         {
             return false;
         }
@@ -374,20 +370,20 @@ internal sealed class SandboxFluids : IDisposable
 
         switch (kind)
         {
-            case RoomFrame.FluidChunk:
-                if (FluidWire.TryReadChunk(frame, plan.Id, out int chunkX, out int chunkY, out uint version, out int offset))
+            case MessageKind.FluidChunk:
+                if (FluidWire.TryReadChunk(frame, peers.SessionId, out int chunkX, out int chunkY, out uint version, out int offset))
                 {
                     ApplyChunk(new Vector2Int(chunkX, chunkY), version, frame.AsSpan(offset));
                 }
                 return true;
-            case RoomFrame.FluidPush:
-                if (FluidWire.TryReadPush(frame, plan.Id, out int flowX, out int flowY, out byte direction))
+            case MessageKind.FluidPush:
+                if (FluidWire.TryReadPush(frame, peers.SessionId, out int flowX, out int flowY, out byte direction))
                 {
                     ApplyPush(new Vector2Int(flowX, flowY), direction);
                 }
                 return true;
-            case RoomFrame.FluidDrinkResult:
-                if (FluidWire.TryReadDrink(frame, kind, plan.Id, out ulong id, out int x, out int y, out byte liquid))
+            case MessageKind.FluidDrinkResult:
+                if (FluidWire.TryReadDrink(frame, kind, peers.SessionId, out ulong id, out int x, out int y, out byte liquid))
                 {
                     ApplyDrink(id, new Vector2Int(x, y), liquid);
                 }
@@ -431,14 +427,14 @@ internal sealed class SandboxFluids : IDisposable
         flow[nearby] = (cell, axis);
     }
 
-    private void SendFlow(CSteamID peer, Vector2 position)
+    private void SendFlow(ulong peer, Vector2 position)
     {
         int sent = 0;
         foreach (var push in flow.Values)
         {
             if ((world!.BlockToWorldPos(push.Cell) - position).sqrMagnitude <= 18f * 18f)
             {
-                lobby.Link.Send(peer, FluidWire.WritePush(plan.Id, push.Cell.x, push.Cell.y, push.Direction), reliable: false);
+                peers.Send(peer, FluidWire.WritePush(peers.SessionId, push.Cell.x, push.Cell.y, push.Direction), reliable: false);
                 if (++sent >= 6)
                 {
                     return;
@@ -484,7 +480,7 @@ internal sealed class SandboxFluids : IDisposable
         }
 
         if (PlayerCamera.main && body == PlayerCamera.main.body && pendingDrink is null && InBounds(cell) &&
-            cells![cell.x, cell.y] is > 0 and <= 7 && lobby.Link.GetState(lobby.Owner) == RoomLinkState.Verified)
+            cells![cell.x, cell.y] is > 0 and <= 7 && peers.IsVerified(peers.Host))
         {
             pendingDrink = (++drinkNumber, cell, cells[cell.x, cell.y]);
             SendDrink();
@@ -497,12 +493,12 @@ internal sealed class SandboxFluids : IDisposable
         if (pendingDrink is { } drink)
         {
             nextDrinkRetry = Time.unscaledTime + 1f;
-            lobby.Link.Send(lobby.Owner, FluidWire.WriteDrink(RoomFrame.FluidDrinkRequest, plan.Id,
+            peers.Send(peers.Host, FluidWire.WriteDrink(MessageKind.FluidDrinkRequest, peers.SessionId,
                 drink.Operation, drink.Cell.x, drink.Cell.y, drink.Liquid));
         }
     }
 
-    private void RespondToDrink(CSteamID peer, ulong operation, Vector2Int cell, byte expected)
+    private void RespondToDrink(ulong peer, ulong operation, Vector2Int cell, byte expected)
     {
         float now = Time.unscaledTime;
         drinks.TryGetValue(peer, out var receipt);
@@ -511,7 +507,7 @@ internal sealed class SandboxFluids : IDisposable
             byte liquid = 0;
             float lastAccepted = receipt.At;
             if ((receipt.Operation == 0 || now - lastAccepted >= 0.65f) && InBounds(cell) && expected != 0 &&
-                cells![cell.x, cell.y] == expected && playerPosition(peer.m_SteamID, out Vector2 at) &&
+                cells![cell.x, cell.y] == expected && playerPosition(peer, out Vector2 at) &&
                 (at - world!.BlockToWorldPos(cell)).sqrMagnitude <= 4f * 4f)
             {
                 liquid = expected;
@@ -528,7 +524,7 @@ internal sealed class SandboxFluids : IDisposable
 
         if (receipt.Operation == operation)
         {
-            lobby.Link.Send(peer, FluidWire.WriteDrink(RoomFrame.FluidDrinkResult, plan.Id,
+            peers.Send(peer, FluidWire.WriteDrink(MessageKind.FluidDrinkResult, peers.SessionId,
                 operation, receipt.Cell.x, receipt.Cell.y, receipt.Liquid));
         }
     }
@@ -563,7 +559,7 @@ internal sealed class SandboxFluids : IDisposable
     private bool InBounds(Vector2Int cell) => cells is not null && cell.x >= 0 && cell.y >= 0 &&
         cell.x < cells.GetLength(0) && cell.y < cells.GetLength(1);
 
-    private void OnPeerChanged(CSteamID peer, bool connected)
+    private void OnPeerChanged(ulong peer, bool connected)
     {
         if (connected)
         {
@@ -577,7 +573,7 @@ internal sealed class SandboxFluids : IDisposable
 
     public void Dispose()
     {
-        lobby.Link.PeerChanged -= OnPeerChanged;
+        peers.ConnectionChanged -= OnPeerChanged;
         foreach (GameObject push in receivedPushers)
         {
             if (push)

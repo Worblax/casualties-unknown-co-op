@@ -1,16 +1,17 @@
 using System;
 using System.Collections.Generic;
 using CasualtiesCoop.Session;
+using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Items;
 
-internal static class SandboxItemHooks
+internal static class SharedItemHooks
 {
     private static readonly Color PendingTint = new(1f, 1f, 1f, 0.5f);
-    private static SandboxItems? Items => CoopPlugin.ActiveSandbox?.Items;
+    private static SharedItemReplication? Items => CoopRuntime.ActiveWorld?.Items;
 
     internal static void Install(Harmony harmony)
     {
@@ -33,11 +34,11 @@ internal static class SandboxItemHooks
             typeof(List<Item>), typeof(List<Item>));
         Prefix(harmony, typeof(Item), "Update", nameof(WorldItem));
         harmony.Patch(AccessTools.Method(typeof(InvButton), nameof(InvButton.UpdateGraphic)),
-            postfix: new HarmonyMethod(typeof(SandboxItemHooks), nameof(DrawPending)));
+            postfix: new HarmonyMethod(typeof(SharedItemHooks), nameof(DrawPending)));
     }
 
     private static void Prefix(Harmony harmony, Type type, string method, string patch, params Type[] types) =>
-        harmony.Patch(AccessTools.Method(type, method, types), prefix: new HarmonyMethod(typeof(SandboxItemHooks), patch));
+        harmony.Patch(AccessTools.Method(type, method, types), prefix: new HarmonyMethod(typeof(SharedItemHooks), patch));
 
     private static bool Pickup(Body __instance, Item item, int slot, bool force) =>
         Items?.MayPickup(__instance, item, slot, force) ?? true;

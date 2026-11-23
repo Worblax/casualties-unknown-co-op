@@ -1,9 +1,10 @@
+using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Recovery;
 
-internal static class SandboxRecoveryHooks
+internal static class RecoveryInputHooks
 {
     internal static void Install(Harmony harmony)
     {
@@ -13,11 +14,11 @@ internal static class SandboxRecoveryHooks
     }
 
     private static void Prefix(Harmony harmony, string method, string prefix) => harmony.Patch(
-        AccessTools.Method(typeof(PlayerCamera), method), prefix: new HarmonyMethod(typeof(SandboxRecoveryHooks), prefix));
+        AccessTools.Method(typeof(PlayerCamera), method), prefix: new HarmonyMethod(typeof(RecoveryInputHooks), prefix));
 
     private static bool AllowInput(PlayerCamera __instance)
     {
-        if (CoopPlugin.ActiveSandbox is not { WaitingForRecovery: true })
+        if (CoopRuntime.ActiveWorld is not { WaitingForRecovery: true })
         {
             return true;
         }
@@ -30,8 +31,8 @@ internal static class SandboxRecoveryHooks
         return false;
     }
 
-    private static bool AllowDragging() => CoopPlugin.ActiveSandbox is not { WaitingForRecovery: true };
+    private static bool AllowDragging() => CoopRuntime.ActiveWorld is not { WaitingForRecovery: true };
 
-    private static bool AllowTimeScale(PlayerCamera.SpeedType __0) => CoopPlugin.ActiveSandbox is null ||
+    private static bool AllowTimeScale(PlayerCamera.SpeedType __0) => CoopRuntime.ActiveWorld is null ||
         !PauseHandler.paused || __0 != PlayerCamera.SpeedType.Paused;
 }

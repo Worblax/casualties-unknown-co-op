@@ -3,9 +3,9 @@ using CasualtiesCoop.Networking;
 using TMPro;
 using UnityEngine;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Characters;
 
-internal sealed class RemoteBodyView : IDisposable
+internal sealed class RemoteCharacterView : IDisposable
 {
     private readonly GameObject root;
     private readonly GameObject[] limbs;
@@ -13,11 +13,11 @@ internal sealed class RemoteBodyView : IDisposable
     private bool facingRight;
     private bool standing;
 
-    internal RemoteBodyView(byte character, string displayName, TMP_FontAsset font)
+    internal RemoteCharacterView(byte character, string displayName, TMP_FontAsset font)
     {
         root = new GameObject("Co-op remote character");
         Body? template = LoadCharacter(character);
-        limbs = template ? new GameObject[Math.Min(template!.limbs.Length, SandboxWire.MaxLimbs)] : Array.Empty<GameObject>();
+        limbs = template ? new GameObject[Math.Min(template!.limbs.Length, CharacterPoseWire.MaxLimbs)] : Array.Empty<GameObject>();
         for (int index = 0; index < limbs.Length; index++)
         {
             Transform source = template!.limbs[index].transform;
@@ -73,7 +73,7 @@ internal sealed class RemoteBodyView : IDisposable
         return path.Length == 0 ? null : Resources.Load<GameObject>("Special/Characters/" + path)?.GetComponentInChildren<Body>(true);
     }
 
-    internal void Apply(SandboxPosition pose, float age)
+    internal void Apply(CharacterPose pose, float age)
     {
         float prediction = Mathf.Clamp(age - 0.067f, 0f, 0.1f);
         Vector2 target = new(pose.X + pose.VelocityX * prediction, pose.Y + pose.VelocityY * prediction);
@@ -93,7 +93,7 @@ internal sealed class RemoteBodyView : IDisposable
                 continue;
             }
 
-            SandboxLimb targetLimb = pose.Limbs[index];
+            LimbPose targetLimb = pose.Limbs[index];
             Transform transform = limb.transform;
             bool snapThisLimb = snapLimbs || !limb.activeSelf;
             Vector3 offset = new(targetLimb.X, targetLimb.Y, 0f);

@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using CasualtiesCoop.Networking;
 using UnityEngine;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Items;
 
-internal sealed class SandboxItemObjects
+internal sealed class SharedItemObjects
 {
     private readonly Dictionary<string, GameObject?> prefabs = new(StringComparer.Ordinal);
 

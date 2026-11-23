@@ -13,7 +13,7 @@ internal sealed class SteamLobby : IDisposable
 {
     private const string MemberKey = "cu_member";
     private const string ProtocolKey = "cu_protocol";
-    private const string ProtocolVersion = "8";
+    private const string ProtocolVersion = "9";
     private const string SettingsKey = "cu_settings";
     private const string CreatorKey = "cu_creator";
     private const string VerifiedMembersKey = "cu_verified";
@@ -274,26 +274,6 @@ internal sealed class SteamLobby : IDisposable
             invitedAt.Clear();
             Status = null;
         }
-    }
-
-    internal void StartSoloPreview(PreRunScript menu)
-    {
-        if (!CanStartSolo)
-        {
-            return;
-        }
-
-        if (PlayerPrefs.GetInt("didbasiccourse") == 0)
-        {
-            menu.StartRun(); // Use the game's tutorial prompt and leave the room open.
-            return;
-        }
-
-        menu.ApplyPreset(Difficulty);
-        menu.SelectCharacter(selectedCharacter);
-        CoopPlugin.BeginSoloPreview();
-        menu.StartRun();
-        Leave();
     }
 
     internal bool ReserveSandbox(RoomLaunchPlan plan)

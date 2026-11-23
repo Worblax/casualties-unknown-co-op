@@ -6,7 +6,7 @@ using CasualtiesCoop.Session;
 
 namespace CasualtiesCoop.Networking;
 
-internal enum RoomFrame : byte
+internal enum MessageKind : byte
 {
     None,
     GuestHello,
@@ -16,8 +16,8 @@ internal enum RoomFrame : byte
     RunPrepared,
     StartSandbox,
     SandboxRejected,
-    SandboxPosition,
-    SandboxSound,
+    CharacterPose,
+    CharacterSound,
     ItemRequest,
     ItemState,
     ItemResult,
@@ -28,11 +28,11 @@ internal enum RoomFrame : byte
     FluidPush,
     FluidDrinkRequest,
     FluidDrinkResult,
-    SandboxLights,
-    SandboxResumeRequest,
-    SandboxResumeState,
-    SandboxResumeApplied,
-    SandboxResumeCommitted
+    LightSnapshot,
+    SessionRejoinRequest,
+    SessionRejoinState,
+    SessionRejoinApplied,
+    SessionRejoinCommitted
 }
 
 internal static class RoomWire
@@ -44,7 +44,7 @@ internal static class RoomWire
     private const int MaxDifficultyBytes = 80;
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
 
-    internal static byte[] Handshake(RoomFrame frame, ulong lobby, Guid gameBuild, Guid modBuild)
+    internal static byte[] Handshake(MessageKind frame, ulong lobby, Guid gameBuild, Guid modBuild)
     {
         byte[] message = new byte[HandshakeSize];
         message[0] = (byte)frame;
@@ -54,7 +54,7 @@ internal static class RoomWire
         return message;
     }
 
-    internal static bool IsHandshake(ReadOnlySpan<byte> message, RoomFrame frame, ulong lobby) =>
+    internal static bool IsHandshake(ReadOnlySpan<byte> message, MessageKind frame, ulong lobby) =>
         message.Length == HandshakeSize && message[0] == (byte)frame &&
         BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(1)) == lobby;
 
@@ -72,7 +72,7 @@ internal static class RoomWire
         }
 
         byte[] message = new byte[PlanHeaderSize + difficulty.Length + count * PlayerSize];
-        message[0] = (byte)RoomFrame.PrepareRun;
+        message[0] = (byte)MessageKind.PrepareRun;
         plan.Id.TryWriteBytes(message.AsSpan(1));
         plan.SettingsRevision.TryWriteBytes(message.AsSpan(17));
         message[33] = (byte)plan.Options;
@@ -92,7 +92,7 @@ internal static class RoomWire
 
     internal static RoomLaunchPlan? ReadPlan(ReadOnlySpan<byte> message)
     {
-        if (message.Length < PlanHeaderSize || message[0] != (byte)RoomFrame.PrepareRun)
+        if (message.Length < PlanHeaderSize || message[0] != (byte)MessageKind.PrepareRun)
         {
             return null;
         }
@@ -136,7 +136,7 @@ internal static class RoomWire
         return new RoomLaunchPlan(id, revision, difficulty, options, players);
     }
 
-    internal static byte[] PlanReference(RoomFrame frame, Guid id)
+    internal static byte[] PlanReference(MessageKind frame, Guid id)
     {
         byte[] message = new byte[17];
         message[0] = (byte)frame;
@@ -144,7 +144,7 @@ internal static class RoomWire
         return message;
     }
 
-    internal static Guid ReadPlanReference(RoomFrame frame, ReadOnlySpan<byte> message) =>
+    internal static Guid ReadPlanReference(MessageKind frame, ReadOnlySpan<byte> message) =>
         message.Length == 17 && message[0] == (byte)frame
             ? new Guid(message.Slice(1))
             : Guid.Empty;

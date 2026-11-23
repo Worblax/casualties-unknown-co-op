@@ -5,9 +5,9 @@ using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 
-namespace CasualtiesCoop.Game;
+namespace CasualtiesCoop.Gameplay.Lighting;
 
-internal sealed class SandboxTerrainShadows : IDisposable
+internal sealed class TerrainShadowCasters : IDisposable
 {
     private const int RegionSize = 16;
     private const int RegionLimit = 80;

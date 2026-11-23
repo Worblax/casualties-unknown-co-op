@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
+using CasualtiesCoop.Runtime;
 using Steamworks;
 using TMPro;
 using UnityEngine;
@@ -33,6 +34,7 @@ public sealed class CoopMenuView : MonoBehaviour
     private readonly TextMeshProUGUI[] members = new TextMeshProUGUI[RoomRules.Capacity];
     private readonly TextMeshProUGUI[] memberSelections = new TextMeshProUGUI[RoomRules.Capacity];
     private PreRunScript? menu;
+    private CoopRuntime runtime = null!;
     private Canvas? canvas;
     private GameObject? root;
     private RectTransform? panel;
@@ -64,8 +66,9 @@ public sealed class CoopMenuView : MonoBehaviour
         !ScrollableText.textExists && !menu.creditsScreen.activeInHierarchy &&
         !menu.runSettingsScreen.activeInHierarchy && !SettingsMenu.instance;
 
-    internal void Install(PreRunScript owner)
+    internal void Install(PreRunScript owner, CoopRuntime runtime)
     {
+        this.runtime = runtime;
         menu = owner;
         canvas = owner.mainCanvas;
         images = new LobbyAvatars();
@@ -120,17 +123,17 @@ public sealed class CoopMenuView : MonoBehaviour
             int character = index;
             float width = 380f / characters.Length;
             characters[index] = AddAction($"Character {index + 1}", 28 + index * width, 390,
-                width - 7, 50, () => CoopPlugin.Lobby?.SelectCharacter(character), out _);
+                width - 7, 50, () => runtime.Lobby?.SelectCharacter(character), out _);
         }
 
         startHint = AddLabel(panel, "", 28, 452, 764, 40, 16);
-        createButton = AddAction("Create Steam room", 28, 500, 274, 44, () => CoopPlugin.Lobby?.Create(), out _);
-        returnButton = AddAction("Rejoin last room", 321, 500, 218, 44, () => CoopPlugin.Lobby?.RequestReturn(), out _);
-        inviteButton = AddAction("Invite friends", 28, 500, 164, 44, () => CoopPlugin.Lobby?.Invite(), out _);
-        readyButton = AddAction("Ready", 207, 500, 155, 44, () => CoopPlugin.Lobby?.ToggleReady(), out var readyText);
+        createButton = AddAction("Create Steam room", 28, 500, 274, 44, () => runtime.Lobby?.Create(), out _);
+        returnButton = AddAction("Rejoin last room", 321, 500, 218, 44, () => runtime.Lobby?.RequestReturn(), out _);
+        inviteButton = AddAction("Invite friends", 28, 500, 164, 44, () => runtime.Lobby?.Invite(), out _);
+        readyButton = AddAction("Ready", 207, 500, 155, 44, () => runtime.Lobby?.ToggleReady(), out var readyText);
         readyLabel = readyText;
-        leaveButton = AddAction("Leave room", 377, 500, 154, 44, () => CoopPlugin.Lobby?.Leave(), out _);
-        startButton = AddAction("Start", 602, 500, 190, 44, () => CoopPlugin.StartFromLobby(menu!), out _);
+        leaveButton = AddAction("Leave room", 377, 500, 154, 44, () => runtime.Lobby?.Leave(), out _);
+        startButton = AddAction("Start", 602, 500, 190, 44, () => runtime.StartFromLobby(menu!), out _);
         InstallOptionsPanel(group);
         SetPanelOpen(false);
     }
@@ -169,7 +172,6 @@ public sealed class CoopMenuView : MonoBehaviour
             return;
         }
 
-        CoopPlugin.TickMenu();
         bool visible = MenuAvailable;
         root!.SetActive(visible);
         if (!visible || Time.unscaledTime < nextRefresh)
@@ -178,7 +180,7 @@ public sealed class CoopMenuView : MonoBehaviour
         }
 
         nextRefresh = Time.unscaledTime + 0.25f;
-        SteamLobby? lobby = CoopPlugin.Lobby;
+        SteamLobby? lobby = runtime.Lobby;
         if (lobby is { InRoom: true } && lobby.Current != previousRoom)
         {
             previousRoom = lobby.Current;
@@ -210,7 +212,7 @@ public sealed class CoopMenuView : MonoBehaviour
 
     private void SetOptionsOpen(bool open)
     {
-        SteamLobby? lobby = CoopPlugin.Lobby;
+        SteamLobby? lobby = runtime.Lobby;
         if (open && lobby is not { InRoom: true })
         {
             return;
@@ -248,7 +250,7 @@ public sealed class CoopMenuView : MonoBehaviour
         }
 
         status!.text = lobby?.Status ?? lobby?.ReturnStatus ?? lobby?.ConnectionStatus ?? (inRoom ? $"Players {count}/{RoomRules.Capacity}" :
-            lobby is null ? CoopPlugin.SteamStatus : "Start a room and invite your team.");
+            lobby is null ? runtime.SteamStatus : "Start a room and invite your team.");
 
         createButton!.gameObject.SetActive(!inRoom);
         createButton.interactable = lobby is { IsBusy: false };
@@ -260,7 +262,7 @@ public sealed class CoopMenuView : MonoBehaviour
         readyButton.interactable = inRoom && lobby!.CanReady;
         leaveButton!.gameObject.SetActive(inRoom);
         startButton!.gameObject.SetActive(isHost);
-        startButton.interactable = isHost && (lobby!.CanStartSolo || CoopPlugin.CanStartSharedSandbox);
+        startButton.interactable = isHost && (lobby!.CanStartSolo || runtime.CanStartSharedSandbox);
         difficulty!.gameObject.SetActive(inRoom);
         difficultyButton!.gameObject.SetActive(inRoom);
         difficultyButton.interactable = canEdit;
@@ -271,7 +273,7 @@ public sealed class CoopMenuView : MonoBehaviour
         startHint!.text = inRoom
             ? lobby!.ReturningTo != Guid.Empty ? "Restoring your place in the sandbox…"
                 : lobby.IsLaunching ? "Entering the sandbox…"
-                : count > 1 ? CoopPlugin.PreparationStatus ?? "Waiting for players to connect and get ready."
+                : count > 1 ? runtime.PreparationStatus ?? "Waiting for players to connect and get ready."
                 : (options & RoomOptions.Sandbox) != 0 ? "Start opens the sandbox. Saving is disabled."
                     : "Start opens a solo preview. Room options are preview controls. Saving is disabled."
             : "";
@@ -337,9 +339,9 @@ public sealed class CoopMenuView : MonoBehaviour
 
     private static string CharacterName(int character) => Locale.GetOther($"char{character}name");
 
-    private static void NextDifficulty()
+    private void NextDifficulty()
     {
-        if (CoopPlugin.Lobby is not { IsHost: true } lobby)
+        if (runtime.Lobby is not { IsHost: true } lobby)
         {
             return;
         }
@@ -367,7 +369,7 @@ public sealed class CoopMenuView : MonoBehaviour
             action();
             if (PanelOpen)
             {
-                Refresh(CoopPlugin.Lobby);
+                Refresh(runtime.Lobby);
             }
         });
         text = AddLabel(rect, label, 0, 0, rect.sizeDelta.x, rect.sizeDelta.y, 17);
@@ -442,8 +444,8 @@ public sealed class CoopMenuView : MonoBehaviour
         state.alignment = TextAlignmentOptions.MidlineRight;
         toggle.onValueChanged.AddListener(value =>
         {
-            CoopPlugin.Lobby?.ChangeOption(option, value);
-            Refresh(CoopPlugin.Lobby);
+            runtime.Lobby?.ChangeOption(option, value);
+            Refresh(runtime.Lobby);
         });
         return (toggle, title, state);
     }

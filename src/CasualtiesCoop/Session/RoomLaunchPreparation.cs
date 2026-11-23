@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace CasualtiesCoop.Session;
 
-internal sealed class RoomLaunchPreparation
+internal sealed class RoomLaunchPreparation : IDisposable
 {
     private const float PollInterval = 0.25f;
     private const float ConfirmationTimeout = 12f;
@@ -65,7 +65,7 @@ internal sealed class RoomLaunchPreparation
             return null;
         }
 
-        byte[] message = RoomWire.PlanReference(RoomFrame.StartSandbox, launch.Id);
+        byte[] message = RoomWire.PlanReference(MessageKind.StartSandbox, launch.Id);
         foreach (LaunchPlayer player in launch.Players)
         {
             CSteamID id = new(player.SteamId);
@@ -108,7 +108,7 @@ internal sealed class RoomLaunchPreparation
             }
             else if (!guestConfirmed)
             {
-                guestConfirmed = link.Send(lobby.Owner, RoomWire.PlanReference(RoomFrame.RunPrepared, plan.Id));
+                guestConfirmed = link.Send(lobby.Owner, RoomWire.PlanReference(MessageKind.RunPrepared, plan.Id));
                 if (guestConfirmed)
                 {
                     log.LogInfo("Verified settings and roster with the room host.");
@@ -148,7 +148,7 @@ internal sealed class RoomLaunchPreparation
     {
         if (lobby.IsHost)
         {
-            Guid acknowledged = RoomWire.ReadPlanReference(RoomFrame.RunPrepared, bytes);
+            Guid acknowledged = RoomWire.ReadPlanReference(MessageKind.RunPrepared, bytes);
             if (acknowledged == Guid.Empty)
             {
                 return false;
@@ -228,4 +228,6 @@ internal sealed class RoomLaunchPreparation
         confirmed.Clear();
         guestConfirmed = false;
     }
+
+    public void Dispose() => lobby.LaunchInputsChanged -= Reset;
 }

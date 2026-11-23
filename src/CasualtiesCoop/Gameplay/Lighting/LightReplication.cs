@@ -1,15 +1,14 @@
+using CasualtiesCoop.Gameplay.Characters;
 using System;
 using System.Collections.Generic;
-using CasualtiesCoop.Game;
-using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
-using Steamworks;
+using CasualtiesCoop.Session;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 
-namespace CasualtiesCoop.Session;
+namespace CasualtiesCoop.Gameplay.Lighting;
 
-internal sealed class SandboxLights : IDisposable
+internal sealed class LightReplication : IDisposable
 {
     private const float SendInterval = 0.10f;
     private const float SourceTimeout = 1.2f;
@@ -18,17 +17,16 @@ internal sealed class SandboxLights : IDisposable
     {
         internal uint Sequence;
         internal float LastSeen;
-        internal readonly Dictionary<uint, ProjectedSandboxLight> Sources = new();
+        internal readonly Dictionary<uint, RemoteLight> Sources = new();
     }
 
-    private readonly SteamLobby lobby;
-    private readonly RoomLaunchPlan plan;
-    private readonly SandboxItems.PlayerPosition playerPosition;
+    private readonly SessionPeers peers;
+    private readonly PlayerPositionLookup playerPosition;
     private readonly Action<byte[]> sendLocal;
-    private readonly Action<byte[], CSteamID> relay;
-    private readonly SandboxLightCatalog catalog = new();
-    private readonly SandboxTerrainShadows shadows = new();
-    private readonly SandboxLightVisibility visibility = new();
+    private readonly Action<byte[], ulong> relay;
+    private readonly LightPrefabCatalog catalog = new();
+    private readonly TerrainShadowCasters shadows = new();
+    private readonly LocalLightVisibility visibility = new();
     private readonly Dictionary<ulong, OwnerLights> remote = new();
     private readonly List<Light2D> captured = new();
     private readonly List<Light2D> projected = new();
@@ -41,11 +39,10 @@ internal sealed class SandboxLights : IDisposable
     private float nextSend;
     private float emptyUntil;
 
-    internal SandboxLights(SteamLobby lobby, RoomLaunchPlan plan, SandboxItems.PlayerPosition playerPosition,
-        Action<byte[]> sendLocal, Action<byte[], CSteamID> relay)
+    internal LightReplication(SessionPeers peers, PlayerPositionLookup playerPosition,
+        Action<byte[]> sendLocal, Action<byte[], ulong> relay)
     {
-        this.lobby = lobby;
-        this.plan = plan;
+        this.peers = peers;
         this.playerPosition = playerPosition;
         this.sendLocal = sendLocal;
         this.relay = relay;
@@ -86,7 +83,7 @@ internal sealed class SandboxLights : IDisposable
                 continue;
             }
 
-            foreach (ProjectedSandboxLight source in owner.Sources.Values)
+            foreach (RemoteLight source in owner.Sources.Values)
             {
                 source.Tick(observer, world);
                 if (source.Light.isActiveAndEnabled)
@@ -100,7 +97,7 @@ internal sealed class SandboxLights : IDisposable
         visibility.Refresh();
     }
 
-    internal bool BodyVisible(Vector2 observer, SandboxPosition pose)
+    internal bool BodyVisible(Vector2 observer, CharacterPose pose)
     {
         WorldGeneration world = WorldGeneration.world;
         if (!world || !world.worldExists || world.generatingWorld)
@@ -135,11 +132,11 @@ internal sealed class SandboxLights : IDisposable
             Capture(item, false, ref count);
         }
 
-        if (lobby.IsHost && count < outbound.Length)
+        if (peers.IsHost && count < outbound.Length)
         {
             foreach (Item item in Item.allItems)
             {
-                if (item && !item.transform.parent && SandboxLightCatalog.DefinitionOf(item) != 0 &&
+                if (item && !item.transform.parent && LightPrefabCatalog.DefinitionOf(item) != 0 &&
                     NearParticipant(item.transform.position))
                 {
                     Capture(item, true, ref count);
@@ -157,13 +154,13 @@ internal sealed class SandboxLights : IDisposable
         }
         if (count > 0 || now < emptyUntil)
         {
-            sendLocal(LightWire.Write(plan.Id, lobby.LocalUser.m_SteamID, ++nextSequence, outbound.AsSpan(0, count)));
+            sendLocal(LightWire.Write(peers.SessionId, peers.LocalPlayer, ++nextSequence, outbound.AsSpan(0, count)));
         }
     }
 
     private bool NearParticipant(Vector2 source)
     {
-        foreach (LaunchPlayer player in plan.Players)
+        foreach (LaunchPlayer player in peers.Players)
         {
             if (playerPosition(player.SteamId, out Vector2 at) && (at - source).sqrMagnitude < 110f * 110f)
             {
@@ -180,7 +177,7 @@ internal sealed class SandboxLights : IDisposable
             return;
         }
 
-        byte definition = SandboxLightCatalog.DefinitionOf(item);
+        byte definition = LightPrefabCatalog.DefinitionOf(item);
         if (definition == 0)
         {
             return;
@@ -221,20 +218,20 @@ internal sealed class SandboxLights : IDisposable
         }
     }
 
-    internal bool Receive(CSteamID sender, byte[] message)
+    internal bool Receive(ulong sender, byte[] message)
     {
-        if (!LightWire.TryRead(message, plan.Id, out ulong player, out uint sequence, out LightSample[] samples))
+        if (!LightWire.TryRead(message, peers.SessionId, out ulong player, out uint sequence, out LightSample[] samples))
         {
             return true;
         }
 
-        if (player == lobby.LocalUser.m_SteamID || !plan.TryGetPlayer(player, out _) ||
-            (lobby.IsHost ? sender.m_SteamID != player : sender != lobby.Owner))
+        if (player == peers.LocalPlayer || !peers.TryGetPlayer(player, out _) ||
+            (peers.IsHost ? sender != player : sender != peers.Host))
         {
             return false;
         }
 
-        if (lobby.IsHost && samples.Length > 0)
+        if (peers.IsHost && samples.Length > 0)
         {
             if (!playerPosition(player, out Vector2 at))
             {
@@ -273,7 +270,7 @@ internal sealed class SandboxLights : IDisposable
             }
 
             present.Add(sample.Id);
-            if (owner.Sources.TryGetValue(sample.Id, out ProjectedSandboxLight? source) &&
+            if (owner.Sources.TryGetValue(sample.Id, out RemoteLight? source) &&
                 !source.Matches(sample.Definition, sample.Component))
             {
                 source.Dispose();
@@ -282,7 +279,7 @@ internal sealed class SandboxLights : IDisposable
             }
             if (source is null)
             {
-                source = new ProjectedSandboxLight(template!, GlintSprite());
+                source = new RemoteLight(template!, GlintSprite());
                 owner.Sources.Add(sample.Id, source);
             }
             source.Receive(sample, now);
@@ -302,7 +299,7 @@ internal sealed class SandboxLights : IDisposable
             owner.Sources.Remove(id);
         }
 
-        if (lobby.IsHost)
+        if (peers.IsHost)
         {
             relay(message, sender);
         }
@@ -334,7 +331,7 @@ internal sealed class SandboxLights : IDisposable
 
     private static void Clear(OwnerLights owner)
     {
-        foreach (ProjectedSandboxLight light in owner.Sources.Values)
+        foreach (RemoteLight light in owner.Sources.Values)
         {
             light.Dispose();
         }

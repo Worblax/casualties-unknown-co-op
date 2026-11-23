@@ -1,8 +1,9 @@
+using CasualtiesCoop.Networking;
 using System;
 using System.Buffers.Binary;
 using System.Text;
 
-namespace CasualtiesCoop.Networking;
+namespace CasualtiesCoop.Gameplay.Items;
 
 internal enum ItemAction : byte
 {
@@ -70,10 +71,10 @@ internal static class ItemWire
     private const int ResultSize = 26;
     internal const byte NoSlot = byte.MaxValue;
 
-    internal static byte[] WriteState(RoomFrame frame, Guid session, SharedItemState state)
+    internal static byte[] WriteState(MessageKind frame, Guid session, SharedItemState state)
     {
         byte[] definition = Encoding.ASCII.GetBytes(state.Definition);
-        byte[] message = SandboxWire.NewFrame(frame, session, StateHeaderSize + definition.Length);
+        byte[] message = GameplayWire.NewFrame(frame, session, StateHeaderSize + definition.Length);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), state.Id);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(25), state.Revision);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(29), state.Sample);
@@ -81,17 +82,17 @@ internal static class ItemWire
         message[41] = state.Slot;
         message[42] = (byte)definition.Length;
         message[43] = state.Removed ? (byte)1 : (byte)0;
-        SandboxWire.WriteFloat(message.AsSpan(44), state.Condition);
+        GameplayWire.WriteFloat(message.AsSpan(44), state.Condition);
         WriteLocation(message.AsSpan(48), state.Location);
         definition.CopyTo(message, StateHeaderSize);
         return message;
     }
 
-    internal static bool TryReadState(ReadOnlySpan<byte> message, RoomFrame frame, Guid session, out SharedItemState state)
+    internal static bool TryReadState(ReadOnlySpan<byte> message, MessageKind frame, Guid session, out SharedItemState state)
     {
         state = default;
         int length = message.Length - StateHeaderSize;
-        if (length is < 1 or > MaxDefinitionLength || !SandboxWire.HasHeader(message, frame, session) || message[42] != length)
+        if (length is < 1 or > MaxDefinitionLength || !GameplayWire.HasHeader(message, frame, session) || message[42] != length)
         {
             return false;
         }
@@ -103,7 +104,7 @@ internal static class ItemWire
         state.Slot = message[41];
         state.Definition = Encoding.ASCII.GetString(message.Slice(StateHeaderSize));
         state.Removed = message[43] == 1;
-        state.Condition = SandboxWire.ReadFloat(message.Slice(44));
+        state.Condition = GameplayWire.ReadFloat(message.Slice(44));
         state.Location = ReadLocation(message.Slice(48));
         return state.Id != 0 && state.Revision != 0 && IsDefinition(state.Definition) &&
             message[43] <= 1 && ((state.Owner == 0) == (state.Slot == NoSlot)) && (!state.Removed || state.Owner == 0) &&
@@ -129,25 +130,25 @@ internal static class ItemWire
 
     internal static byte[] WriteRequest(Guid session, SharedItemRequest request)
     {
-        byte[] message = SandboxWire.NewFrame(RoomFrame.ItemRequest, session, RequestSize);
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRequest, session, RequestSize);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), request.Operation);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), request.ItemId);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(33), request.Revision);
         message[37] = (byte)request.Action;
         message[38] = request.Slot;
         ItemLocation location = request.Location;
-        SandboxWire.WriteFloat(message.AsSpan(39), location.X);
-        SandboxWire.WriteFloat(message.AsSpan(43), location.Y);
-        SandboxWire.WriteFloat(message.AsSpan(47), location.Angle);
-        SandboxWire.WriteFloat(message.AsSpan(51), location.VelocityX);
-        SandboxWire.WriteFloat(message.AsSpan(55), location.VelocityY);
+        GameplayWire.WriteFloat(message.AsSpan(39), location.X);
+        GameplayWire.WriteFloat(message.AsSpan(43), location.Y);
+        GameplayWire.WriteFloat(message.AsSpan(47), location.Angle);
+        GameplayWire.WriteFloat(message.AsSpan(51), location.VelocityX);
+        GameplayWire.WriteFloat(message.AsSpan(55), location.VelocityY);
         return message;
     }
 
     internal static bool TryReadRequest(ReadOnlySpan<byte> message, Guid session, out SharedItemRequest request)
     {
         request = default;
-        if (message.Length != RequestSize || !SandboxWire.HasHeader(message, RoomFrame.ItemRequest, session))
+        if (message.Length != RequestSize || !GameplayWire.HasHeader(message, MessageKind.ItemRequest, session))
         {
             return false;
         }
@@ -157,15 +158,15 @@ internal static class ItemWire
         request.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(33));
         request.Action = (ItemAction)message[37];
         request.Slot = message[38];
-        request.Location = new ItemLocation(SandboxWire.ReadFloat(message.Slice(39)), SandboxWire.ReadFloat(message.Slice(43)),
-            SandboxWire.ReadFloat(message.Slice(47)), SandboxWire.ReadFloat(message.Slice(51)), SandboxWire.ReadFloat(message.Slice(55)));
+        request.Location = new ItemLocation(GameplayWire.ReadFloat(message.Slice(39)), GameplayWire.ReadFloat(message.Slice(43)),
+            GameplayWire.ReadFloat(message.Slice(47)), GameplayWire.ReadFloat(message.Slice(51)), GameplayWire.ReadFloat(message.Slice(55)));
         return request.Operation != 0 && request.ItemId != 0 && request.Revision != 0 && request.Slot != NoSlot &&
             request.Action is >= ItemAction.PickUp and <= ItemAction.Throw && IsLocationValid(request.Location);
     }
 
     internal static byte[] WriteResult(Guid session, ulong operation, ItemDecision decision)
     {
-        byte[] message = SandboxWire.NewFrame(RoomFrame.ItemResult, session, ResultSize);
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemResult, session, ResultSize);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), operation);
         message[25] = (byte)decision;
         return message;
@@ -175,7 +176,7 @@ internal static class ItemWire
     {
         operation = 0;
         decision = default;
-        if (message.Length != ResultSize || !SandboxWire.HasHeader(message, RoomFrame.ItemResult, session))
+        if (message.Length != ResultSize || !GameplayWire.HasHeader(message, MessageKind.ItemResult, session))
         {
             return false;
         }
@@ -186,21 +187,21 @@ internal static class ItemWire
     }
 
     private static bool IsLocationValid(ItemLocation location) =>
-        SandboxWire.IsCoordinate(location.X) && SandboxWire.IsCoordinate(location.Y) &&
-        SandboxWire.InRange(location.Angle, 720) && SandboxWire.InRange(location.VelocityX, 1000) &&
-        SandboxWire.InRange(location.VelocityY, 1000) && SandboxWire.InRange(location.Spin, 20000);
+        GameplayWire.IsCoordinate(location.X) && GameplayWire.IsCoordinate(location.Y) &&
+        GameplayWire.InRange(location.Angle, 720) && GameplayWire.InRange(location.VelocityX, 1000) &&
+        GameplayWire.InRange(location.VelocityY, 1000) && GameplayWire.InRange(location.Spin, 20000);
 
     private static void WriteLocation(Span<byte> message, ItemLocation location)
     {
-        SandboxWire.WriteFloat(message, location.X);
-        SandboxWire.WriteFloat(message.Slice(4), location.Y);
-        SandboxWire.WriteFloat(message.Slice(8), location.Angle);
-        SandboxWire.WriteFloat(message.Slice(12), location.VelocityX);
-        SandboxWire.WriteFloat(message.Slice(16), location.VelocityY);
-        SandboxWire.WriteFloat(message.Slice(20), location.Spin);
+        GameplayWire.WriteFloat(message, location.X);
+        GameplayWire.WriteFloat(message.Slice(4), location.Y);
+        GameplayWire.WriteFloat(message.Slice(8), location.Angle);
+        GameplayWire.WriteFloat(message.Slice(12), location.VelocityX);
+        GameplayWire.WriteFloat(message.Slice(16), location.VelocityY);
+        GameplayWire.WriteFloat(message.Slice(20), location.Spin);
     }
 
     private static ItemLocation ReadLocation(ReadOnlySpan<byte> message) =>
-        new(SandboxWire.ReadFloat(message), SandboxWire.ReadFloat(message.Slice(4)), SandboxWire.ReadFloat(message.Slice(8)),
-            SandboxWire.ReadFloat(message.Slice(12)), SandboxWire.ReadFloat(message.Slice(16)), SandboxWire.ReadFloat(message.Slice(20)));
+        new(GameplayWire.ReadFloat(message), GameplayWire.ReadFloat(message.Slice(4)), GameplayWire.ReadFloat(message.Slice(8)),
+            GameplayWire.ReadFloat(message.Slice(12)), GameplayWire.ReadFloat(message.Slice(16)), GameplayWire.ReadFloat(message.Slice(20)));
 }
