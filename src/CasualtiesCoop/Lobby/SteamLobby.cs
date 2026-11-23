@@ -1,30 +1,21 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using BepInEx.Logging;
+using CasualtiesCoop.Networking;
 using Steamworks;
 using UnityEngine;
 
-namespace CasualtiesCoop;
-
-[Flags]
-internal enum RoomOptions
-{
-    None = 0,
-    PvP = 1,
-    Respawn = 2,
-    KeepItems = 4,
-    KeepCheckpoint = 8,
-    Defaults = Respawn | KeepItems | KeepCheckpoint,
-    All = PvP | Defaults
-}
+namespace CasualtiesCoop.Lobby;
 
 internal sealed class SteamLobby : IDisposable
 {
-    internal const int Capacity = 4;
     private const string MemberKey = "cu_member";
     private const string ProtocolKey = "cu_protocol";
-    private const string ProtocolVersion = "4";
+    private const string ProtocolVersion = "5";
     private const string SettingsKey = "cu_settings";
     private const string CreatorKey = "cu_creator";
+    private const string VerifiedMembersKey = "cu_verified";
     private readonly CallResult<LobbyCreated_t> lobbyCreated;
     private readonly CallResult<LobbyEnter_t> lobbyEntered;
     private readonly Callback<GameLobbyJoinRequested_t> invitation;
@@ -33,24 +24,69 @@ internal sealed class SteamLobby : IDisposable
     private bool busy;
     private int selectedCharacter;
 
+    internal event Action? LaunchInputsChanged;
+    internal SteamRoomLink Link { get; }
+
     internal CSteamID Current { get; private set; }
+    internal CSteamID Owner { get; private set; }
     internal CSteamID LocalUser { get; } = SteamUser.GetSteamID();
     internal bool InRoom => Current != CSteamID.Nil;
     internal bool IsBusy => busy;
-    internal bool IsHost => InRoom && SteamMatchmaking.GetLobbyOwner(Current) == LocalUser;
+    internal bool IsLaunching { get; private set; }
+    internal bool IsHost => InRoom && Owner == LocalUser && SteamMatchmaking.GetLobbyOwner(Current) == LocalUser;
     internal string? Status { get; private set; }
+    internal string? ConnectionStatus => Link.Status;
     internal int SelectedCharacter => selectedCharacter;
     internal string Difficulty => TryGetSettings(out string difficulty, out _, out _) ? difficulty : "normal";
     internal RoomOptions Options => TryGetSettings(out _, out RoomOptions options, out _) ? options : RoomOptions.Defaults;
     internal int MemberCount => InRoom ? SteamMatchmaking.GetNumLobbyMembers(Current) : 0;
-    internal bool CanStartSolo => IsHost && MemberCount == 1 && IsReady(LocalUser) && IsCharacterUnlocked(selectedCharacter);
+    internal bool CanReady => InRoom && !IsLaunching && GetLinkState(LocalUser) == RoomLinkState.Verified &&
+        IsCharacterUnlocked(selectedCharacter) && TryGetSettings(out _, out _, out _);
+    internal bool CanStartSolo => IsHost && MemberCount == 1 && CanReady && IsReady(LocalUser);
 
-    internal SteamLobby()
+    internal SteamLobby(ManualLogSource log)
     {
         lobbyCreated = CallResult<LobbyCreated_t>.Create(OnCreated);
         lobbyEntered = CallResult<LobbyEnter_t>.Create(OnEntered);
         invitation = Callback<GameLobbyJoinRequested_t>.Create(request => Join(request.m_steamIDLobby));
         membershipChanged = Callback<LobbyChatUpdate_t>.Create(OnMembershipChanged);
+        Link = new SteamRoomLink(LocalUser, HasMember, typeof(WorldGeneration).Assembly.ManifestModule.ModuleVersionId,
+            typeof(SteamLobby).Assembly.ManifestModule.ModuleVersionId, log);
+        Link.PeerChanged += OnPeerChanged;
+    }
+
+    internal CSteamID MemberAt(int index) => SteamMatchmaking.GetLobbyMemberByIndex(Current, index);
+
+    internal bool HasMember(CSteamID id)
+    {
+        int count = MemberCount;
+        for (int index = 0; index < count; index++)
+        {
+            if (MemberAt(index) == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal RoomLinkState GetLinkState(CSteamID player)
+    {
+        if (IsHost)
+        {
+            return player == LocalUser ? RoomLinkState.Verified : Link.GetState(player);
+        }
+
+        RoomLinkState hostState = Link.GetState(Owner);
+        if (hostState != RoomLinkState.Verified || player == Owner || player == LocalUser)
+        {
+            return hostState;
+        }
+
+        string verified = SteamMatchmaking.GetLobbyData(Current, VerifiedMembersKey);
+        return !string.IsNullOrEmpty(verified) && verified.Contains("|" + SteamIdText(player) + "|")
+            ? RoomLinkState.Verified : RoomLinkState.Connecting;
     }
 
     internal void Create()
@@ -62,7 +98,7 @@ internal sealed class SteamLobby : IDisposable
 
         busy = true;
         Status = "Creating room…";
-        lobbyCreated.Set(SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePrivate, Capacity));
+        lobbyCreated.Set(SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePrivate, RoomRules.Capacity));
     }
 
     internal void TryJoinLaunchInvitation()
@@ -80,7 +116,7 @@ internal sealed class SteamLobby : IDisposable
 
     internal void Invite()
     {
-        if (IsHost)
+        if (IsHost && !IsLaunching)
         {
             SteamFriends.ActivateGameOverlayInviteDialog(Current);
         }
@@ -98,6 +134,11 @@ internal sealed class SteamLobby : IDisposable
         }
 
         string selection = SteamMatchmaking.GetLobbyMemberData(Current, player, MemberKey);
+        if (string.IsNullOrEmpty(selection))
+        {
+            return false;
+        }
+
         int separator = selection.IndexOf(':');
         if (separator < 0 ||
             !int.TryParse(selection.Substring(0, separator), NumberStyles.None, CultureInfo.InvariantCulture, out character) ||
@@ -106,7 +147,8 @@ internal sealed class SteamLobby : IDisposable
             return false;
         }
 
-        ready = TryGetSettings(out _, out _, out string revision) &&
+        ready = GetLinkState(player) == RoomLinkState.Verified &&
+            TryGetSettings(out _, out _, out string revision) &&
             string.Equals(selection.Substring(separator + 1), revision, StringComparison.Ordinal);
         return true;
     }
@@ -119,7 +161,7 @@ internal sealed class SteamLobby : IDisposable
 
     internal void SelectCharacter(int character)
     {
-        if (InRoom && selectedCharacter != character && IsCharacterUnlocked(character))
+        if (InRoom && !IsLaunching && selectedCharacter != character && IsCharacterUnlocked(character))
         {
             selectedCharacter = character;
             PublishSelection();
@@ -128,7 +170,7 @@ internal sealed class SteamLobby : IDisposable
 
     internal void ChangeDifficulty(string difficulty)
     {
-        if (IsHost && difficulty != Difficulty && RunSettings.presets.Exists(preset => preset.presetName == difficulty))
+        if (IsHost && !IsLaunching && difficulty != Difficulty && RunSettings.presets.Exists(preset => preset.presetName == difficulty))
         {
             PublishSettings(difficulty, Options);
         }
@@ -136,7 +178,7 @@ internal sealed class SteamLobby : IDisposable
 
     internal void ChangeOption(RoomOptions option, bool enabled)
     {
-        if (IsHost && TryGetSettings(out string difficulty, out RoomOptions options, out _))
+        if (IsHost && !IsLaunching && TryGetSettings(out string difficulty, out RoomOptions options, out _))
         {
             RoomOptions updated = enabled ? options | option : options & ~option;
             if (updated != options)
@@ -148,7 +190,7 @@ internal sealed class SteamLobby : IDisposable
 
     internal void ToggleReady()
     {
-        if (IsCharacterUnlocked(selectedCharacter) && TryGetSettings(out _, out _, out string revision))
+        if (CanReady && TryGetSettings(out _, out _, out string revision))
         {
             PublishSelection(IsReady(LocalUser) ? "" : revision);
         }
@@ -158,8 +200,12 @@ internal sealed class SteamLobby : IDisposable
     {
         if (InRoom)
         {
+            LaunchInputsChanged?.Invoke();
+            Link.Close();
             SteamMatchmaking.LeaveLobby(Current);
             Current = CSteamID.Nil;
+            Owner = CSteamID.Nil;
+            IsLaunching = false;
             Status = null;
         }
     }
@@ -182,6 +228,26 @@ internal sealed class SteamLobby : IDisposable
         CoopPlugin.BeginSoloPreview();
         menu.StartRun();
         Leave();
+    }
+
+    internal bool LockForSandbox()
+    {
+        if (IsHost && SteamMatchmaking.SetLobbyJoinable(Current, false))
+        {
+            BeginSandboxLaunch();
+            return true;
+        }
+
+        Status = "Could not lock the room for the sandbox launch.";
+        return false;
+    }
+
+    internal void BeginSandboxLaunch() => IsLaunching = true;
+
+    internal void EndFailedLaunch()
+    {
+        Leave();
+        Status = "Could not launch the sandbox for everyone. Create a new room to retry.";
     }
 
     private void Join(CSteamID id)
@@ -213,7 +279,8 @@ internal sealed class SteamLobby : IDisposable
         }
 
         Current = new CSteamID(result.m_ulSteamIDLobby);
-        if (!SteamMatchmaking.SetLobbyData(Current, CreatorKey, LocalUser.m_SteamID.ToString(CultureInfo.InvariantCulture)) ||
+        Owner = LocalUser;
+        if (!SteamMatchmaking.SetLobbyData(Current, CreatorKey, SteamIdText(LocalUser)) ||
             !PublishSettings("normal", RoomOptions.Defaults) ||
             !SteamMatchmaking.SetLobbyData(Current, ProtocolKey, ProtocolVersion))
         {
@@ -237,10 +304,18 @@ internal sealed class SteamLobby : IDisposable
         }
 
         Current = new CSteamID(result.m_ulSteamIDLobby);
+        Owner = SteamMatchmaking.GetLobbyOwner(Current);
         if (Current != expected || SteamMatchmaking.GetLobbyData(Current, ProtocolKey) != ProtocolVersion)
         {
             Leave();
             Status = "This room uses a different mod protocol.";
+            return;
+        }
+
+        if (Owner == CSteamID.Nil || Owner == LocalUser || SteamMatchmaking.GetLobbyData(Current, CreatorKey) != SteamIdText(Owner))
+        {
+            Leave();
+            Status = "The room host is no longer available.";
             return;
         }
 
@@ -251,6 +326,7 @@ internal sealed class SteamLobby : IDisposable
     {
         selectedCharacter = 0;
         PublishSelection();
+        Link.Open(Current, Owner);
         Status = null;
     }
 
@@ -258,6 +334,7 @@ internal sealed class SteamLobby : IDisposable
     {
         string selection = selectedCharacter.ToString(CultureInfo.InvariantCulture) + ":" + readyRevision;
         SteamMatchmaking.SetLobbyMemberData(Current, MemberKey, selection);
+        LaunchInputsChanged?.Invoke();
     }
 
     private bool PublishSettings(string difficulty, RoomOptions options)
@@ -266,10 +343,15 @@ internal sealed class SteamLobby : IDisposable
             ":" + Guid.NewGuid().ToString("N");
         bool published = SteamMatchmaking.SetLobbyData(Current, SettingsKey, settings);
         Status = published ? null : "Could not update room settings.";
+        if (published)
+        {
+            LaunchInputsChanged?.Invoke();
+        }
+
         return published;
     }
 
-    private bool TryGetSettings(out string difficulty, out RoomOptions options, out string revision)
+    internal bool TryGetSettings(out string difficulty, out RoomOptions options, out string revision)
     {
         difficulty = "";
         options = RoomOptions.Defaults;
@@ -279,7 +361,7 @@ internal sealed class SteamLobby : IDisposable
             return false;
         }
 
-        string[] fields = SteamMatchmaking.GetLobbyData(Current, SettingsKey).Split(':');
+        string[] fields = (SteamMatchmaking.GetLobbyData(Current, SettingsKey) ?? "").Split(':');
         if (fields.Length != 3 || fields[0].Length == 0 ||
             !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out int flags) ||
             (flags & ~(int)RoomOptions.All) != 0 || !Guid.TryParseExact(fields[2], "N", out _))
@@ -300,21 +382,56 @@ internal sealed class SteamLobby : IDisposable
             return;
         }
 
-        CSteamID owner = SteamMatchmaking.GetLobbyOwner(Current);
-        if (SteamMatchmaking.GetLobbyData(Current, CreatorKey) != owner.m_SteamID.ToString(CultureInfo.InvariantCulture))
+        if (SteamMatchmaking.GetLobbyOwner(Current) != Owner)
         {
             Leave();
             Status = "The host left the room.";
         }
         else if (IsHost && update.m_ulSteamIDUserChanged != LocalUser.m_SteamID)
         {
+            if (((EChatMemberStateChange)update.m_rgfChatMemberStateChange &
+                EChatMemberStateChange.k_EChatMemberStateChangeEntered) == 0)
+            {
+                Link.ForgetMember(new CSteamID(update.m_ulSteamIDUserChanged));
+            }
+
             PublishSettings(Difficulty, Options);
         }
     }
 
+    private void OnPeerChanged(CSteamID _, bool connected)
+    {
+        if (IsHost)
+        {
+            int count = MemberCount;
+            List<string> verified = new();
+            for (int index = 0; index < count; index++)
+            {
+                CSteamID player = MemberAt(index);
+                if (player != LocalUser && Link.GetState(player) == RoomLinkState.Verified)
+                {
+                    verified.Add(SteamIdText(player));
+                }
+            }
+
+            SteamMatchmaking.SetLobbyData(Current, VerifiedMembersKey, "|" + string.Join("|", verified) + "|");
+            if (!connected)
+            {
+                PublishSettings(Difficulty, Options);
+            }
+        }
+        else if (!connected && InRoom)
+        {
+            PublishSelection();
+        }
+    }
+
+    private static string SteamIdText(CSteamID player) => player.m_SteamID.ToString(CultureInfo.InvariantCulture);
+
     public void Dispose()
     {
         Leave();
+        Link.Dispose();
         membershipChanged.Dispose();
         invitation.Dispose();
         lobbyCreated.Dispose();

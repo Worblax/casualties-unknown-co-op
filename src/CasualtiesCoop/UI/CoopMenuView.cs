@@ -1,17 +1,19 @@
 ﻿using System;
+using CasualtiesCoop.Lobby;
+using CasualtiesCoop.Networking;
 using Steamworks;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace CasualtiesCoop;
+namespace CasualtiesCoop.UI;
 
 public sealed class CoopMenuView : MonoBehaviour
 {
     private const float PanelWidth = 820f;
     private const float PanelHeight = 565f;
     private const float OptionsWidth = 620f;
-    private const float OptionsHeight = 282f;
+    private const float OptionsHeight = 327f;
     private static readonly Color32 LabelColor = new(222, 239, 231, 255);
     private static readonly Color32 ReadOnlyTextColor = new(181, 187, 185, 255);
     private static readonly ColorBlock ButtonColors = ControlColors(
@@ -20,15 +22,16 @@ public sealed class CoopMenuView : MonoBehaviour
         new Color32(34, 53, 51, 255), new Color32(47, 72, 68, 255), new Color32(25, 42, 39, 255));
     private static readonly (RoomOptions Option, string Label)[] RoomToggles =
     {
+        (RoomOptions.Sandbox, "Sandbox"),
         (RoomOptions.PvP, "PvP"),
         (RoomOptions.Respawn, "Respawn on the next layer"),
         (RoomOptions.KeepItems, "Keep some items after death"),
         (RoomOptions.KeepCheckpoint, "Keep checkpoint after team wipe")
     };
 
-    private readonly RawImage[] avatars = new RawImage[SteamLobby.Capacity];
-    private readonly TextMeshProUGUI[] members = new TextMeshProUGUI[SteamLobby.Capacity];
-    private readonly TextMeshProUGUI[] memberSelections = new TextMeshProUGUI[SteamLobby.Capacity];
+    private readonly RawImage[] avatars = new RawImage[RoomRules.Capacity];
+    private readonly TextMeshProUGUI[] members = new TextMeshProUGUI[RoomRules.Capacity];
+    private readonly TextMeshProUGUI[] memberSelections = new TextMeshProUGUI[RoomRules.Capacity];
     private PreRunScript? menu;
     private Canvas? canvas;
     private GameObject? root;
@@ -122,7 +125,7 @@ public sealed class CoopMenuView : MonoBehaviour
         readyButton = AddAction("Ready", 207, 500, 155, 44, () => CoopPlugin.Lobby?.ToggleReady(), out var readyText);
         readyLabel = readyText;
         leaveButton = AddAction("Leave room", 377, 500, 154, 44, () => CoopPlugin.Lobby?.Leave(), out _);
-        startButton = AddAction("Start", 602, 500, 190, 44, () => CoopPlugin.Lobby?.StartSoloPreview(menu!), out _);
+        startButton = AddAction("Start", 602, 500, 190, 44, () => CoopPlugin.StartFromLobby(menu!), out _);
         InstallOptionsPanel(group);
         SetPanelOpen(false);
     }
@@ -134,7 +137,7 @@ public sealed class CoopMenuView : MonoBehaviour
         AddAction("Back", 488, 24, 104, 40, () => SetOptionsOpen(false), out _, optionsPanel);
 
         RectTransform viewport = CreateRect("Options viewport", optionsPanel);
-        Place(viewport, 28, 79, 564, 182);
+        Place(viewport, 28, 79, 564, OptionsHeight - 100);
         viewport.gameObject.AddComponent<Image>().color = Color.clear;
         viewport.gameObject.AddComponent<RectMask2D>();
         RectTransform content = CreateRect("Options list", viewport);
@@ -234,45 +237,49 @@ public sealed class CoopMenuView : MonoBehaviour
     {
         bool inRoom = lobby is { InRoom: true };
         bool isHost = inRoom && lobby!.IsHost;
+        bool canEdit = isHost && !lobby!.IsLaunching;
         int count = lobby?.MemberCount ?? 0;
         if (!inRoom && optionsPanel!.gameObject.activeSelf)
         {
             SetPanelOpen(true);
         }
 
-        status!.text = lobby?.Status ?? (inRoom ? $"Players {count}/{SteamLobby.Capacity}" :
+        status!.text = lobby?.Status ?? lobby?.ConnectionStatus ?? (inRoom ? $"Players {count}/{RoomRules.Capacity}" :
             lobby is null ? CoopPlugin.SteamStatus : "Start a room and invite your team.");
 
         createButton!.gameObject.SetActive(!inRoom);
         createButton.interactable = lobby is { IsBusy: false };
         inviteButton!.gameObject.SetActive(isHost);
+        inviteButton.interactable = canEdit;
         readyButton!.gameObject.SetActive(inRoom);
+        readyButton.interactable = inRoom && lobby!.CanReady;
         leaveButton!.gameObject.SetActive(inRoom);
         startButton!.gameObject.SetActive(isHost);
-        startButton.interactable = isHost && lobby!.CanStartSolo;
+        startButton.interactable = isHost && (lobby!.CanStartSolo || CoopPlugin.CanStartSharedSandbox);
         difficulty!.gameObject.SetActive(inRoom);
         difficultyButton!.gameObject.SetActive(inRoom);
-        difficultyButton.interactable = isHost;
-        difficultyButtonLabel!.color = isHost ? LabelColor : ReadOnlyTextColor;
-        difficulty.color = isHost ? LabelColor : ReadOnlyTextColor;
+        difficultyButton.interactable = canEdit;
+        difficultyButtonLabel!.color = canEdit ? LabelColor : ReadOnlyTextColor;
+        difficulty.color = canEdit ? LabelColor : ReadOnlyTextColor;
         optionsButton!.gameObject.SetActive(inRoom);
-        startHint!.text = inRoom
-            ? count > 1 ? "Launching a shared run is still in development."
-                : "Start opens a solo preview. Room options are preview controls. Saving is disabled."
-            : "";
         RoomOptions options = lobby?.Options ?? RoomOptions.Defaults;
+        startHint!.text = inRoom
+            ? lobby!.IsLaunching ? "Entering the sandbox…"
+                : count > 1 ? CoopPlugin.PreparationStatus ?? "Waiting for players to connect and get ready."
+                : (options & RoomOptions.Sandbox) != 0 ? "Start opens the sandbox. Saving is disabled."
+                    : "Start opens a solo preview. Room options are preview controls. Saving is disabled."
+            : "";
         for (int index = 0; index < ruleToggles.Length; index++)
         {
             var (toggle, label, state) = ruleToggles[index];
             bool enabled = (options & RoomToggles[index].Option) != 0;
-            toggle.interactable = isHost;
-            toggle.graphic.color = isHost ? new Color32(143, 216, 182, 255) : ReadOnlyTextColor;
-            label.color = state.color = isHost ? LabelColor : ReadOnlyTextColor;
+            toggle.interactable = canEdit;
+            toggle.graphic.color = canEdit ? new Color32(143, 216, 182, 255) : ReadOnlyTextColor;
+            label.color = state.color = canEdit ? LabelColor : ReadOnlyTextColor;
             toggle.SetIsOnWithoutNotify(enabled);
             state.text = enabled ? "On" : "Off";
         }
 
-        CSteamID owner = inRoom ? SteamMatchmaking.GetLobbyOwner(lobby!.Current) : CSteamID.Nil;
         for (int index = 0; index < members.Length; index++)
         {
             bool present = index < count;
@@ -284,12 +291,17 @@ public sealed class CoopMenuView : MonoBehaviour
                 continue;
             }
 
-            CSteamID player = SteamMatchmaking.GetLobbyMemberByIndex(lobby!.Current, index);
-            string host = player == owner ? " (host)" : "";
+            CSteamID player = lobby!.MemberAt(index);
+            string host = player == lobby.Owner ? " (host)" : "";
             members[index].text = $"{SteamFriends.GetFriendPersonaName(player)}{host}";
-            memberSelections[index].text = lobby.TryGetMemberSelection(player, out int character, out bool ready)
-                ? $"{(ready ? "Ready" : "Waiting")} - {CharacterName(character)}"
-                : "Waiting";
+            bool hasCharacter = lobby.TryGetMemberSelection(player, out int character, out bool ready);
+            string playerStatus = lobby.GetLinkState(player) switch
+            {
+                RoomLinkState.Incompatible => "Incompatible build",
+                RoomLinkState.Connecting => "Connecting",
+                _ => ready ? "Ready" : "Waiting"
+            };
+            memberSelections[index].text = hasCharacter ? $"{playerStatus} - {CharacterName(character)}" : playerStatus;
             avatars[index].texture = images!.Get(player);
             avatars[index].color = avatars[index].texture ? Color.white : new Color32(52, 70, 68, 255);
         }
@@ -305,7 +317,7 @@ public sealed class CoopMenuView : MonoBehaviour
 
             bool unlocked = SteamLobby.IsCharacterUnlocked(index);
             bool selected = lobby!.SelectedCharacter == index;
-            button.interactable = unlocked && !selected;
+            button.interactable = unlocked && !selected && !lobby.IsLaunching;
             button.GetComponentInChildren<TextMeshProUGUI>().text = CharacterName(index) +
                 (!unlocked ? "\nLocked" : selected ? "\nSelected" : "");
         }

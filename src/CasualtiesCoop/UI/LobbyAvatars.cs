@@ -4,7 +4,7 @@ using Steamworks;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
-namespace CasualtiesCoop;
+namespace CasualtiesCoop.UI;
 
 internal sealed class LobbyAvatars : IDisposable
 {
