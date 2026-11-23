@@ -28,7 +28,11 @@ internal enum RoomFrame : byte
     FluidPush,
     FluidDrinkRequest,
     FluidDrinkResult,
-    SandboxLights
+    SandboxLights,
+    SandboxResumeRequest,
+    SandboxResumeState,
+    SandboxResumeApplied,
+    SandboxResumeCommitted
 }
 
 internal static class RoomWire

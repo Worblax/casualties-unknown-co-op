@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using BepInEx.Logging;
 using CasualtiesCoop.Game;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
@@ -9,7 +10,7 @@ using UnityEngine;
 
 namespace CasualtiesCoop.Session;
 
-internal sealed class SandboxPresence : IDisposable
+internal sealed partial class SandboxPresence : IDisposable
 {
     private const float UpdateInterval = 0.067f;
     private const float PoseTimeout = 2f;
@@ -28,6 +29,7 @@ internal sealed class SandboxPresence : IDisposable
     private readonly SteamLobby lobby;
     private readonly RoomLaunchPlan plan;
     private readonly TMP_FontAsset font;
+    private readonly ManualLogSource log;
     private readonly Dictionary<ulong, RemotePlayer> remotes = new();
     private readonly SandboxAudio audio = new();
     private readonly SandboxLights lights;
@@ -39,14 +41,16 @@ internal sealed class SandboxPresence : IDisposable
     internal SandboxItems Items { get; }
     internal SandboxFluids Fluids { get; }
 
-    internal SandboxPresence(SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font)
+    internal SandboxPresence(SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font, ManualLogSource log)
     {
         this.lobby = lobby;
         this.plan = plan;
         this.font = font;
+        this.log = log;
         Items = new SandboxItems(lobby, plan, TryGetPosition);
         Fluids = new SandboxFluids(lobby, plan, TryGetPosition);
         lights = new SandboxLights(lobby, plan, TryGetPosition, SendLocal, Broadcast);
+        lobby.Link.PeerChanged += OnRecoveryPeerChanged;
     }
 
     internal bool IsParticipant(CSteamID player, Guid launchId) =>
@@ -61,9 +65,10 @@ internal sealed class SandboxPresence : IDisposable
 
         Ready = true;
         Body body = PlayerCamera.main.body;
+        TickRecovery(body);
         float now = Time.unscaledTime;
         Vector2 position = body.transform.position;
-        if (now >= nextUpdate)
+        if (!WaitingForRecovery && now >= nextUpdate)
         {
             nextUpdate = now + UpdateInterval;
             SendLocal(SandboxWire.WritePosition(plan.Id, CapturePose(body, position)));
@@ -121,12 +126,19 @@ internal sealed class SandboxPresence : IDisposable
 
     internal bool Receive(CSteamID sender, byte[] bytes)
     {
-        return (RoomFrame)bytes[0] switch
+        RoomFrame frame = (RoomFrame)bytes[0];
+        if (lobby.IsHost && returningPeers.Contains(sender) &&
+            (frame != RoomFrame.ItemSyncRequest || !recoveryReceipts.ContainsKey(sender)))
+        {
+            return true;
+        }
+
+        return frame switch
         {
             RoomFrame.SandboxPosition => ReceivePose(sender, bytes),
             RoomFrame.SandboxSound => ReceiveSound(sender, bytes),
             RoomFrame.FluidChunk or RoomFrame.FluidPush or RoomFrame.FluidDrinkRequest or RoomFrame.FluidDrinkResult =>
-                Fluids.Receive(sender, bytes),
+                !Ready || (WaitingForRecovery && frame == RoomFrame.FluidPush) || Fluids.Receive(sender, bytes),
             RoomFrame.SandboxLights => lights.Receive(sender, bytes),
             _ => Items.Receive(sender, bytes)
         };
@@ -172,6 +184,16 @@ internal sealed class SandboxPresence : IDisposable
             return Ready;
         }
 
+        if (lobby.IsHost && returningPeers.Contains(new CSteamID(player)))
+        {
+            if (recoveryReceipts.TryGetValue(new CSteamID(player), out var receipt) && receipt.State.HasPosition)
+            {
+                position = new Vector2(receipt.State.X, receipt.State.Y);
+                return true;
+            }
+            return false;
+        }
+
         if (remotes.TryGetValue(player, out RemotePlayer remote) && Time.unscaledTime - remote.UpdatedAt <= PoseTimeout)
         {
             position = new Vector2(remote.Pose.X, remote.Pose.Y);
@@ -182,7 +204,7 @@ internal sealed class SandboxPresence : IDisposable
 
     internal void CaptureSound(string? key, AudioClip clip, Vector2 origin, AudioSource playback)
     {
-        if (!Ready || !PlayerCamera.main || !PlayerCamera.main.body)
+        if (!Ready || WaitingForRecovery || !PlayerCamera.main || !PlayerCamera.main.body)
         {
             return;
         }
@@ -249,7 +271,7 @@ internal sealed class SandboxPresence : IDisposable
         {
             Broadcast(frame, lobby.LocalUser);
         }
-        else
+        else if (!WaitingForRecovery)
         {
             lobby.Link.Send(lobby.Owner, frame, reliable: false);
         }
@@ -270,6 +292,7 @@ internal sealed class SandboxPresence : IDisposable
     public void Dispose()
     {
         Ready = false;
+        lobby.Link.PeerChanged -= OnRecoveryPeerChanged;
         Items.Dispose();
         Fluids.Dispose();
         lights.Dispose();

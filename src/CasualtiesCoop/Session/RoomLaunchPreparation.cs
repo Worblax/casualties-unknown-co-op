@@ -60,7 +60,7 @@ internal sealed class RoomLaunchPreparation
 
     internal RoomLaunchPlan? StartSandbox()
     {
-        if (!CanStartSandbox || plan is not { } launch || !lobby.LockForSandbox())
+        if (!CanStartSandbox || plan is not { } launch || !lobby.ReserveSandbox(launch))
         {
             return null;
         }

@@ -47,6 +47,7 @@ internal sealed class SandboxItems : IDisposable
     private float nextResend;
     private float nextSync;
     private bool synced;
+    private bool restoringFreshBody;
     private bool applying;
 
     internal SandboxItems(SteamLobby lobby, RoomLaunchPlan plan, PlayerPosition playerPosition)
@@ -59,6 +60,35 @@ internal sealed class SandboxItems : IDisposable
     }
 
     private ulong LocalId => lobby.LocalUser.m_SteamID;
+
+    internal ulong LastOperation(ulong player) => receipts.TryGetValue(player, out var receipt) ? receipt.Operation : 0;
+
+    internal void BeginRecovery(ulong confirmedOperation, bool freshBody)
+    {
+        nextOperation = Math.Max(nextOperation, confirmedOperation);
+        pending = null;
+        synced = false;
+        nextSync = 0;
+        restoringFreshBody = freshBody;
+    }
+
+    internal bool RecoveryComplete()
+    {
+        if (!synced)
+        {
+            return false;
+        }
+
+        foreach (Entry entry in entries.Values)
+        {
+            if (!entry.State.Removed && entry.State.Owner == LocalId && entry.AppliedRevision != entry.State.Revision)
+            {
+                return false;
+            }
+        }
+        restoringFreshBody = false;
+        return true;
+    }
 
     internal void Tick(Body localBody)
     {
@@ -679,6 +709,13 @@ internal sealed class SandboxItems : IDisposable
             replica.condition = entry.State.Condition;
             if (entry.State.Owner == LocalId)
             {
+                if (restoringFreshBody && entry.State.Slot < body!.slots.Length &&
+                    body.GetItem(entry.State.Slot) is { } occupant && occupant && occupant != replica && !IsTracked(occupant))
+                {
+                    NativeDrop(occupant);
+                    occupant.gameObject.SetActive(false);
+                    UnityEngine.Object.Destroy(occupant.gameObject);
+                }
                 if (!NativePickup(replica, entry.State.Slot))
                 {
                     replica.gameObject.SetActive(false);

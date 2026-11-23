@@ -51,6 +51,16 @@ internal sealed class SandboxLights : IDisposable
         this.relay = relay;
     }
 
+    internal uint LastSequence(ulong player) => remote.TryGetValue(player, out OwnerLights owner) ? owner.Sequence : 0;
+
+    internal void AdvanceLocalSequence(uint confirmed)
+    {
+        if (nextSequence == 0 || unchecked((int)(confirmed - nextSequence)) > 0)
+        {
+            nextSequence = confirmed;
+        }
+    }
+
     internal void Tick(Body body)
     {
         WorldGeneration world = WorldGeneration.world;

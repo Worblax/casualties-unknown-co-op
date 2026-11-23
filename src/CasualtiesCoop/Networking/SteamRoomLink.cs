@@ -19,6 +19,7 @@ internal sealed class SteamRoomLink : IDisposable
 {
     private const int VirtualPort = 477;
     private const int RoomEnded = 1001;
+    private const int HostClosedRoom = 1002;
     private const int BuildMismatch = 2001;
     private const int InvalidFrame = 2002;
     private const int LinkFailed = 2003;
@@ -60,6 +61,7 @@ internal sealed class SteamRoomLink : IDisposable
     private bool unavailable;
 
     internal event Action<CSteamID, bool>? PeerChanged;
+    internal event Action? HostEnded;
     internal Func<CSteamID, byte[], bool>? HandleFrame { get; set; }
     internal string? Status { get; private set; }
     private bool Hosting => host == localUser;
@@ -201,9 +203,14 @@ internal sealed class SteamRoomLink : IDisposable
 
             case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ClosedByPeer:
             case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
+                bool hostEnded = !Hosting && peer.Verified && info.m_eEndReason == HostClosedRoom;
                 bool mismatch = info.m_eEndReason == BuildMismatch;
                 Drop(peer, mismatch ? BuildMismatch : LinkFailed,
                     mismatch ? "The host and guest must use the same game and mod builds." : "Steam connection interrupted.");
+                if (hostEnded)
+                {
+                    HostEnded?.Invoke();
+                }
                 break;
         }
     }
@@ -353,13 +360,21 @@ internal sealed class SteamRoomLink : IDisposable
         }
     }
 
-    internal void ForgetMember(CSteamID player) => incompatible.Remove(player);
+    internal void ForgetMember(CSteamID player)
+    {
+        if (Find(player) is { } peer)
+        {
+            Drop(peer, RoomEnded, "Player left the room.");
+        }
+        incompatible.Remove(player);
+    }
 
     internal void Close()
     {
+        int reason = Hosting ? HostClosedRoom : RoomEnded;
         foreach (Peer peer in peers)
         {
-            SteamNetworkingSockets.CloseConnection(peer.Connection, RoomEnded, "Left the Steam room.", false);
+            SteamNetworkingSockets.CloseConnection(peer.Connection, reason, "Left the Steam room.", false);
         }
 
         peers.Clear();

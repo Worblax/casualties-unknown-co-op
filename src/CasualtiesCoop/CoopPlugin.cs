@@ -17,7 +17,7 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.14";
+    internal const string PluginVersion = "0.1.15";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private static CoopPlugin? instance;
@@ -27,6 +27,10 @@ internal sealed class CoopPlugin : BaseUnityPlugin
     private SandboxScene? sandboxScene;
     private SandboxPresence? sandboxPresence;
     private bool sandboxRejected;
+    private Guid coldReturnSession;
+    private Guid coldReturnAttempt;
+    private float nextColdReturn;
+    private SandboxReturnPanel? returnPanel;
     private CoopMenuView? view;
     private bool lobbyInitializationFailed;
     private bool previousRunInBackground;
@@ -54,6 +58,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         SandboxAudioHooks.Install(harmony);
         SandboxItemHooks.Install(harmony);
         SandboxFluidHooks.Install(harmony);
+        SandboxRecoveryHooks.Install(harmony);
         SceneManager.sceneLoaded += OnSceneLoaded;
         AttachMenu(PreRunScript.instance);
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
@@ -63,6 +68,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
 
     private void Update()
     {
+        lobby?.TickReturnInvitations();
         if (lobby is { InRoom: true } room)
         {
             room.Link.Tick();
@@ -74,8 +80,19 @@ internal sealed class CoopPlugin : BaseUnityPlugin
 
             if (sandboxScene is null)
             {
-                launchPreparation?.Tick();
+                if (room.ReturningTo == Guid.Empty)
+                {
+                    launchPreparation?.Tick();
+                }
+                else
+                {
+                    TickColdReturn(room);
+                }
             }
+        }
+        else
+        {
+            coldReturnSession = Guid.Empty;
         }
 
         if (sandboxPresence is not null && lobby is not { InRoom: true } && PlayerCamera.main)
@@ -100,6 +117,10 @@ internal sealed class CoopPlugin : BaseUnityPlugin
                 }
 
                 sandboxPresence?.Tick();
+                if (!returnPanel && sandboxPresence is { Ready: true } shared && lobby is { IsHost: true } host && PauseHandler.main)
+                {
+                    returnPanel = SandboxReturnPanel.Attach(PauseHandler.main, host, shared.Plan, sandboxScene.Font);
+                }
             }
         }
         if (!view && Time.unscaledTime >= nextMenuProbe)
@@ -222,7 +243,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
                     plan.TryGetPlayer(room.LocalUser.m_SteamID, out LaunchPlayer player) &&
                     EnterSandbox(menu, player.Character, plan))
                 {
-                    room.BeginSandboxLaunch();
+                    room.BeginSandboxLaunch(plan);
                 }
                 else
                 {
@@ -240,6 +261,14 @@ internal sealed class CoopPlugin : BaseUnityPlugin
 
                 sandboxRejected |= sandboxPresence?.IsParticipant(sender, rejected) == true;
                 return true;
+
+            case RoomFrame.SandboxResumeState:
+                return sandboxPresence?.ReceiveRecovery(sender, message) ?? AcceptColdReturn(sender, message);
+
+            case RoomFrame.SandboxResumeRequest:
+            case RoomFrame.SandboxResumeApplied:
+            case RoomFrame.SandboxResumeCommitted:
+                return sandboxPresence?.ReceiveRecovery(sender, message) ?? false;
 
             case RoomFrame.SandboxPosition:
             case RoomFrame.SandboxSound:
@@ -261,6 +290,45 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         }
     }
 
+    private void TickColdReturn(SteamLobby room)
+    {
+        if (coldReturnSession != room.ReturningTo)
+        {
+            coldReturnSession = room.ReturningTo;
+            coldReturnAttempt = Guid.NewGuid();
+            nextColdReturn = 0;
+        }
+
+        float now = Time.unscaledTime;
+        if (now >= nextColdReturn && view && view!.MenuAvailable &&
+            room.Link.GetState(room.Owner) == RoomLinkState.Verified && SandboxScene.CanEnter(PreRunScript.instance))
+        {
+            nextColdReturn = now + 1f;
+            room.Link.Send(room.Owner, SandboxResumeWire.WriteReference(RoomFrame.SandboxResumeRequest, coldReturnSession, coldReturnAttempt));
+        }
+    }
+
+    private bool AcceptColdReturn(CSteamID sender, byte[] message)
+    {
+        if (lobby is not { IsHost: false } room || sender != room.Owner || room.ReturningTo == Guid.Empty)
+        {
+            return false;
+        }
+
+        PreRunScript menu = PreRunScript.instance;
+        if (SandboxResumeWire.TryReadState(message, room.ReturningTo, out SandboxResumeState state) &&
+            state.Attempt == coldReturnAttempt && (state.Plan.Options & RoomOptions.Sandbox) != 0 &&
+            state.Plan.TryGetPlayer(room.Owner.m_SteamID, out _) && state.Plan.TryGetPlayer(room.LocalUser.m_SteamID, out LaunchPlayer player) &&
+            player.Character < SteamLobby.CharacterCount && RunSettings.presets.Exists(preset => preset.presetName == state.Plan.Difficulty) &&
+            view && view!.MenuAvailable && SandboxScene.CanEnter(menu) && EnterSandbox(menu, player.Character, state.Plan))
+        {
+            room.BeginSandboxLaunch(state.Plan);
+            sandboxPresence!.RestoreFrom(state);
+            Logger.LogInfo("Returning to the existing shared sandbox and restoring the reserved player seat.");
+        }
+        return true;
+    }
+
     private bool EnterSandbox(PreRunScript menu, int character, RoomLaunchPlan? plan)
     {
         try
@@ -268,7 +336,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
             sandboxScene = SandboxScene.Enter(menu, character, plan?.Difficulty ?? lobby!.Difficulty);
             if (plan is not null)
             {
-                sandboxPresence = new SandboxPresence(lobby!, plan, sandboxScene.Font);
+                sandboxPresence = new SandboxPresence(lobby!, plan, sandboxScene.Font, Logger);
             }
 
             Logger.LogInfo(plan is null ? "Opening sandbox preview." : "Opening shared sandbox.");
@@ -284,6 +352,12 @@ internal sealed class CoopPlugin : BaseUnityPlugin
 
     private void ClearSandbox()
     {
+        if (returnPanel)
+        {
+            Destroy(returnPanel!.gameObject);
+        }
+        returnPanel = null;
+        coldReturnSession = Guid.Empty;
         sandboxPresence?.Dispose();
         sandboxPresence = null;
         sandboxScene?.Dispose();

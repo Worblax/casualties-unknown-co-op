@@ -67,6 +67,51 @@ internal sealed class SandboxFluids : IDisposable
 
     internal bool IsGuest => !host && IsBound(FluidManager.main);
 
+    internal ulong LastDrink(CSteamID player) => drinks.TryGetValue(player, out var receipt) ? receipt.Operation : 0;
+
+    internal void BeginRecovery(ulong confirmedDrink)
+    {
+        drinkNumber = Math.Max(drinkNumber, confirmedDrink);
+        pendingDrink = null;
+        applied.Clear();
+    }
+
+    internal void ResendNearby(CSteamID player)
+    {
+        subscriptions.Remove(player);
+        nextNetwork = 0;
+    }
+
+    internal bool HasSnapshotNear(Vector2 position)
+    {
+        if (!IsBound(FluidManager.main))
+        {
+            return false;
+        }
+
+        Vector2Int at = world!.WorldToBlockPos(position);
+        if (!InBounds(at))
+        {
+            return true;
+        }
+
+        int minX = Math.Max(0, at.x - 2) / Size;
+        int minY = Math.Max(0, at.y - 2) / Size;
+        int maxX = Math.Min(cells!.GetLength(0) - 1, at.x + 2) / Size;
+        int maxY = Math.Min(cells.GetLength(1) - 1, at.y + 2) / Size;
+        for (int y = minY; y <= maxY; y++)
+        {
+            for (int x = minX; x <= maxX; x++)
+            {
+                if (!applied.ContainsKey(new Vector2Int(x, y)))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     private bool IsBound(FluidManager? manager) => manager && cells is not null &&
         ReferenceEquals(manager!.fluid, cells) && world && world == WorldGeneration.world &&
         world!.worldExists && !world.generatingWorld;
@@ -520,10 +565,13 @@ internal sealed class SandboxFluids : IDisposable
 
     private void OnPeerChanged(CSteamID peer, bool connected)
     {
-        subscriptions.Remove(peer);
         if (connected)
         {
-            nextNetwork = 0;
+            ResendNearby(peer);
+        }
+        else
+        {
+            subscriptions.Remove(peer);
         }
     }
 

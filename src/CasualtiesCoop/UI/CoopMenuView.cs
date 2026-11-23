@@ -16,7 +16,7 @@ public sealed class CoopMenuView : MonoBehaviour
     private const float OptionsHeight = 327f;
     private static readonly Color32 LabelColor = new(222, 239, 231, 255);
     private static readonly Color32 ReadOnlyTextColor = new(181, 187, 185, 255);
-    private static readonly ColorBlock ButtonColors = ControlColors(
+    internal static readonly ColorBlock ButtonColors = ControlColors(
         new Color32(48, 83, 76, 255), new Color32(62, 103, 94, 255), new Color32(34, 63, 57, 255));
     private static readonly ColorBlock ToggleColors = ControlColors(
         new Color32(34, 53, 51, 255), new Color32(47, 72, 68, 255), new Color32(25, 42, 39, 255));
@@ -40,6 +40,7 @@ public sealed class CoopMenuView : MonoBehaviour
     private ScrollRect? optionsScroll;
     private GameObject? backdrop;
     private Button? createButton;
+    private Button? returnButton;
     private Button? inviteButton;
     private Button? readyButton;
     private Button? leaveButton;
@@ -59,6 +60,9 @@ public sealed class CoopMenuView : MonoBehaviour
     private CSteamID previousRoom;
 
     internal bool PanelOpen => backdrop && backdrop!.activeInHierarchy;
+    internal bool MenuAvailable => menu && !menu!.contentWarning.activeInHierarchy && !menu.tutorialWarning.activeInHierarchy &&
+        !ScrollableText.textExists && !menu.creditsScreen.activeInHierarchy &&
+        !menu.runSettingsScreen.activeInHierarchy && !SettingsMenu.instance;
 
     internal void Install(PreRunScript owner)
     {
@@ -121,6 +125,7 @@ public sealed class CoopMenuView : MonoBehaviour
 
         startHint = AddLabel(panel, "", 28, 452, 764, 40, 16);
         createButton = AddAction("Create Steam room", 28, 500, 274, 44, () => CoopPlugin.Lobby?.Create(), out _);
+        returnButton = AddAction("Rejoin last room", 321, 500, 218, 44, () => CoopPlugin.Lobby?.RequestReturn(), out _);
         inviteButton = AddAction("Invite friends", 28, 500, 164, 44, () => CoopPlugin.Lobby?.Invite(), out _);
         readyButton = AddAction("Ready", 207, 500, 155, 44, () => CoopPlugin.Lobby?.ToggleReady(), out var readyText);
         readyLabel = readyText;
@@ -165,9 +170,7 @@ public sealed class CoopMenuView : MonoBehaviour
         }
 
         CoopPlugin.TickMenu();
-        bool visible = !menu!.contentWarning.activeInHierarchy && !menu.tutorialWarning.activeInHierarchy &&
-            !ScrollableText.textExists && !menu.creditsScreen.activeInHierarchy &&
-            !menu.runSettingsScreen.activeInHierarchy && !SettingsMenu.instance;
+        bool visible = MenuAvailable;
         root!.SetActive(visible);
         if (!visible || Time.unscaledTime < nextRefresh)
         {
@@ -244,11 +247,13 @@ public sealed class CoopMenuView : MonoBehaviour
             SetPanelOpen(true);
         }
 
-        status!.text = lobby?.Status ?? lobby?.ConnectionStatus ?? (inRoom ? $"Players {count}/{RoomRules.Capacity}" :
+        status!.text = lobby?.Status ?? lobby?.ReturnStatus ?? lobby?.ConnectionStatus ?? (inRoom ? $"Players {count}/{RoomRules.Capacity}" :
             lobby is null ? CoopPlugin.SteamStatus : "Start a room and invite your team.");
 
         createButton!.gameObject.SetActive(!inRoom);
         createButton.interactable = lobby is { IsBusy: false };
+        returnButton!.gameObject.SetActive(!inRoom && lobby is { HasReturnAddress: true });
+        returnButton.interactable = lobby is { CanRequestReturn: true };
         inviteButton!.gameObject.SetActive(isHost);
         inviteButton.interactable = canEdit;
         readyButton!.gameObject.SetActive(inRoom);
@@ -264,7 +269,8 @@ public sealed class CoopMenuView : MonoBehaviour
         optionsButton!.gameObject.SetActive(inRoom);
         RoomOptions options = lobby?.Options ?? RoomOptions.Defaults;
         startHint!.text = inRoom
-            ? lobby!.IsLaunching ? "Entering the sandbox…"
+            ? lobby!.ReturningTo != Guid.Empty ? "Restoring your place in the sandbox…"
+                : lobby.IsLaunching ? "Entering the sandbox…"
                 : count > 1 ? CoopPlugin.PreparationStatus ?? "Waiting for players to connect and get ready."
                 : (options & RoomOptions.Sandbox) != 0 ? "Start opens the sandbox. Saving is disabled."
                     : "Start opens a solo preview. Room options are preview controls. Saving is disabled."
