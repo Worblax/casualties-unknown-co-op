@@ -258,7 +258,8 @@ internal sealed class SteamRoomLink : IDisposable
                     }
                 }
                 // Unreliable gameplay updates can overtake the reliable confirmation after reconnecting.
-                else if ((RoomFrame)message[0] is not (RoomFrame.SandboxPosition or RoomFrame.SandboxSound or RoomFrame.ItemMotion) &&
+                else if ((RoomFrame)message[0] is not (RoomFrame.SandboxPosition or RoomFrame.SandboxSound or RoomFrame.ItemMotion or
+                    RoomFrame.FluidChunk or RoomFrame.FluidPush or RoomFrame.SandboxLights) &&
                     !CompleteHandshakeStep(peer, message))
                 {
                     return;

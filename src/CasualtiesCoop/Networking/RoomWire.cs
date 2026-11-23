@@ -23,7 +23,12 @@ internal enum RoomFrame : byte
     ItemResult,
     ItemMotion,
     ItemSyncRequest,
-    ItemSyncDone
+    ItemSyncDone,
+    FluidChunk,
+    FluidPush,
+    FluidDrinkRequest,
+    FluidDrinkResult,
+    SandboxLights
 }
 
 internal static class RoomWire

@@ -30,12 +30,14 @@ internal sealed class SandboxPresence : IDisposable
     private readonly TMP_FontAsset font;
     private readonly Dictionary<ulong, RemotePlayer> remotes = new();
     private readonly SandboxAudio audio = new();
+    private readonly SandboxLights lights;
     private uint sequence;
     private uint soundSequence;
     private float nextUpdate;
 
     internal bool Ready { get; private set; }
     internal SandboxItems Items { get; }
+    internal SandboxFluids Fluids { get; }
 
     internal SandboxPresence(SteamLobby lobby, RoomLaunchPlan plan, TMP_FontAsset font)
     {
@@ -43,6 +45,8 @@ internal sealed class SandboxPresence : IDisposable
         this.plan = plan;
         this.font = font;
         Items = new SandboxItems(lobby, plan, TryGetPosition);
+        Fluids = new SandboxFluids(lobby, plan, TryGetPosition);
+        lights = new SandboxLights(lobby, plan, TryGetPosition, SendLocal, Broadcast);
     }
 
     internal bool IsParticipant(CSteamID player, Guid launchId) =>
@@ -65,11 +69,12 @@ internal sealed class SandboxPresence : IDisposable
             SendLocal(SandboxWire.WritePosition(plan.Id, CapturePose(body, position)));
         }
 
+        lights.Tick(body);
         foreach (KeyValuePair<ulong, RemotePlayer> entry in remotes)
         {
             RemotePlayer remote = entry.Value;
             float age = now - remote.UpdatedAt;
-            if (age > PoseTimeout || remote.Pose.Player == 0)
+            if (age > PoseTimeout || remote.Pose.Player == 0 || !lights.BodyVisible(position, remote.Pose))
             {
                 remote.View?.Hide();
                 continue;
@@ -84,6 +89,7 @@ internal sealed class SandboxPresence : IDisposable
 
         audio.Tick(position);
         Items.Tick(body);
+        Fluids.Tick();
     }
 
     private SandboxPosition CapturePose(Body body, Vector2 origin)
@@ -119,6 +125,9 @@ internal sealed class SandboxPresence : IDisposable
         {
             RoomFrame.SandboxPosition => ReceivePose(sender, bytes),
             RoomFrame.SandboxSound => ReceiveSound(sender, bytes),
+            RoomFrame.FluidChunk or RoomFrame.FluidPush or RoomFrame.FluidDrinkRequest or RoomFrame.FluidDrinkResult =>
+                Fluids.Receive(sender, bytes),
+            RoomFrame.SandboxLights => lights.Receive(sender, bytes),
             _ => Items.Receive(sender, bytes)
         };
     }
@@ -262,6 +271,8 @@ internal sealed class SandboxPresence : IDisposable
     {
         Ready = false;
         Items.Dispose();
+        Fluids.Dispose();
+        lights.Dispose();
         audio.Dispose();
         foreach (RemotePlayer remote in remotes.Values)
         {

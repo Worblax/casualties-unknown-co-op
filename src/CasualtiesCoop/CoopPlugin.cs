@@ -17,7 +17,7 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.13";
+    internal const string PluginVersion = "0.1.14";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private static CoopPlugin? instance;
@@ -53,6 +53,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
             prefix: OwnPatch(nameof(AllowSave)));
         SandboxAudioHooks.Install(harmony);
         SandboxItemHooks.Install(harmony);
+        SandboxFluidHooks.Install(harmony);
         SceneManager.sceneLoaded += OnSceneLoaded;
         AttachMenu(PreRunScript.instance);
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
@@ -94,7 +95,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
                     Logger.LogInfo("Sandbox course loaded. Local console is available.");
                     if (sandboxPresence is not null)
                     {
-                        Logger.LogInfo("Shared sandbox movement, spatial audio, and item synchronization active.");
+                        Logger.LogInfo("Shared sandbox movement, audio, items, fluids and lighting active.");
                     }
                 }
 
@@ -248,6 +249,11 @@ internal sealed class CoopPlugin : BaseUnityPlugin
             case RoomFrame.ItemMotion:
             case RoomFrame.ItemSyncRequest:
             case RoomFrame.ItemSyncDone:
+            case RoomFrame.FluidChunk:
+            case RoomFrame.FluidPush:
+            case RoomFrame.FluidDrinkRequest:
+            case RoomFrame.FluidDrinkResult:
+            case RoomFrame.SandboxLights:
                 return sandboxPresence?.Receive(sender, message) ?? true;
 
             default:
