@@ -11,15 +11,18 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.1";
+    internal const string PluginVersion = "0.1.2";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private SteamLobby? lobby;
     private LobbyPanel? panel;
     private bool reportedSteamWait;
+    private bool previousRunInBackground;
 
     private void Awake()
     {
+        previousRunInBackground = Application.runInBackground;
+        Application.runInBackground = true;
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
         if (SteamInitialized is null)
         {
@@ -83,6 +86,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        Application.runInBackground = previousRunInBackground;
         panel?.Dispose();
         lobby?.Dispose();
     }
