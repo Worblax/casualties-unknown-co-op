@@ -3,7 +3,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <GameManagedDir Condition="'$(GameManagedDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\Casualties Unknown\CasualtiesUnknown_Data\Managed</GameManagedDir>
     <BepInExCoreDir Condition="'$(BepInExCoreDir)' == ''">N:\Steam\steamapps\common\Casualties Unknown\BepInEx\core</BepInExCoreDir>
   </PropertyGroup>

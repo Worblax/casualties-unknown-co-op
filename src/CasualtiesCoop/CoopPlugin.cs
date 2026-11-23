@@ -11,44 +11,81 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.2";
+    internal const string PluginVersion = "0.1.3";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
+    private static CoopPlugin? instance;
+    private Harmony? harmony;
     private SteamLobby? lobby;
     private LobbyPanel? panel;
-    private bool reportedSteamWait;
+    private string steamStatus = "Waiting for Steam.";
     private bool previousRunInBackground;
 
     private void Awake()
     {
+        instance = this;
         previousRunInBackground = Application.runInBackground;
         Application.runInBackground = true;
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
-        if (SteamInitialized is null)
+
+        harmony = new Harmony(PluginId);
+        MethodInfo start = AccessTools.Method(typeof(PreRunScript), "Start");
+        MethodInfo attach = AccessTools.Method(typeof(CoopPlugin), nameof(AttachMenu));
+        harmony.Patch(start, postfix: new HarmonyMethod(attach));
+        Logger.LogInfo("Co-op menu hook installed.");
+    }
+
+    private static void AttachMenu(PreRunScript __instance)
+    {
+        if (!__instance.TryGetComponent<CoopMenuView>(out _))
         {
-            Logger.LogError("The game's Steam initialization field is unavailable.");
+            __instance.gameObject.AddComponent<CoopMenuView>();
+            instance?.Logger.LogInfo("Co-op menu attached to the main menu.");
         }
     }
 
-    private void Update()
+    internal static void TickMenu()
     {
-        if (lobby is not null || SteamInitialized is null)
+        instance?.TryInitializeLobby();
+    }
+
+    internal static void DrawMenu()
+    {
+        if (instance is not { } plugin)
         {
             return;
         }
 
-        SteamManager manager = SteamManager.instance;
-        if (!manager || SteamInitialized.GetValue(manager) is not true)
+        if (plugin.panel is { } panel)
         {
-            ReportSteamWait(manager ? "the game did not initialize Steam" : "the game has not created SteamManager");
+            panel.Draw();
+        }
+        else
+        {
+            GUI.Box(new Rect(Mathf.Max(0, Screen.width - 300), 24, 276, 54),
+                "Co-op\n" + plugin.steamStatus);
+        }
+    }
+
+    private void TryInitializeLobby()
+    {
+        if (lobby is not null)
+        {
             return;
         }
 
         try
         {
+            SteamManager manager = SteamManager.instance;
+            if (SteamInitialized is null || !manager || SteamInitialized.GetValue(manager) is not true)
+            {
+                steamStatus = "Steam is unavailable. Launch from Steam.";
+                return;
+            }
+
             if (!SteamUser.BLoggedOn())
             {
-                ReportSteamWait("the Steam client is not signed in");
+                steamStatus = "Sign in to Steam.";
                 return;
             }
 
@@ -60,34 +97,25 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         catch (Exception ex)
         {
             Logger.LogError($"Steam lobby initialization failed: {ex}");
+            steamStatus = "Steam lobby error. See BepInEx log.";
+            panel?.Dispose();
             panel = null;
             lobby?.Dispose();
             lobby = null;
-            enabled = false;
+            lobbyInitializationFailed = true;
         }
     }
 
-    private void ReportSteamWait(string reason)
-    {
-        if (!reportedSteamWait && Time.realtimeSinceStartup >= 15f)
-        {
-            reportedSteamWait = true;
-            Logger.LogWarning($"Steam lobby is waiting: {reason}.");
-        }
-    }
+    private bool lobbyInitializationFailed;
 
-    private void OnGUI()
-    {
-        if (PreRunScript.instance)
-        {
-            panel?.Draw();
-        }
-    }
+    internal static bool CanInitialize => instance is { lobbyInitializationFailed: false };
 
     private void OnDestroy()
     {
+        harmony?.UnpatchSelf();
         Application.runInBackground = previousRunInBackground;
         panel?.Dispose();
         lobby?.Dispose();
+        instance = null;
     }
 }
