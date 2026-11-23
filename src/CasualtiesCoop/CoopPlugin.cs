@@ -4,6 +4,7 @@ using BepInEx;
 using HarmonyLib;
 using Steamworks;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace CasualtiesCoop;
 
@@ -11,15 +12,17 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.3";
+    internal const string PluginVersion = "0.1.4";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private static CoopPlugin? instance;
     private Harmony? harmony;
     private SteamLobby? lobby;
-    private LobbyPanel? panel;
-    private string steamStatus = "Waiting for Steam.";
+    private bool lobbyInitializationFailed;
     private bool previousRunInBackground;
+
+    internal static SteamLobby? Lobby => instance?.lobby;
+    internal static string SteamStatus { get; private set; } = "Waiting for Steam.";
 
     private void Awake()
     {
@@ -29,93 +32,95 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
 
         harmony = new Harmony(PluginId);
-        MethodInfo start = AccessTools.Method(typeof(PreRunScript), "Start");
         MethodInfo attach = AccessTools.Method(typeof(CoopPlugin), nameof(AttachMenu));
-        harmony.Patch(start, postfix: new HarmonyMethod(attach));
-        Logger.LogInfo("Co-op menu hook installed.");
+        HarmonyMethod postfix = new(attach);
+        harmony.Patch(AccessTools.Method(typeof(PreRunScript), "Awake"), postfix: postfix);
+        harmony.Patch(AccessTools.Method(typeof(PreRunScript), "Update"), postfix: postfix);
+        SceneManager.sceneLoaded += OnSceneLoaded;
+        AttachMenu(PreRunScript.instance);
+        Logger.LogInfo("Native co-op menu hooks installed.");
     }
 
-    private static void AttachMenu(PreRunScript __instance)
+    private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        if (!__instance.TryGetComponent<CoopMenuView>(out _))
-        {
-            __instance.gameObject.AddComponent<CoopMenuView>();
-            instance?.Logger.LogInfo("Co-op menu attached to the main menu.");
-        }
+        instance?.Logger.LogDebug($"Checking scene {scene.name} for the co-op menu.");
+        AttachMenu(PreRunScript.instance);
     }
 
-    internal static void TickMenu()
+    private static void AttachMenu(PreRunScript? __instance)
     {
-        instance?.TryInitializeLobby();
-    }
-
-    internal static void DrawMenu()
-    {
-        if (instance is not { } plugin)
-        {
-            return;
-        }
-
-        if (plugin.panel is { } panel)
-        {
-            panel.Draw();
-        }
-        else
-        {
-            GUI.Box(new Rect(Mathf.Max(0, Screen.width - 300), 24, 276, 54),
-                "Co-op\n" + plugin.steamStatus);
-        }
-    }
-
-    private void TryInitializeLobby()
-    {
-        if (lobby is not null)
+        if (!__instance || !__instance!.mainCanvas || __instance.TryGetComponent<CoopMenuView>(out _))
         {
             return;
         }
 
         try
         {
+            CoopMenuView view = __instance.gameObject.AddComponent<CoopMenuView>();
+            view.Install(__instance);
+            instance?.Logger.LogInfo("Native Co-op button attached to the main menu canvas.");
+        }
+        catch (Exception ex)
+        {
+            instance?.Logger.LogError($"Co-op menu attachment failed: {ex}");
+        }
+    }
+
+    internal static void TickMenu()
+    {
+        if (instance is { lobby: null, lobbyInitializationFailed: false } plugin)
+        {
+            plugin.TryInitializeLobby();
+        }
+    }
+
+    private void TryInitializeLobby()
+    {
+        try
+        {
             SteamManager manager = SteamManager.instance;
             if (SteamInitialized is null || !manager || SteamInitialized.GetValue(manager) is not true)
             {
-                steamStatus = "Steam is unavailable. Launch from Steam.";
+                SetSteamStatus("Steam is unavailable. Launch from Steam.");
                 return;
             }
 
             if (!SteamUser.BLoggedOn())
             {
-                steamStatus = "Sign in to Steam.";
+                SetSteamStatus("Sign in to Steam.");
                 return;
             }
 
             lobby = new SteamLobby();
-            panel = new LobbyPanel(lobby);
             Logger.LogInfo("Steam lobby integration ready.");
             lobby.TryJoinLaunchInvitation();
         }
         catch (Exception ex)
         {
             Logger.LogError($"Steam lobby initialization failed: {ex}");
-            steamStatus = "Steam lobby error. See BepInEx log.";
-            panel?.Dispose();
-            panel = null;
+            SetSteamStatus("Steam lobby error. See BepInEx log.");
             lobby?.Dispose();
             lobby = null;
             lobbyInitializationFailed = true;
         }
     }
 
-    private bool lobbyInitializationFailed;
-
-    internal static bool CanInitialize => instance is { lobbyInitializationFailed: false };
+    private void SetSteamStatus(string status)
+    {
+        if (SteamStatus != status)
+        {
+            SteamStatus = status;
+            Logger.LogInfo(status);
+        }
+    }
 
     private void OnDestroy()
     {
+        SceneManager.sceneLoaded -= OnSceneLoaded;
         harmony?.UnpatchSelf();
         Application.runInBackground = previousRunInBackground;
-        panel?.Dispose();
         lobby?.Dispose();
+        lobby = null;
         instance = null;
     }
 }
