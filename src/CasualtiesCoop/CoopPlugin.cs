@@ -12,7 +12,7 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.9";
+    internal const string PluginVersion = "0.1.11";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private static CoopPlugin? instance;

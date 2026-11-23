@@ -10,6 +10,14 @@ public sealed class CoopMenuView : MonoBehaviour
 {
     private const float PanelWidth = 820f;
     private const float PanelHeight = 565f;
+    private const float OptionsWidth = 620f;
+    private const float OptionsHeight = 282f;
+    private static readonly Color32 LabelColor = new(222, 239, 231, 255);
+    private static readonly Color32 ReadOnlyTextColor = new(181, 187, 185, 255);
+    private static readonly ColorBlock ButtonColors = ControlColors(
+        new Color32(48, 83, 76, 255), new Color32(62, 103, 94, 255), new Color32(34, 63, 57, 255));
+    private static readonly ColorBlock ToggleColors = ControlColors(
+        new Color32(34, 53, 51, 255), new Color32(47, 72, 68, 255), new Color32(25, 42, 39, 255));
     private static readonly (RoomOptions Option, string Label)[] RoomToggles =
     {
         (RoomOptions.PvP, "PvP"),
@@ -20,18 +28,24 @@ public sealed class CoopMenuView : MonoBehaviour
 
     private readonly RawImage[] avatars = new RawImage[SteamLobby.Capacity];
     private readonly TextMeshProUGUI[] members = new TextMeshProUGUI[SteamLobby.Capacity];
+    private readonly TextMeshProUGUI[] memberSelections = new TextMeshProUGUI[SteamLobby.Capacity];
     private PreRunScript? menu;
     private Canvas? canvas;
     private GameObject? root;
     private RectTransform? panel;
+    private RectTransform? optionsPanel;
+    private ScrollRect? optionsScroll;
     private GameObject? backdrop;
     private Button? createButton;
     private Button? inviteButton;
     private Button? readyButton;
     private Button? leaveButton;
     private Button? difficultyButton;
+    private TextMeshProUGUI? difficultyButtonLabel;
+    private Button? optionsButton;
     private Button? startButton;
-    private readonly Toggle[] ruleToggles = new Toggle[RoomToggles.Length];
+    private readonly (Toggle Toggle, TextMeshProUGUI Label, TextMeshProUGUI State)[] ruleToggles =
+        new (Toggle, TextMeshProUGUI, TextMeshProUGUI)[RoomToggles.Length];
     private Button[] characters = Array.Empty<Button>();
     private TextMeshProUGUI? status;
     private TextMeshProUGUI? difficulty;
@@ -41,7 +55,7 @@ public sealed class CoopMenuView : MonoBehaviour
     private float nextRefresh;
     private CSteamID previousRoom;
 
-    internal bool PanelOpen => panel && panel!.gameObject.activeInHierarchy;
+    internal bool PanelOpen => backdrop && backdrop!.activeInHierarchy;
 
     internal void Install(PreRunScript owner)
     {
@@ -66,11 +80,7 @@ public sealed class CoopMenuView : MonoBehaviour
         backdrop = dimmer.gameObject;
         dimmer.gameObject.AddComponent<Image>().color = new Color32(7, 12, 13, 190);
 
-        panel = CreateRect("Co-op panel", group);
-        panel.anchorMin = panel.anchorMax = panel.pivot = new Vector2(0.5f, 0.5f);
-        panel.sizeDelta = new Vector2(PanelWidth, PanelHeight);
-        Image background = panel.gameObject.AddComponent<Image>();
-        background.color = new Color32(17, 27, 28, 252);
+        panel = CreatePanel("Co-op panel", group, PanelWidth, PanelHeight);
 
         AddLabel(panel, "Steam co-op", 28, 22, 440, 42, 32);
         AddAction("Close", 688, 24, 104, 40, TogglePanel, out _);
@@ -84,16 +94,17 @@ public sealed class CoopMenuView : MonoBehaviour
             Place(avatar, 28, y, 34, 34);
             avatars[index] = avatar.gameObject.AddComponent<RawImage>();
             avatars[index].raycastTarget = false;
-            members[index] = AddLabel(panel, "", 75, y, 334, 36, 18);
+            members[index] = AddLabel(panel, "", 75, y, 334, 22, 18);
+            members[index].enableWordWrapping = false;
+            memberSelections[index] = AddLabel(panel, "", 75, y + 19, 334, 23, 16);
+            memberSelections[index].enableWordWrapping = false;
+            memberSelections[index].color = ReadOnlyTextColor;
         }
 
         difficulty = AddLabel(panel, "", 436, 174, 220, 38, 18);
-        difficultyButton = AddAction("Change", 688, 174, 104, 38, NextDifficulty, out _);
-        for (int index = 0; index < ruleToggles.Length; index++)
-        {
-            var rule = RoomToggles[index];
-            ruleToggles[index] = AddRuleToggle(rule.Label, 436, 231 + index * 41, rule.Option);
-        }
+        difficultyButton = AddAction("Change", 688, 174, 104, 38, NextDifficulty, out var changeText);
+        difficultyButtonLabel = changeText;
+        optionsButton = AddAction("Room options", 436, 231, 356, 40, () => SetOptionsOpen(true), out _);
 
         AddLabel(panel, "Your character", 28, 351, 342, 30, 19);
         characters = new Button[SteamLobby.CharacterCount];
@@ -112,7 +123,35 @@ public sealed class CoopMenuView : MonoBehaviour
         readyLabel = readyText;
         leaveButton = AddAction("Leave room", 377, 500, 154, 44, () => CoopPlugin.Lobby?.Leave(), out _);
         startButton = AddAction("Start", 602, 500, 190, 44, () => CoopPlugin.Lobby?.StartSoloPreview(menu!), out _);
+        InstallOptionsPanel(group);
         SetPanelOpen(false);
+    }
+
+    private void InstallOptionsPanel(RectTransform group)
+    {
+        optionsPanel = CreatePanel("Co-op room options panel", group, OptionsWidth, OptionsHeight);
+        AddLabel(optionsPanel, "Room options", 28, 22, 440, 42, 32);
+        AddAction("Back", 488, 24, 104, 40, () => SetOptionsOpen(false), out _, optionsPanel);
+
+        RectTransform viewport = CreateRect("Options viewport", optionsPanel);
+        Place(viewport, 28, 79, 564, 182);
+        viewport.gameObject.AddComponent<Image>().color = Color.clear;
+        viewport.gameObject.AddComponent<RectMask2D>();
+        RectTransform content = CreateRect("Options list", viewport);
+        Place(content, 0, 0, viewport.sizeDelta.x, RoomToggles.Length * 45);
+
+        optionsScroll = viewport.gameObject.AddComponent<ScrollRect>();
+        optionsScroll.viewport = viewport;
+        optionsScroll.content = content;
+        optionsScroll.horizontal = false;
+        optionsScroll.movementType = ScrollRect.MovementType.Clamped;
+        optionsScroll.scrollSensitivity = 25;
+
+        for (int index = 0; index < ruleToggles.Length; index++)
+        {
+            var rule = RoomToggles[index];
+            ruleToggles[index] = AddRuleToggle(content, rule.Label, index * 45, rule.Option);
+        }
     }
 
     private void Update()
@@ -144,30 +183,50 @@ public sealed class CoopMenuView : MonoBehaviour
             previousRoom = CSteamID.Nil;
         }
 
-        if (panel!.gameObject.activeSelf)
+        if (PanelOpen)
         {
             Refresh(lobby);
         }
     }
 
-    private void TogglePanel()
-    {
-        SetPanelOpen(!panel!.gameObject.activeSelf);
-        if (panel.gameObject.activeSelf)
-        {
-            Refresh(CoopPlugin.Lobby);
-        }
-    }
+    private void TogglePanel() => SetPanelOpen(!PanelOpen);
 
     private void SetPanelOpen(bool open)
     {
         backdrop!.SetActive(open);
+        optionsPanel!.gameObject.SetActive(false);
         panel!.gameObject.SetActive(open);
-        if (open && canvas!.transform is RectTransform bounds)
+        if (open)
         {
-            float scale = Mathf.Min(1f, (bounds.rect.width - 48) / PanelWidth,
-                (bounds.rect.height - 48) / PanelHeight);
-            panel.localScale = Vector3.one * Mathf.Max(0.25f, scale);
+            ResizePanel(panel);
+        }
+    }
+
+    private void SetOptionsOpen(bool open)
+    {
+        SteamLobby? lobby = CoopPlugin.Lobby;
+        if (open && lobby is not { InRoom: true })
+        {
+            return;
+        }
+
+        panel!.gameObject.SetActive(!open);
+        optionsPanel!.gameObject.SetActive(open);
+        ResizePanel(open ? optionsPanel : panel);
+        if (open)
+        {
+            optionsScroll!.StopMovement();
+            optionsScroll.verticalNormalizedPosition = 1;
+        }
+    }
+
+    private void ResizePanel(RectTransform target)
+    {
+        if (canvas!.transform is RectTransform bounds)
+        {
+            float scale = Mathf.Min(1f, (bounds.rect.width - 48) / target.sizeDelta.x,
+                (bounds.rect.height - 48) / target.sizeDelta.y);
+            target.localScale = Vector3.one * Mathf.Max(0.25f, scale);
         }
     }
 
@@ -176,6 +235,11 @@ public sealed class CoopMenuView : MonoBehaviour
         bool inRoom = lobby is { InRoom: true };
         bool isHost = inRoom && lobby!.IsHost;
         int count = lobby?.MemberCount ?? 0;
+        if (!inRoom && optionsPanel!.gameObject.activeSelf)
+        {
+            SetPanelOpen(true);
+        }
+
         status!.text = lobby?.Status ?? (inRoom ? $"Players {count}/{SteamLobby.Capacity}" :
             lobby is null ? CoopPlugin.SteamStatus : "Start a room and invite your team.");
 
@@ -187,7 +251,11 @@ public sealed class CoopMenuView : MonoBehaviour
         startButton!.gameObject.SetActive(isHost);
         startButton.interactable = isHost && lobby!.CanStartSolo;
         difficulty!.gameObject.SetActive(inRoom);
-        difficultyButton!.gameObject.SetActive(isHost);
+        difficultyButton!.gameObject.SetActive(inRoom);
+        difficultyButton.interactable = isHost;
+        difficultyButtonLabel!.color = isHost ? LabelColor : ReadOnlyTextColor;
+        difficulty.color = isHost ? LabelColor : ReadOnlyTextColor;
+        optionsButton!.gameObject.SetActive(inRoom);
         startHint!.text = inRoom
             ? count > 1 ? "Launching a shared run is still in development."
                 : "Start opens a solo preview. Room options are preview controls. Saving is disabled."
@@ -195,16 +263,21 @@ public sealed class CoopMenuView : MonoBehaviour
         RoomOptions options = lobby?.Options ?? RoomOptions.Defaults;
         for (int index = 0; index < ruleToggles.Length; index++)
         {
-            Toggle toggle = ruleToggles[index];
-            toggle.gameObject.SetActive(inRoom);
+            var (toggle, label, state) = ruleToggles[index];
+            bool enabled = (options & RoomToggles[index].Option) != 0;
             toggle.interactable = isHost;
-            toggle.SetIsOnWithoutNotify((options & RoomToggles[index].Option) != 0);
+            toggle.graphic.color = isHost ? new Color32(143, 216, 182, 255) : ReadOnlyTextColor;
+            label.color = state.color = isHost ? LabelColor : ReadOnlyTextColor;
+            toggle.SetIsOnWithoutNotify(enabled);
+            state.text = enabled ? "On" : "Off";
         }
 
+        CSteamID owner = inRoom ? SteamMatchmaking.GetLobbyOwner(lobby!.Current) : CSteamID.Nil;
         for (int index = 0; index < members.Length; index++)
         {
             bool present = index < count;
             members[index].gameObject.SetActive(present);
+            memberSelections[index].gameObject.SetActive(present);
             avatars[index].gameObject.SetActive(present);
             if (!present)
             {
@@ -212,11 +285,11 @@ public sealed class CoopMenuView : MonoBehaviour
             }
 
             CSteamID player = SteamMatchmaking.GetLobbyMemberByIndex(lobby!.Current, index);
-            string host = player == SteamMatchmaking.GetLobbyOwner(lobby.Current) ? " (host)" : "";
-            string ready = lobby.TryGetReadyCharacter(player, out int character)
-                ? $"Ready · {CharacterName(character)}"
+            string host = player == owner ? " (host)" : "";
+            members[index].text = $"{SteamFriends.GetFriendPersonaName(player)}{host}";
+            memberSelections[index].text = lobby.TryGetMemberSelection(player, out int character, out bool ready)
+                ? $"{(ready ? "Ready" : "Waiting")} - {CharacterName(character)}"
                 : "Waiting";
-            members[index].text = $"{SteamFriends.GetFriendPersonaName(player)}{host}   {ready}";
             avatars[index].texture = images!.Get(player);
             avatars[index].color = avatars[index].texture ? Color.white : new Color32(52, 70, 68, 255);
         }
@@ -258,9 +331,9 @@ public sealed class CoopMenuView : MonoBehaviour
     }
 
     private Button AddAction(string label, float x, float y, float width, float height,
-        Action action, out TextMeshProUGUI text)
+        Action action, out TextMeshProUGUI text, RectTransform? parent = null)
     {
-        RectTransform rect = CreateRect(label, panel!);
+        RectTransform rect = CreateRect(label, parent ?? panel!);
         Place(rect, x, y, width, height);
         return AddButton(rect, label, action, out text);
     }
@@ -268,14 +341,32 @@ public sealed class CoopMenuView : MonoBehaviour
     private Button AddButton(RectTransform rect, string label, Action action, out TextMeshProUGUI text)
     {
         Image image = rect.gameObject.AddComponent<Image>();
-        image.color = new Color32(48, 83, 76, 255);
         Button button = rect.gameObject.AddComponent<Button>();
         button.targetGraphic = image;
-        button.onClick.AddListener(() => action());
+        button.colors = ButtonColors;
+        button.onClick.AddListener(() =>
+        {
+            action();
+            if (PanelOpen)
+            {
+                Refresh(CoopPlugin.Lobby);
+            }
+        });
         text = AddLabel(rect, label, 0, 0, rect.sizeDelta.x, rect.sizeDelta.y, 17);
         text.alignment = TextAlignmentOptions.Center;
         return button;
     }
+
+    private static ColorBlock ControlColors(Color32 normal, Color32 highlighted, Color32 pressed) => new()
+    {
+        normalColor = normal,
+        highlightedColor = highlighted,
+        pressedColor = pressed,
+        selectedColor = highlighted,
+        disabledColor = new Color32(65, 65, 65, 255),
+        colorMultiplier = 1f,
+        fadeDuration = 0.07f
+    };
 
     private TextMeshProUGUI AddLabel(RectTransform parent, string value, float x, float y,
         float width, float height, float size)
@@ -289,7 +380,7 @@ public sealed class CoopMenuView : MonoBehaviour
         label.enableAutoSizing = true;
         label.fontSizeMin = Mathf.Max(12, size - 5);
         label.fontSizeMax = size;
-        label.color = new Color32(222, 239, 231, 255);
+        label.color = LabelColor;
         label.richText = false;
         label.raycastTarget = false;
         label.overflowMode = TextOverflowModes.Ellipsis;
@@ -304,23 +395,39 @@ public sealed class CoopMenuView : MonoBehaviour
         return rect;
     }
 
-    private Toggle AddRuleToggle(string label, float x, float y, RoomOptions option)
+    private static RectTransform CreatePanel(string name, Transform parent, float width, float height)
     {
-        RectTransform row = CreateRect(label, panel!);
-        Place(row, x, y, 352, 34);
+        RectTransform rect = CreateRect(name, parent);
+        rect.anchorMin = rect.anchorMax = rect.pivot = new Vector2(0.5f, 0.5f);
+        rect.sizeDelta = new Vector2(width, height);
+        rect.gameObject.AddComponent<Image>().color = new Color32(17, 27, 28, 252);
+        return rect;
+    }
+
+    private (Toggle, TextMeshProUGUI, TextMeshProUGUI) AddRuleToggle(
+        RectTransform parent, string label, float y, RoomOptions option)
+    {
+        RectTransform row = CreateRect(label, parent);
+        Place(row, 0, y, parent.sizeDelta.x, 36);
         Image background = row.gameObject.AddComponent<Image>();
-        background.color = new Color32(34, 53, 51, 255);
         Toggle toggle = row.gameObject.AddComponent<Toggle>();
         toggle.targetGraphic = background;
+        toggle.colors = ToggleColors;
         RectTransform check = CreateRect("Check", row);
-        Place(check, 9, 9, 16, 16);
+        Place(check, 12, 10, 16, 16);
         Image indicator = check.gameObject.AddComponent<Image>();
-        indicator.color = new Color32(143, 216, 182, 255);
         indicator.raycastTarget = false;
         toggle.graphic = indicator;
-        AddLabel(row, label, 35, 2, 308, 29, 17).alignment = TextAlignmentOptions.MidlineLeft;
-        toggle.onValueChanged.AddListener(value => CoopPlugin.Lobby?.ChangeOption(option, value));
-        return toggle;
+        TextMeshProUGUI title = AddLabel(row, label, 40, 2, 450, 32, 17);
+        title.alignment = TextAlignmentOptions.MidlineLeft;
+        TextMeshProUGUI state = AddLabel(row, "", 494, 2, 54, 32, 17);
+        state.alignment = TextAlignmentOptions.MidlineRight;
+        toggle.onValueChanged.AddListener(value =>
+        {
+            CoopPlugin.Lobby?.ChangeOption(option, value);
+            Refresh(CoopPlugin.Lobby);
+        });
+        return (toggle, title, state);
     }
 
     private static void Stretch(RectTransform rect)

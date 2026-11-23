@@ -20,9 +20,9 @@ internal enum RoomOptions
 internal sealed class SteamLobby : IDisposable
 {
     internal const int Capacity = 4;
-    private const string ReadyKey = "cu_ready";
+    private const string MemberKey = "cu_member";
     private const string ProtocolKey = "cu_protocol";
-    private const string ProtocolVersion = "3";
+    private const string ProtocolVersion = "4";
     private const string SettingsKey = "cu_settings";
     private const string CreatorKey = "cu_creator";
     private readonly CallResult<LobbyCreated_t> lobbyCreated;
@@ -86,21 +86,29 @@ internal sealed class SteamLobby : IDisposable
         }
     }
 
-    internal bool IsReady(CSteamID player) => TryGetReadyCharacter(player, out _);
+    internal bool IsReady(CSteamID player) => TryGetMemberSelection(player, out _, out bool ready) && ready;
 
-    internal bool TryGetReadyCharacter(CSteamID player, out int character)
+    internal bool TryGetMemberSelection(CSteamID player, out int character, out bool ready)
     {
         character = 0;
-        if (!TryGetSettings(out _, out _, out string revision))
+        ready = false;
+        if (!InRoom)
         {
             return false;
         }
 
-        string selection = SteamMatchmaking.GetLobbyMemberData(Current, player, ReadyKey);
-        string prefix = revision + ":";
-        return selection.StartsWith(prefix, StringComparison.Ordinal) &&
-            int.TryParse(selection.Substring(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out character) &&
-            character >= 0 && character < CharacterCount;
+        string selection = SteamMatchmaking.GetLobbyMemberData(Current, player, MemberKey);
+        int separator = selection.IndexOf(':');
+        if (separator < 0 ||
+            !int.TryParse(selection.Substring(0, separator), NumberStyles.None, CultureInfo.InvariantCulture, out character) ||
+            character >= CharacterCount)
+        {
+            return false;
+        }
+
+        ready = TryGetSettings(out _, out _, out string revision) &&
+            string.Equals(selection.Substring(separator + 1), revision, StringComparison.Ordinal);
+        return true;
     }
 
     internal static int CharacterCount => PreRunScript.instance ? PreRunScript.instance.charImages.Count : 0;
@@ -114,7 +122,7 @@ internal sealed class SteamLobby : IDisposable
         if (InRoom && selectedCharacter != character && IsCharacterUnlocked(character))
         {
             selectedCharacter = character;
-            SteamMatchmaking.SetLobbyMemberData(Current, ReadyKey, "0");
+            PublishSelection();
         }
     }
 
@@ -142,8 +150,7 @@ internal sealed class SteamLobby : IDisposable
     {
         if (IsCharacterUnlocked(selectedCharacter) && TryGetSettings(out _, out _, out string revision))
         {
-            string ready = revision + ":" + selectedCharacter.ToString(CultureInfo.InvariantCulture);
-            SteamMatchmaking.SetLobbyMemberData(Current, ReadyKey, IsReady(LocalUser) ? "0" : ready);
+            PublishSelection(IsReady(LocalUser) ? "" : revision);
         }
     }
 
@@ -243,8 +250,14 @@ internal sealed class SteamLobby : IDisposable
     private void InitializeMembership()
     {
         selectedCharacter = 0;
-        SteamMatchmaking.SetLobbyMemberData(Current, ReadyKey, "0");
+        PublishSelection();
         Status = null;
+    }
+
+    private void PublishSelection(string readyRevision = "")
+    {
+        string selection = selectedCharacter.ToString(CultureInfo.InvariantCulture) + ":" + readyRevision;
+        SteamMatchmaking.SetLobbyMemberData(Current, MemberKey, selection);
     }
 
     private bool PublishSettings(string difficulty, RoomOptions options)
@@ -252,11 +265,7 @@ internal sealed class SteamLobby : IDisposable
         string settings = difficulty + ":" + ((int)options).ToString(CultureInfo.InvariantCulture) +
             ":" + Guid.NewGuid().ToString("N");
         bool published = SteamMatchmaking.SetLobbyData(Current, SettingsKey, settings);
-        if (!published)
-        {
-            Status = "Could not update room settings.";
-        }
-
+        Status = published ? null : "Could not update room settings.";
         return published;
     }
 
