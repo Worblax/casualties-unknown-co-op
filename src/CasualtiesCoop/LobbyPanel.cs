@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Steamworks;
 using UnityEngine;
@@ -11,6 +11,7 @@ internal sealed class LobbyPanel : IDisposable
     private readonly SteamLobby lobby;
     private readonly Dictionary<int, Texture2D> avatars = new();
     private bool open;
+    private Vector2 scroll;
 
     internal LobbyPanel(SteamLobby lobby)
     {
@@ -29,7 +30,9 @@ internal sealed class LobbyPanel : IDisposable
             return;
         }
 
-        GUILayout.BeginArea(new Rect(Screen.width - 344, 66, 320, 310), GUI.skin.box);
+        bool wasEnabled = GUI.enabled;
+        GUILayout.BeginArea(new Rect(Screen.width - 344, 66, 320, Mathf.Min(460, Screen.height - 72)), GUI.skin.box);
+        scroll = GUILayout.BeginScrollView(scroll);
         try
         {
             if (lobby.InRoom)
@@ -52,7 +55,8 @@ internal sealed class LobbyPanel : IDisposable
         }
         finally
         {
-            GUI.enabled = true;
+            GUI.enabled = wasEnabled;
+            GUILayout.EndScrollView();
             GUILayout.EndArea();
         }
     }
@@ -72,8 +76,34 @@ internal sealed class LobbyPanel : IDisposable
             string suffix = player == owner ? " (host)" : "";
             GUILayout.Label(SteamFriends.GetFriendPersonaName(player) + suffix);
             GUILayout.FlexibleSpace();
-            GUILayout.Label(lobby.IsReady(player) ? "Ready" : "Waiting");
+            string status = lobby.TryGetReadyCharacter(player, out int character)
+                ? $"Ready: {Locale.GetOther($"char{character}name")}"
+                : "Waiting";
+            GUILayout.Label(status);
             GUILayout.EndHorizontal();
+        }
+
+        GUILayout.Label($"Difficulty: {lobby.Difficulty}");
+        if (lobby.IsHost && GUILayout.Button("Next difficulty"))
+        {
+            int index = RunSettings.presets.FindIndex(preset => preset.presetName == lobby.Difficulty);
+            int next = (index + 1) % RunSettings.presets.Count;
+            lobby.ChangeDifficulty(RunSettings.presets[next].presetName);
+        }
+
+        GUILayout.Label("Your character");
+        for (int character = 0; character < SteamLobby.CharacterCount; character++)
+        {
+            bool unlocked = SteamLobby.IsCharacterUnlocked(character);
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && unlocked && character != lobby.SelectedCharacter;
+            string name = Locale.GetOther($"char{character}name");
+            string suffix = unlocked ? (character == lobby.SelectedCharacter ? " (selected)" : "") : " (locked)";
+            if (GUILayout.Button(name + suffix))
+            {
+                lobby.SelectCharacter(character);
+            }
+            GUI.enabled = wasEnabled;
         }
 
         if (lobby.IsHost && GUILayout.Button("Invite friends"))

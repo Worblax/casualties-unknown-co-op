@@ -11,11 +11,12 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     internal const string PluginId = "casualtiesunknown.coop";
-    internal const string PluginVersion = "0.1.0";
+    internal const string PluginVersion = "0.1.1";
 
     private static readonly FieldInfo? SteamInitialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private SteamLobby? lobby;
     private LobbyPanel? panel;
+    private bool reportedSteamWait;
 
     private void Awake()
     {
@@ -36,6 +37,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         SteamManager manager = SteamManager.instance;
         if (!manager || SteamInitialized.GetValue(manager) is not true)
         {
+            ReportSteamWait(manager ? "the game did not initialize Steam" : "the game has not created SteamManager");
             return;
         }
 
@@ -43,6 +45,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         {
             if (!SteamUser.BLoggedOn())
             {
+                ReportSteamWait("the Steam client is not signed in");
                 return;
             }
 
@@ -58,6 +61,15 @@ internal sealed class CoopPlugin : BaseUnityPlugin
             lobby?.Dispose();
             lobby = null;
             enabled = false;
+        }
+    }
+
+    private void ReportSteamWait(string reason)
+    {
+        if (!reportedSteamWait && Time.realtimeSinceStartup >= 15f)
+        {
+            reportedSteamWait = true;
+            Logger.LogWarning($"Steam lobby is waiting: {reason}.");
         }
     }
 
