@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "name": "world.actor-native-actions",
+  "level": "UNITY_ACTORS",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "standaloneItems": true,
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "arena",
+      "position": [
+        -8,
+        -3
+      ],
+      "rows": [
+        "................",
+        "................",
+        "................",
+        "................",
+        "xxxxxxxxxxxxxxxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1,
+        "b": 42
+      }
+    },
+    {
+      "op": "character.spawn",
+      "id": "actor",
+      "character": 0,
+      "position": [
+        3,
+        0
+      ]
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "stick",
+      "position": [
+        4,
+        0
+      ]
+    },
+    {
+      "op": "character.setState",
+      "target": "actor",
+      "brainHealth": 94,
+      "hunger": 85,
+      "thirst": 87,
+      "stamina": 96,
+      "temperature": 36.5,
+      "bloodVolume": 97,
+      "limb": 0,
+      "skin": 90,
+      "muscle": 92,
+      "pain": 3,
+      "bleeding": 0.2
+    },
+    {
+      "op": "character.speed",
+      "target": "actor",
+      "maxSpeed": 5
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.speed",
+      "expected": 5,
+      "target": "actor"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.hunger",
+      "expected": 85,
+      "target": "actor"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.brainHealth",
+      "expected": 94,
+      "target": "actor"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.grounded",
+        "expected": 1,
+        "target": "actor"
+      }
+    },
+    {
+      "op": "character.crouch",
+      "target": "actor",
+      "enabled": true
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.crouched",
+        "expected": 1,
+        "target": "actor"
+      }
+    },
+    {
+      "op": "character.crouch",
+      "target": "actor",
+      "enabled": false
+    },
+    {
+      "op": "wait.physicsTicks",
+      "count": 8
+    },
+    {
+      "op": "character.jump",
+      "target": "actor"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.jumped",
+        "expected": 1,
+        "target": "actor"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.grounded",
+        "expected": 1,
+        "target": "actor"
+      }
+    },
+    {
+      "op": "character.pickup",
+      "target": "actor",
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.holdsItem",
+      "expected": 1,
+      "actor": "actor",
+      "item": "target"
+    },
+    {
+      "op": "snapshot.capture",
+      "id": "with-item"
+    },
+    {
+      "op": "character.throw",
+      "target": "actor",
+      "item": "target",
+      "direction": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.holdsItem",
+      "expected": 0,
+      "actor": "actor",
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.activeWorldCount",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "character.ragdoll",
+      "target": "actor"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.ragdolled",
+        "expected": 1,
+        "target": "actor"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.localCameraPreserved",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

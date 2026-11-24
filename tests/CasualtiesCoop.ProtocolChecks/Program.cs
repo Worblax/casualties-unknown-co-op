@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using CasualtiesCoop.Gameplay.Audio;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Gameplay.Characters;
 using CasualtiesCoop.Networking;
@@ -8,7 +9,10 @@ using CasualtiesCoop.Session;
 VerifyHandshake();
 VerifyLaunchPlan();
 VerifyCharacterPose();
-Console.WriteLine("Handshake, launch plan and sandbox packet checks passed.");
+VerifyCharacterSound();
+WireCompatibilityChecks.Run();
+VerifySandboxGameplay();
+Console.WriteLine("Handshake, launch plan, character, item, fluid and rejoin wire checks passed.");
 
 static void VerifyHandshake()
 {
@@ -78,6 +82,65 @@ static void VerifyCharacterPose()
     Check(!CharacterPoseWire.TryRead(frame, session, out _), "Non-finite coordinate");
     BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(29), BitConverter.SingleToInt32Bits(100_000f));
     Check(!CharacterPoseWire.TryRead(frame, session, out _), "Coordinate outside the game world");
+
+    LimbPose[] limbs = new LimbPose[CharacterPoseWire.MaxLimbs];
+    limbs[^1] = new LimbPose(-2, 3, 348, 1, 1, true);
+    AnimatorLayerPose[] body = new AnimatorLayerPose[CharacterPoseWire.MaxLayers];
+    AnimatorLayerPose[] arms = new AnimatorLayerPose[CharacterPoseWire.MaxLayers];
+    body[0] = new AnimatorLayerPose(unchecked((int)0xABCD1234), 3.25f, 25, 0.125f, 0.5f);
+    arms[^1] = new AnimatorLayerPose(21, 1.25f);
+    FacePose face = new(4, 15, 123);
+    frame = CharacterPoseWire.Write(session, new CharacterPose(9, 13, 2.5f, -106f,
+        facingRight: false, standing: false, limbs: limbs, bodyLayers: body, armLayers: arms, face: face));
+    Check(frame.Length <= RoomWire.MaxFrameSize, "Largest character packet fits the room limit");
+    Check(CharacterPoseWire.TryRead(frame, session, out pose) && pose.Limbs[^1].Visible && pose.Limbs[^1].Angle == 348 &&
+        !pose.Standing && !pose.FacingRight && pose.BodyLayers.Length == body.Length && pose.ArmLayers.Length == arms.Length &&
+        pose.BodyLayers[0].State == body[0].State && pose.BodyLayers[0].Phase == 3.25f && pose.BodyLayers[0].NextState == 25 &&
+        pose.BodyLayers[0].NextPhase == 0.125f && pose.BodyLayers[0].Transition == 0.5f && pose.ArmLayers[^1].State == 21 &&
+        pose.Face.HasExpression && pose.Face.Head == 4 && pose.Face.Eyes == 15 && pose.Face.NoseAlpha == 123, "Animated pose round trip");
+    for (int length = 0; length < frame.Length; length++)
+    {
+        Check(!CharacterPoseWire.TryRead(frame.AsSpan(0, length), session, out _), "Truncated animated pose");
+    }
+
+    BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(frame.Length - sizeof(float)), BitConverter.SingleToInt32Bits(float.NaN));
+    Check(!CharacterPoseWire.TryRead(frame, session, out _), "Invalid animation transition");
+}
+
+static void VerifyCharacterSound()
+{
+    Guid session = Guid.NewGuid();
+    var sound = new CharacterSound(9, 14, 3, 5, 0.75f, 1, "dogshake", followPlayer: true);
+    byte[] frame = CharacterSoundWire.Write(session, sound) ?? throw new Exception("Could not encode a character sound.");
+    Check(CharacterSoundWire.TryRead(frame, session, out CharacterSound copy) && copy.Clip == "dogshake" &&
+        copy.FollowPlayer && copy.Sequence == 14 && copy.Volume == 0.75f && copy.X == 3, "Following sound round trip");
+    frame[45] = 2;
+    Check(!CharacterSoundWire.TryRead(frame, session, out _), "Unknown sound attachment flag");
+}
+
+static void VerifySandboxGameplay()
+{
+    Guid run = new("9c4d229c-0901-4e78-9eed-32498ef6f4f0");
+    byte[] hit = SandboxGameplayWire.WriteTerrain(run, MessageKind.TerrainHit, 120, 92, 7, 4, 20, 1);
+    Check(SandboxGameplayWire.TryReadTerrain(hit, run, MessageKind.TerrainHit, out var tile) &&
+        tile.X == 120 && tile.Y == 92 && tile.Block == 7 && tile.Sequence == 4 && tile.Damage == 20, "Terrain hit frame");
+    Check(!SandboxGameplayWire.TryReadTerrain(hit, Guid.Empty, MessageKind.TerrainHit, out _), "Terrain rejects another session");
+    Check(!SandboxGameplayWire.TryReadTerrain(hit, run, MessageKind.TerrainState, out _), "Terrain separates request and state");
+    byte[] cracked = SandboxGameplayWire.WriteTerrain(run, MessageKind.TerrainState, 120, 92, 7, 5, 40);
+    Check(SandboxGameplayWire.TryReadTerrain(cracked, run, MessageKind.TerrainState, out tile) &&
+        tile.Damage == 40 && tile.Sequence == 5, "Absolute host crack progress");
+    byte[] broken = SandboxGameplayWire.WriteTerrain(run, MessageKind.TerrainState, 120, 92, 0, 6, 0);
+    Check(SandboxGameplayWire.TryReadTerrain(broken, run, MessageKind.TerrainState, out tile) &&
+        tile.Block == 0 && tile.Damage == 0, "Host destruction state");
+    byte[] claw = SandboxGameplayWire.WriteClaw(run, 3, 4, -10, 2, 145, false);
+    Check(SandboxGameplayWire.TryReadClaw(claw, run, out var effect) &&
+        effect.Player == 3 && effect.Angle == 145 && !effect.Right, "Claw visual frame");
+    claw[41] = 2;
+    Check(!SandboxGameplayWire.TryReadClaw(claw, run, out _), "Claw rejects invalid facing");
+    byte[] bottle = SandboxGameplayWire.WriteAlcohol(run, 7, -5, -106, 3);
+    Check(SandboxGameplayWire.TryReadAlcohol(bottle, run, out var spawn) &&
+        spawn.Operation == 7 && spawn.Y == -106 && spawn.Slot == 3, "Sandbox alcohol request");
+    Check(!SandboxGameplayWire.TryReadAlcohol(bottle.AsSpan(0, 29), run, out _), "Alcohol rejects truncation");
 }
 
 static void Check(bool condition, string name)

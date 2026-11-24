@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "name": "items.native-pickup",
+  "level": "UNITY_HOST",
+  "seed": 88,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 25
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "position": [
+        1,
+        0
+      ]
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "stick",
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "item.nativePickup",
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.hostSlotContainsAuthority",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.hostOwns",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

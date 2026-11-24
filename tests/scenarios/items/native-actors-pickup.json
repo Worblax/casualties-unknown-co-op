@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "name": "items.native-actors-pickup",
+  "level": "UNITY_ACTORS",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "arena",
+      "position": [
+        -8,
+        -3
+      ],
+      "rows": [
+        "................",
+        "................",
+        "................",
+        "................",
+        "xxxxxxxxxxxxxxxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1,
+        "b": 42
+      }
+    },
+    {
+      "op": "character.spawn",
+      "id": "left",
+      "character": 0,
+      "position": [
+        -6,
+        0
+      ]
+    },
+    {
+      "op": "character.spawn",
+      "id": "right",
+      "character": 0,
+      "position": [
+        6,
+        0
+      ]
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "mode": "NativeActor",
+      "body": "left"
+    },
+    {
+      "op": "peer.add",
+      "id": "bob",
+      "role": "guest",
+      "mode": "NativeActor",
+      "body": "right"
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "stick",
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.nativeCount",
+      "expected": 3
+    },
+    {
+      "op": "parallel",
+      "actions": [
+        {
+          "op": "character.move",
+          "target": "left",
+          "axis": 1
+        },
+        {
+          "op": "character.move",
+          "target": "right",
+          "axis": -1
+        }
+      ]
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.moved",
+        "expected": 1,
+        "target": "left",
+        "distance": 2
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.moved",
+        "expected": 1,
+        "target": "right",
+        "distance": 2
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.nearItem",
+        "expected": 1,
+        "actor": "left",
+        "item": "target",
+        "distance": 4
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.nearItem",
+        "expected": 1,
+        "actor": "right",
+        "item": "target",
+        "distance": 4
+      }
+    },
+    {
+      "op": "snapshot.capture",
+      "id": "before-race"
+    },
+    {
+      "op": "parallel",
+      "actions": [
+        {
+          "op": "item.pickup",
+          "peer": "alice",
+          "item": "target",
+          "slot": "$fixture.emptyPickupSlot"
+        },
+        {
+          "op": "item.pickup",
+          "peer": "bob",
+          "item": "target",
+          "slot": "$fixture.emptyPickupSlot"
+        }
+      ]
+    },
+    {
+      "op": "parallel",
+      "actions": [
+        {
+          "op": "character.move",
+          "target": "left",
+          "axis": 0
+        },
+        {
+          "op": "character.move",
+          "target": "right",
+          "axis": 0
+        }
+      ]
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.converged",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.acceptedCount",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.rejectedCount",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.distinctSubmittedPeers",
+      "expected": 2,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.requestRevisionCount",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.localCameraPreserved",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.activeWorldCount",
+      "expected": 0,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

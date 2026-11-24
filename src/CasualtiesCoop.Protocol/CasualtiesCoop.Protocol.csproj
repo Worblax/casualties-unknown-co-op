@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CasualtiesCoop" />
+    <InternalsVisibleTo Include="CasualtiesCoop.Core" />
+    <InternalsVisibleTo Include="CasualtiesCoop.ProtocolChecks" />
+    <InternalsVisibleTo Include="CasualtiesCoop.NetworkChecks" />
+    <InternalsVisibleTo Include="CasualtiesCoop.TestKit" />
+    <InternalsVisibleTo Include="CasualtiesCoop.Testing" />
+  </ItemGroup>
+</Project>

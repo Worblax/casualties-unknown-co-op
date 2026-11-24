@@ -1,4 +1,5 @@
 using System;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Runtime;
@@ -39,6 +40,7 @@ public sealed class CoopMenuView : MonoBehaviour
     private GameObject? root;
     private RectTransform? panel;
     private RectTransform? optionsPanel;
+    private RectTransform? localSettingsPanel;
     private ScrollRect? optionsScroll;
     private GameObject? backdrop;
     private Button? createButton;
@@ -50,6 +52,8 @@ public sealed class CoopMenuView : MonoBehaviour
     private TextMeshProUGUI? difficultyButtonLabel;
     private Button? optionsButton;
     private Button? startButton;
+    private Toggle? detailedLogToggle;
+    private TextMeshProUGUI? detailedLogState;
     private readonly (Toggle Toggle, TextMeshProUGUI Label, TextMeshProUGUI State)[] ruleToggles =
         new (Toggle, TextMeshProUGUI, TextMeshProUGUI)[RoomToggles.Length];
     private Button[] characters = Array.Empty<Button>();
@@ -93,6 +97,7 @@ public sealed class CoopMenuView : MonoBehaviour
         panel = CreatePanel("Co-op panel", group, PanelWidth, PanelHeight);
 
         AddLabel(panel, "Steam co-op", 28, 22, 440, 42, 32);
+        AddAction("Settings", 540, 24, 132, 40, () => SetLocalSettingsOpen(true), out _);
         AddAction("Close", 688, 24, 104, 40, TogglePanel, out _);
         status = AddLabel(panel, "", 28, 72, 764, 44, 19);
         AddLabel(panel, "Players", 28, 130, 342, 28, 23);
@@ -135,6 +140,7 @@ public sealed class CoopMenuView : MonoBehaviour
         leaveButton = AddAction("Leave room", 377, 500, 154, 44, () => runtime.Lobby?.Leave(), out _);
         startButton = AddAction("Start", 602, 500, 190, 44, () => runtime.StartFromLobby(menu!), out _);
         InstallOptionsPanel(group);
+        InstallLocalSettingsPanel(group);
         SetPanelOpen(false);
     }
 
@@ -161,8 +167,19 @@ public sealed class CoopMenuView : MonoBehaviour
         for (int index = 0; index < ruleToggles.Length; index++)
         {
             var rule = RoomToggles[index];
-            ruleToggles[index] = AddRuleToggle(content, rule.Label, index * 45, rule.Option);
+            ruleToggles[index] = AddToggle(content, rule.Label, index * 45, enabled => runtime.Lobby?.ChangeOption(rule.Option, enabled));
         }
+    }
+
+    private void InstallLocalSettingsPanel(RectTransform group)
+    {
+        localSettingsPanel = CreatePanel("Co-op local settings", group, OptionsWidth, 183);
+        AddLabel(localSettingsPanel, "Co-op settings", 28, 22, 440, 42, 32);
+        AddAction("Back", 488, 24, 104, 40, () => SetLocalSettingsOpen(false), out _, localSettingsPanel);
+        RectTransform content = CreateRect("Local settings list", localSettingsPanel);
+        Place(content, 28, 82, 564, 68);
+        (detailedLogToggle, _, detailedLogState) = AddToggle(content, "Detailed logging", 0, CoopDiagnostics.SetEnabled);
+        AddLabel(content, "Writes diagnostics to BepInEx/LogOutput.log on this computer.", 12, 39, 532, 25, 15);
     }
 
     private void Update()
@@ -203,6 +220,7 @@ public sealed class CoopMenuView : MonoBehaviour
     {
         backdrop!.SetActive(open);
         optionsPanel!.gameObject.SetActive(false);
+        localSettingsPanel!.gameObject.SetActive(false);
         panel!.gameObject.SetActive(open);
         if (open)
         {
@@ -228,6 +246,13 @@ public sealed class CoopMenuView : MonoBehaviour
         }
     }
 
+    private void SetLocalSettingsOpen(bool open)
+    {
+        panel!.gameObject.SetActive(!open);
+        localSettingsPanel!.gameObject.SetActive(open);
+        ResizePanel(open ? localSettingsPanel : panel);
+    }
+
     private void ResizePanel(RectTransform target)
     {
         if (canvas!.transform is RectTransform bounds)
@@ -240,6 +265,9 @@ public sealed class CoopMenuView : MonoBehaviour
 
     private void Refresh(SteamLobby? lobby)
     {
+        bool logging = CoopDiagnostics.Enabled;
+        detailedLogToggle!.SetIsOnWithoutNotify(logging);
+        detailedLogState!.text = logging ? "On" : "Off";
         bool inRoom = lobby is { InRoom: true };
         bool isHost = inRoom && lobby!.IsHost;
         bool canEdit = isHost && !lobby!.IsLaunching;
@@ -424,8 +452,8 @@ public sealed class CoopMenuView : MonoBehaviour
         return rect;
     }
 
-    private (Toggle, TextMeshProUGUI, TextMeshProUGUI) AddRuleToggle(
-        RectTransform parent, string label, float y, RoomOptions option)
+    private (Toggle, TextMeshProUGUI, TextMeshProUGUI) AddToggle(
+        RectTransform parent, string label, float y, Action<bool> changed)
     {
         RectTransform row = CreateRect(label, parent);
         Place(row, 0, y, parent.sizeDelta.x, 36);
@@ -444,7 +472,7 @@ public sealed class CoopMenuView : MonoBehaviour
         state.alignment = TextAlignmentOptions.MidlineRight;
         toggle.onValueChanged.AddListener(value =>
         {
-            runtime.Lobby?.ChangeOption(option, value);
+            changed(value);
             Refresh(runtime.Lobby);
         });
         return (toggle, title, state);

@@ -32,11 +32,19 @@ internal enum MessageKind : byte
     SessionRejoinRequest,
     SessionRejoinState,
     SessionRejoinApplied,
-    SessionRejoinCommitted
+    SessionRejoinCommitted,
+    ItemDelta,
+    ItemSnapshotEntry,
+    ClawEffect,
+    TerrainHit,
+    TerrainState,
+    TerrainSync,
+    SandboxAlcohol
 }
 
 internal static class RoomWire
 {
+    internal const string LobbyProtocolVersion = "11";
     internal const int MaxFrameSize = 768;
     private const int HandshakeSize = 41;
     private const int PlanHeaderSize = 36;

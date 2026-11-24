@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "name": "items.smoke",
+  "level": "UNITY_HOST",
+  "seed": 42,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 50,
+    "jitterMs": 10,
+    "unreliableLoss": 0.05
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "catalog.capture"
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.ready",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

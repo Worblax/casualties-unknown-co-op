@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "name": "world.fluid-item-flow",
+  "level": "UNITY_ACTORS",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "standaloneItems": true,
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "tank",
+      "position": [
+        8,
+        -4
+      ],
+      "rows": [
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "xxxxxxxxxxxxxxxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1,
+        "b": 42
+      }
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "gate",
+      "position": [
+        13,
+        -3
+      ],
+      "rows": [
+        "x"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1,
+        "b": 42
+      }
+    },
+    {
+      "op": "fluid.enableFlow"
+    },
+    {
+      "op": "fluid.fill",
+      "id": "source",
+      "position": [
+        9,
+        -3
+      ],
+      "width": 4,
+      "height": 6,
+      "type": 1
+    },
+    {
+      "op": "fluid.probe",
+      "id": "drain",
+      "position": [
+        14,
+        -3
+      ],
+      "width": 8,
+      "height": 1
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "stick",
+      "position": [
+        14.1,
+        -2.9
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "fluid.cell",
+      "expected": 0,
+      "target": "drain"
+    },
+    {
+      "op": "terrain.breakNative",
+      "target": "gate",
+      "damage": 200
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "fluid.cell",
+        "expected": 1,
+        "target": "drain"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 8000,
+      "condition": {
+        "op": "items.movedWithFlow",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

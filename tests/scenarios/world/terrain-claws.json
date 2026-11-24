@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "name": "world.terrain-claws",
+  "level": "UNITY_HOST",
+  "seed": 72,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 30
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "position": [
+        1,
+        0
+      ]
+    },
+    {
+      "op": "peer.add",
+      "id": "bob",
+      "role": "guest",
+      "position": [
+        -1,
+        0
+      ]
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "target",
+      "position": [
+        3,
+        2
+      ],
+      "rows": [
+        "x"
+      ],
+      "legend": {
+        "x": 1
+      }
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.firstBlock",
+      "expected": 1,
+      "target": "target"
+    },
+    {
+      "op": "terrain.hit",
+      "peer": "alice",
+      "target": "target",
+      "damage": 10
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "terrain.hostDamage",
+        "target": "target",
+        "expected": 10
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "target": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.hostDamage",
+      "expected": 10,
+      "target": "target"
+    },
+    {
+      "op": "terrain.hit",
+      "peer": "bob",
+      "target": "target",
+      "damage": 15
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "terrain.hostDamage",
+        "target": "target",
+        "expected": 25
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "target": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.hostDamage",
+      "expected": 25,
+      "target": "target"
+    },
+    {
+      "op": "effect.claw",
+      "peer": "alice"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "effect.clawVisible"
+      }
+    },
+    {
+      "op": "terrain.hit",
+      "peer": "alice",
+      "target": "target",
+      "damage": 100
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "world.firstBlock",
+        "target": "target",
+        "expected": 0
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "target": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.firstBlock",
+      "expected": 0,
+      "target": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.hostDamage",
+      "expected": 0,
+      "target": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

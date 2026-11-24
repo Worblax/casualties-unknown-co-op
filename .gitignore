@@ -1,5 +1,17 @@
-﻿bin/
+# .NET build and test output
+bin/
 obj/
+TestResults/
+*.trx
+
+# Local IDE settings
+.idea/
 .vs/
 *.user
 *.suo
+
+# Local game files and verification output
+/Casualties Unknown/
+/BepInEx/
+/artifacts/
+*.log

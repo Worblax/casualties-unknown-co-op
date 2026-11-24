@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "name": "items.native-actor-out-of-reach",
+  "level": "UNITY_ACTORS",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "arena",
+      "position": [
+        -8,
+        -3
+      ],
+      "rows": [
+        "................",
+        "................",
+        "................",
+        "................",
+        "xxxxxxxxxxxxxxxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1,
+        "b": 42
+      }
+    },
+    {
+      "op": "character.spawn",
+      "id": "runner",
+      "character": 0,
+      "position": [
+        26,
+        0
+      ]
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "mode": "NativeActor",
+      "body": "runner"
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "stick",
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.nearItem",
+      "expected": 0,
+      "actor": "runner",
+      "item": "target",
+      "distance": 10
+    },
+    {
+      "op": "item.pickup",
+      "peer": "alice",
+      "item": "target",
+      "slot": "$fixture.emptyPickupSlot"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.outOfReachCount",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.acceptedCount",
+      "expected": 0,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.unowned",
+      "expected": 1,
+      "item": "target"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.replicated",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

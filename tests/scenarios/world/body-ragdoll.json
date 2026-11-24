@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "name": "world.body-ragdoll",
+  "level": "UNITY_ACTORS",
+  "seed": 72,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 30
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "character.spawn",
+      "id": "other",
+      "character": 0,
+      "position": [
+        -4,
+        2
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.nativeCount",
+      "expected": 2
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.localCameraPreserved",
+      "expected": 1
+    },
+    {
+      "op": "character.ragdoll",
+      "target": "other"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "character.ragdolled",
+        "target": "other"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

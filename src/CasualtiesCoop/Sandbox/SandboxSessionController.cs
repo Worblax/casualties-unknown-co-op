@@ -1,5 +1,6 @@
 using System;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Gameplay;
 using CasualtiesCoop.Gameplay.Recovery;
 using CasualtiesCoop.Lobby;
@@ -14,7 +15,9 @@ namespace CasualtiesCoop.Sandbox;
 internal sealed class SandboxSessionController : IDisposable
 {
     private readonly SteamLobby lobby;
+    private readonly SteamSessionTransport transport;
     private readonly ManualLogSource log;
+    private readonly IMonotonicClock clock;
     private readonly Func<bool> menuAvailable;
     private readonly RoomLaunchPreparation launch;
     private readonly SessionReturnRequest returnRequest;
@@ -28,13 +31,15 @@ internal sealed class SandboxSessionController : IDisposable
     internal bool CanStart => launch.CanStartSandbox;
     internal string? PreparationStatus => launch.Status;
 
-    internal SandboxSessionController(SteamLobby lobby, ManualLogSource log, Func<bool> menuAvailable)
+    internal SandboxSessionController(SteamLobby lobby, ManualLogSource log, Func<bool> menuAvailable, IMonotonicClock clock)
     {
         this.lobby = lobby;
         this.log = log;
+        this.clock = clock;
         this.menuAvailable = menuAvailable;
-        launch = new RoomLaunchPreparation(lobby, log);
-        returnRequest = new SessionReturnRequest(lobby);
+        launch = new RoomLaunchPreparation(lobby, log, clock);
+        returnRequest = new SessionReturnRequest(lobby, clock);
+        transport = new SteamSessionTransport(lobby.Link);
         lobby.Link.HandleFrame = Receive;
     }
 
@@ -125,7 +130,7 @@ internal sealed class SandboxSessionController : IDisposable
                 : "Sandbox course loaded. Shared character, audio, item, fluid and light replication active.");
         }
         World?.Tick();
-        if (!invitations && World is { Ready: true } world && lobby.IsHost && PauseHandler.main)
+        if (!invitations && World is { SceneReady: true } world && lobby.IsHost && PauseHandler.main)
         {
             invitations = ReturnInvitationPanel.Attach(PauseHandler.main, lobby, world.Plan, scene.Font);
         }
@@ -154,7 +159,7 @@ internal sealed class SandboxSessionController : IDisposable
         MessageKind.StartSandbox => ReceiveStart(sender, message),
         MessageKind.SandboxRejected => ReceiveRejection(sender, message),
         MessageKind.SessionRejoinState when World is null => ReceiveReturn(sender, message),
-        _ => World?.Receive(sender.m_SteamID, message) ?? GameplayWire.IsWorldMessage((MessageKind)message[0])
+        _ => World is not null ? transport.DispatchVerified(sender, message) : GameplayWire.IsWorldMessage((MessageKind)message[0])
     };
 
     private bool ReceiveStart(CSteamID sender, byte[] message)
@@ -221,8 +226,8 @@ internal sealed class SandboxSessionController : IDisposable
             scene = SandboxScene.Enter(menu, character, plan?.Difficulty ?? lobby.Difficulty);
             if (plan is not null)
             {
-                peers = new SessionPeers(lobby.Link, plan, lobby.LocalUser.m_SteamID, lobby.Owner.m_SteamID);
-                World = new WorldSession(peers, plan, scene.Font, log);
+                peers = new SessionPeers(transport, plan, lobby.LocalUser.m_SteamID, lobby.Owner.m_SteamID);
+                World = new WorldSession(peers, plan, scene.Font, log, clock);
             }
 
             log.LogInfo(plan is null ? "Opening sandbox preview." : "Opening shared sandbox.");
@@ -248,8 +253,9 @@ internal sealed class SandboxSessionController : IDisposable
         }
         invitations = null;
         returnRequest.Reset();
-        World?.Dispose();
+        WorldSession? previousWorld = World;
         World = null;
+        previousWorld?.Dispose();
         scene?.Dispose();
         scene = null;
     }
@@ -259,5 +265,6 @@ internal sealed class SandboxSessionController : IDisposable
         lobby.Link.HandleFrame = null;
         launch.Dispose();
         ClearScene();
+        transport.Dispose();
     }
 }

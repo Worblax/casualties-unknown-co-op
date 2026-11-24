@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Gameplay.Audio;
 using CasualtiesCoop.Gameplay.Characters;
 using CasualtiesCoop.Gameplay.Fluids;
 using CasualtiesCoop.Gameplay.Items;
 using CasualtiesCoop.Gameplay.Lighting;
+using CasualtiesCoop.Gameplay.Terrain;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Session;
 using Steamworks;
@@ -14,15 +17,18 @@ using UnityEngine;
 
 namespace CasualtiesCoop.Gameplay;
 
+internal delegate bool PlayerPositionLookup(ulong player, out Vector2 position);
+
 internal sealed partial class WorldSession : IDisposable
 {
-    private const float UpdateInterval = 0.067f;
     private const float PoseTimeout = 2f;
     private const int SoundsPerSecond = 48;
 
     private sealed class RemotePlayer
     {
         internal CharacterPose Pose;
+        internal CharacterPose PreviousPose;
+        internal float PoseInterval;
         internal float UpdatedAt;
         internal uint SoundSequence;
         internal float SoundWindow;
@@ -31,30 +37,39 @@ internal sealed partial class WorldSession : IDisposable
     }
 
     private readonly SessionPeers peers;
+    private readonly GuestRecovery guestRecovery;
     private readonly RoomLaunchPlan plan;
     private readonly TMP_FontAsset font;
     private readonly ManualLogSource log;
+    private readonly IMonotonicClock clock;
     private readonly Dictionary<ulong, RemotePlayer> remotes = new();
-    private readonly SpatialCharacterAudio audio = new();
+    private readonly SpatialCharacterAudio audio;
+    private readonly CharacterPoseSampler poseSampler = new();
     private readonly LightReplication lights;
-    private uint sequence;
     private uint soundSequence;
-    private float nextUpdate;
 
-    internal bool Ready { get; private set; }
+    internal bool SceneReady { get; private set; }
     internal SharedItemReplication Items { get; }
     internal TerrainFluidReplication Fluids { get; }
+    internal ClawEffects Claws { get; }
+    internal TerrainDamageReplication Terrain { get; }
 
-    internal WorldSession(SessionPeers peers, RoomLaunchPlan plan, TMP_FontAsset font, ManualLogSource log)
+    internal WorldSession(SessionPeers peers, RoomLaunchPlan plan, TMP_FontAsset font, ManualLogSource log, IMonotonicClock clock)
     {
         this.peers = peers;
         this.plan = plan;
         this.font = font;
         this.log = log;
-        Items = new SharedItemReplication(peers, TryGetPosition);
-        Fluids = new TerrainFluidReplication(peers, TryGetPosition);
-        lights = new LightReplication(peers, TryGetPosition, SendLocal, Broadcast);
+        this.clock = clock;
+        guestRecovery = new GuestRecovery(clock);
+        audio = new SpatialCharacterAudio(TryGetPosition);
+        Items = new SharedItemReplication(peers, TryGetPosition, clock);
+        Fluids = new TerrainFluidReplication(peers, TryGetPosition, clock);
+        Claws = new ClawEffects(peers, clock, TryGetPosition);
+        Terrain = new TerrainDamageReplication(peers, clock, TryGetPosition);
+        lights = new LightReplication(peers, TryGetPosition, SendLocal, Broadcast, clock);
         peers.ConnectionChanged += OnRecoveryPeerChanged;
+        peers.AttachReceiver(Receive);
     }
 
     internal bool IsParticipant(ulong player, Guid launchId) =>
@@ -67,27 +82,27 @@ internal sealed partial class WorldSession : IDisposable
             return;
         }
 
-        Ready = true;
+        SceneReady = true;
         Body body = PlayerCamera.main.body;
         TickRecovery(body);
         Items.Tick(body);
         Fluids.Tick();
+        if (!WaitingForRecovery) Terrain.Tick();
     }
 
     internal void TickPresentation()
     {
-        if (!Ready || !PlayerCamera.main || !PlayerCamera.main.body)
+        if (!SceneReady || !PlayerCamera.main || !PlayerCamera.main.body)
         {
             return;
         }
 
         Body body = PlayerCamera.main.body;
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         Vector2 position = body.transform.position;
-        if (!WaitingForRecovery && now >= nextUpdate)
+        if (!WaitingForRecovery && poseSampler.TrySample(body, peers.LocalPlayer, now, out CharacterPose localPose))
         {
-            nextUpdate = now + UpdateInterval;
-            SendLocal(CharacterPoseWire.Write(plan.Id, CapturePose(body, position)));
+            SendLocal(CharacterPoseWire.Write(plan.Id, localPose));
         }
 
         lights.Tick(body);
@@ -105,60 +120,46 @@ internal sealed partial class WorldSession : IDisposable
             {
                 remote.View = new RemoteCharacterView(member.Character, SteamFriends.GetFriendPersonaName(new CSteamID(entry.Key)), font);
             }
-            remote.View?.Apply(remote.Pose, age);
+            remote.View?.Apply(remote.Pose, remote.PreviousPose, age, remote.PoseInterval);
         }
 
         audio.Tick(position);
     }
 
-    private CharacterPose CapturePose(Body body, Vector2 origin)
-    {
-        int count = Math.Min(body.limbs.Length, CharacterPoseWire.MaxLimbs);
-        LimbPose[] limbs = new LimbPose[count];
-        for (int index = 0; index < count; index++)
-        {
-            Limb limb = body.limbs[index];
-            if (!limb || limb.dismembered)
-            {
-                continue;
-            }
-
-            Transform transform = limb.transform;
-            Vector2 offset = (Vector2)transform.position - origin;
-            Vector3 scale = transform.lossyScale;
-            if (offset.sqrMagnitude <= 256f * 256f)
-            {
-                limbs[index] = new LimbPose(offset.x, offset.y, transform.eulerAngles.z,
-                    Mathf.Min(8, Mathf.Abs(scale.x)), Mathf.Min(8, Mathf.Abs(scale.y)), limb.gameObject.activeInHierarchy);
-            }
-        }
-
-        Vector2 velocity = body.standing || count < 3 || !body.limbs[2] ? body.rb.velocity : body.limbs[2].rb.velocity;
-        return new CharacterPose(peers.LocalPlayer, ++sequence, origin.x, origin.y,
-            Mathf.Clamp(velocity.x, -1000f, 1000f), Mathf.Clamp(velocity.y, -1000f, 1000f), body.isRight, body.standing, limbs);
-    }
-
     internal bool Receive(ulong sender, byte[] bytes)
     {
+        if (bytes.Length == 0)
+        {
+            return false;
+        }
+
         MessageKind frame = (MessageKind)bytes[0];
         if (frame is >= MessageKind.SessionRejoinRequest and <= MessageKind.SessionRejoinCommitted)
         {
             return ReceiveRecovery(sender, bytes);
         }
-        if (peers.IsHost && returningPeers.Contains(sender) &&
-            (frame != MessageKind.ItemSyncRequest || !recoveryReceipts.ContainsKey(sender)))
+        if (peers.IsHost && !hostRecovery.AllowsGameplay(sender, frame))
         {
             return true;
         }
+
+        if (TerrainDamageReplication.Handles(frame)) return Terrain.Receive(sender, bytes);
 
         return frame switch
         {
             MessageKind.CharacterPose => ReceivePose(sender, bytes),
             MessageKind.CharacterSound => ReceiveSound(sender, bytes),
+            MessageKind.ClawEffect => !SceneReady || Claws.Receive(sender, bytes),
+            MessageKind.SandboxAlcohol => !SceneReady || Items.ReceiveAlcohol(sender, bytes),
+
             MessageKind.FluidChunk or MessageKind.FluidPush or MessageKind.FluidDrinkRequest or MessageKind.FluidDrinkResult =>
-                !Ready || (WaitingForRecovery && frame == MessageKind.FluidPush) || Fluids.Receive(sender, bytes),
+                !SceneReady || (WaitingForRecovery && (frame == MessageKind.FluidPush || guestRecovery.Snapshot is null)) ||
+                Fluids.Receive(sender, bytes),
             MessageKind.LightSnapshot => lights.Receive(sender, bytes),
-            _ => Items.Receive(sender, bytes)
+            MessageKind.ItemRequest or MessageKind.ItemState or MessageKind.ItemResult or MessageKind.ItemMotion or
+                MessageKind.ItemSyncRequest or MessageKind.ItemSyncDone or MessageKind.ItemDelta or MessageKind.ItemSnapshotEntry =>
+                Items.Receive(sender, bytes),
+            _ => false
         };
     }
 
@@ -166,6 +167,7 @@ internal sealed partial class WorldSession : IDisposable
     {
         if (!CharacterPoseWire.TryRead(bytes, plan.Id, out CharacterPose pose))
         {
+            CoopDiagnostics.Count("Character", "Invalid pose");
             return true;
         }
 
@@ -181,11 +183,16 @@ internal sealed partial class WorldSession : IDisposable
         }
         else if (unchecked((int)(pose.Sequence - remote.Pose.Sequence)) <= 0)
         {
+            CoopDiagnostics.Count("Character", "Stale pose");
             return true;
         }
 
+        float now = clock.Now;
+        float interval = now - remote.UpdatedAt;
+        remote.PreviousPose = interval <= 0.2f ? remote.Pose : default;
+        remote.PoseInterval = Mathf.Clamp(interval, CharacterPoseSampler.SendInterval * 0.5f, 0.08f);
         remote.Pose = pose;
-        remote.UpdatedAt = Time.unscaledTime;
+        remote.UpdatedAt = now;
         if (peers.IsHost)
         {
             Broadcast(bytes, sender);
@@ -199,20 +206,20 @@ internal sealed partial class WorldSession : IDisposable
         if (player == peers.LocalPlayer && PlayerCamera.main && PlayerCamera.main.body)
         {
             position = PlayerCamera.main.body.transform.position;
-            return Ready;
+            return SceneReady;
         }
 
-        if (peers.IsHost && returningPeers.Contains(player))
+        if (peers.IsHost && hostRecovery.IsReturning(player))
         {
-            if (recoveryReceipts.TryGetValue(player, out var receipt) && receipt.State.HasPosition)
+            if (hostRecovery.GetOffer(player) is { HasPosition: true } snapshot)
             {
-                position = new Vector2(receipt.State.X, receipt.State.Y);
+                position = new Vector2(snapshot.X, snapshot.Y);
                 return true;
             }
             return false;
         }
 
-        if (remotes.TryGetValue(player, out RemotePlayer remote) && Time.unscaledTime - remote.UpdatedAt <= PoseTimeout)
+        if (remotes.TryGetValue(player, out RemotePlayer remote) && clock.Now - remote.UpdatedAt <= PoseTimeout)
         {
             position = new Vector2(remote.Pose.X, remote.Pose.Y);
             return true;
@@ -220,17 +227,18 @@ internal sealed partial class WorldSession : IDisposable
         return false;
     }
 
-    internal void CaptureSound(string? key, AudioClip clip, Vector2 origin, AudioSource playback)
+    internal void CaptureSound(string? key, AudioClip clip, Vector2 origin, AudioSource playback, bool followPlayer)
     {
-        if (!Ready || WaitingForRecovery || !PlayerCamera.main || !PlayerCamera.main.body)
+        if (!SceneReady || WaitingForRecovery || !PlayerCamera.main || !PlayerCamera.main.body)
         {
             return;
         }
 
         Body body = PlayerCamera.main.body;
         string clipKey = key ?? audio.GetClipKey(clip, body);
+        CoopDiagnostics.Count("Audio sent", clipKey);
         var sound = new CharacterSound(peers.LocalPlayer, ++soundSequence, origin.x, origin.y,
-            Mathf.Clamp01(playback.volume), Mathf.Clamp(playback.pitch, 0.05f, 3f), clipKey);
+            Mathf.Clamp01(playback.volume), Mathf.Clamp(playback.pitch, 0.05f, 3f), clipKey, followPlayer);
         if (CharacterSoundWire.Write(plan.Id, sound) is { } frame)
         {
             SendLocal(frame);
@@ -241,6 +249,7 @@ internal sealed partial class WorldSession : IDisposable
     {
         if (!CharacterSoundWire.TryRead(bytes, plan.Id, out CharacterSound sound))
         {
+            CoopDiagnostics.Count("Audio", "Invalid sound frame");
             return true;
         }
 
@@ -249,18 +258,19 @@ internal sealed partial class WorldSession : IDisposable
             return false;
         }
 
-        if (!Ready || !remotes.TryGetValue(sound.Player, out RemotePlayer remote) ||
+        if (!SceneReady || !remotes.TryGetValue(sound.Player, out RemotePlayer remote) ||
             unchecked((int)(sound.Sequence - remote.SoundSequence)) <= 0 ||
             !TryGetPosition(sound.Player, out Vector2 emitter) ||
             (emitter - new Vector2(sound.X, sound.Y)).sqrMagnitude > 24f * 24f)
         {
+            CoopDiagnostics.Count("Audio", "Sound outside current pose window");
             return true;
         }
 
         remote.SoundSequence = sound.Sequence;
-        if (Time.unscaledTime - remote.SoundWindow >= 1f)
+        if (clock.Now - remote.SoundWindow >= 1f)
         {
-            remote.SoundWindow = Time.unscaledTime;
+            remote.SoundWindow = clock.Now;
             remote.SoundCount = 0;
         }
         if (++remote.SoundCount > SoundsPerSecond)
@@ -270,7 +280,7 @@ internal sealed partial class WorldSession : IDisposable
 
         if (PlayerCamera.main && PlayerCamera.main.body && plan.TryGetPlayer(sound.Player, out LaunchPlayer member))
         {
-            audio.Play(sound, member.Character, PlayerCamera.main.body.transform.position);
+            audio.Play(sound, member.Character, emitter, PlayerCamera.main.body.transform.position);
         }
         if (peers.IsHost)
         {
@@ -309,8 +319,9 @@ internal sealed partial class WorldSession : IDisposable
 
     public void Dispose()
     {
-        Ready = false;
+        SceneReady = false;
         peers.ConnectionChanged -= OnRecoveryPeerChanged;
+        peers.Dispose();
         Items.Dispose();
         Fluids.Dispose();
         lights.Dispose();
@@ -319,6 +330,5 @@ internal sealed partial class WorldSession : IDisposable
         {
             remote.View?.Dispose();
         }
-        peers.Dispose();
     }
 }

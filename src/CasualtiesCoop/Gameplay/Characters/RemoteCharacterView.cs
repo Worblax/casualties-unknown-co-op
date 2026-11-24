@@ -10,13 +10,17 @@ internal sealed class RemoteCharacterView : IDisposable
     private readonly GameObject root;
     private readonly GameObject[] limbs;
     private readonly TextMeshPro name;
-    private bool facingRight;
-    private bool standing;
+    private readonly CharacterFace? face;
+    private SpriteRenderer? head;
+    private SpriteRenderer? eyes;
+    private SpriteRenderer? nose;
 
     internal RemoteCharacterView(byte character, string displayName, TMP_FontAsset font)
     {
         root = new GameObject("Co-op remote character");
         Body? template = LoadCharacter(character);
+        FacialExpression? expression = template ? template!.GetComponentInChildren<FacialExpression>(true) : null;
+        face = expression ? new CharacterFace(expression!) : null;
         limbs = template ? new GameObject[Math.Min(template!.limbs.Length, CharacterPoseWire.MaxLimbs)] : Array.Empty<GameObject>();
         for (int index = 0; index < limbs.Length; index++)
         {
@@ -48,6 +52,12 @@ internal sealed class RemoteCharacterView : IDisposable
                 renderer.flipX = sprite.flipX;
                 renderer.flipY = sprite.flipY;
                 renderer.enabled = sprite.enabled;
+                if (face is not null)
+                {
+                    if (sprite == face.Head) head = renderer;
+                    if (sprite == face.Eyes) eyes = renderer;
+                    if (sprite == face.Nose) nose = renderer;
+                }
             }
         }
 
@@ -73,16 +83,16 @@ internal sealed class RemoteCharacterView : IDisposable
         return path.Length == 0 ? null : Resources.Load<GameObject>("Special/Characters/" + path)?.GetComponentInChildren<Body>(true);
     }
 
-    internal void Apply(CharacterPose pose, float age)
+    internal void Apply(CharacterPose pose, CharacterPose previous, float age, float interval)
     {
-        float prediction = Mathf.Clamp(age - 0.067f, 0f, 0.1f);
-        Vector2 target = new(pose.X + pose.VelocityX * prediction, pose.Y + pose.VelocityY * prediction);
-        bool snap = !root.activeSelf || (target - (Vector2)root.transform.position).sqrMagnitude > 64f;
-        float ease = 1f - Mathf.Exp(-18f * Time.unscaledDeltaTime);
-        root.transform.position = snap ? target : Vector2.Lerp(root.transform.position, target, ease);
-        bool snapLimbs = snap || facingRight != pose.FacingRight || standing != pose.Standing;
-        facingRight = pose.FacingRight;
-        standing = pose.Standing;
+        Vector2 target = new(pose.X, pose.Y);
+        Vector2 from = new(previous.X, previous.Y);
+        bool interpolate = root.activeSelf && previous.Player == pose.Player && (target - from).sqrMagnitude <= 64f;
+        float progress = interpolate ? Mathf.Clamp01(age / interval) : 1f;
+        float prediction = Mathf.Clamp(age - interval, 0f, 0.08f);
+        root.transform.position = (interpolate ? Vector2.Lerp(from, target, progress) : target) +
+            new Vector2(pose.VelocityX, pose.VelocityY) * prediction;
+        bool blendLimbs = interpolate && previous.FacingRight == pose.FacingRight && previous.Standing == pose.Standing;
 
         for (int index = 0; index < limbs.Length; index++)
         {
@@ -95,18 +105,41 @@ internal sealed class RemoteCharacterView : IDisposable
 
             LimbPose targetLimb = pose.Limbs[index];
             Transform transform = limb.transform;
-            bool snapThisLimb = snapLimbs || !limb.activeSelf;
             Vector3 offset = new(targetLimb.X, targetLimb.Y, 0f);
-            transform.localPosition = snapThisLimb ? offset : Vector3.Lerp(transform.localPosition, offset, ease);
-            float angle = snapThisLimb ? targetLimb.Angle : Mathf.LerpAngle(transform.localEulerAngles.z, targetLimb.Angle, ease);
+            float angle = targetLimb.Angle;
+            if (blendLimbs && index < previous.Limbs.Length && previous.Limbs[index].Visible)
+            {
+                LimbPose old = previous.Limbs[index];
+                offset = Vector3.Lerp(new Vector3(old.X, old.Y, 0f), offset, progress);
+                angle = Mathf.LerpAngle(old.Angle, angle, progress);
+            }
+            transform.localPosition = offset;
             transform.localRotation = Quaternion.Euler(0f, 0f, angle);
-            transform.localScale = new Vector3(facingRight ? targetLimb.ScaleX : -targetLimb.ScaleX, targetLimb.ScaleY, 1f);
+            transform.localScale = new Vector3(pose.FacingRight ? targetLimb.ScaleX : -targetLimb.ScaleX, targetLimb.ScaleY, 1f);
             limb.SetActive(true);
         }
 
-        Vector3 head = limbs.Length > 0 && limbs[0].activeSelf ? limbs[0].transform.localPosition : Vector3.zero;
-        name.transform.localPosition = head + new Vector3(0, 2.1f, -0.1f);
+        ApplyFace(progress >= 0.5f || !previous.Face.HasExpression ? pose.Face : previous.Face);
+        Vector3 headPosition = limbs.Length > 0 && limbs[0].activeSelf ? limbs[0].transform.localPosition : Vector3.zero;
+        name.transform.localPosition = headPosition + new Vector3(0, 2.1f, -0.1f);
         root.SetActive(true);
+    }
+
+    private void ApplyFace(FacePose pose)
+    {
+        if (!pose.HasExpression || face is null)
+        {
+            return;
+        }
+
+        if (head && face.Head) head!.sprite = face.SpriteAt(pose.Head, face.Head.sprite);
+        if (eyes && face.Eyes) eyes!.sprite = face.SpriteAt(pose.Eyes, face.Eyes.sprite);
+        if (nose)
+        {
+            Color color = nose!.color;
+            color.a = pose.NoseAlpha / 255f;
+            nose.color = color;
+        }
     }
 
     internal void Hide() => root.SetActive(false);

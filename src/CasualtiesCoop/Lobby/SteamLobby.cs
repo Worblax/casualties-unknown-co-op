@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Session;
 using Steamworks;
@@ -13,7 +14,7 @@ internal sealed class SteamLobby : IDisposable
 {
     private const string MemberKey = "cu_member";
     private const string ProtocolKey = "cu_protocol";
-    private const string ProtocolVersion = "9";
+    private const string ProtocolVersion = RoomWire.LobbyProtocolVersion;
     private const string SettingsKey = "cu_settings";
     private const string CreatorKey = "cu_creator";
     private const string VerifiedMembersKey = "cu_verified";
@@ -22,6 +23,7 @@ internal sealed class SteamLobby : IDisposable
     private readonly CallResult<LobbyEnter_t> lobbyEntered;
     private readonly Callback<GameLobbyJoinRequested_t> invitation;
     private readonly Callback<LobbyChatUpdate_t> membershipChanged;
+    private readonly IMonotonicClock clock;
     private readonly RoomReturnRecord returnRecord;
     private readonly RoomReturnInvitations returnInvitations;
     private readonly Dictionary<CSteamID, float> invitedAt = new();
@@ -54,16 +56,17 @@ internal sealed class SteamLobby : IDisposable
         IsCharacterUnlocked(selectedCharacter) && TryGetSettings(out _, out _, out _);
     internal bool CanStartSolo => IsHost && MemberCount == 1 && CanReady && IsReady(LocalUser);
 
-    internal SteamLobby(ManualLogSource log)
+    internal SteamLobby(ManualLogSource log, IMonotonicClock clock)
     {
+        this.clock = clock;
         lobbyCreated = CallResult<LobbyCreated_t>.Create(OnCreated);
         lobbyEntered = CallResult<LobbyEnter_t>.Create(OnEntered);
         invitation = Callback<GameLobbyJoinRequested_t>.Create(request => Join(request.m_steamIDLobby));
         membershipChanged = Callback<LobbyChatUpdate_t>.Create(OnMembershipChanged);
         returnRecord = new RoomReturnRecord(LocalUser, log);
-        returnInvitations = new RoomReturnInvitations(CanInviteReturningPlayer, InviteReturningPlayer, log);
+        returnInvitations = new RoomReturnInvitations(CanInviteReturningPlayer, InviteReturningPlayer, log, clock);
         Link = new SteamRoomLink(LocalUser, IsRoomPeer, typeof(WorldGeneration).Assembly.ManifestModule.ModuleVersionId,
-            typeof(SteamLobby).Assembly.ManifestModule.ModuleVersionId, log);
+            typeof(SteamLobby).Assembly.ManifestModule.ModuleVersionId, log, clock);
         Link.PeerChanged += OnPeerChanged;
         Link.HostEnded += OnHostEnded;
     }
@@ -89,7 +92,7 @@ internal sealed class SteamLobby : IDisposable
 
     internal bool CanResendInvitation(CSteamID player) => CanInviteReturningPlayer(player) &&
         (!HasMember(player) || Link.GetState(player) != RoomLinkState.Verified) &&
-        (!invitedAt.TryGetValue(player, out float previous) || Time.unscaledTime - previous >= 8f);
+        (!invitedAt.TryGetValue(player, out float previous) || clock.Now - previous >= 8f);
 
     internal bool ResendInvitation(CSteamID player) => runningSandbox is { } plan && InviteReturningPlayer(player, Current, plan.Id);
 
@@ -111,7 +114,7 @@ internal sealed class SteamLobby : IDisposable
             return false;
         }
 
-        invitedAt[player] = Time.unscaledTime;
+        invitedAt[player] = clock.Now;
         return true;
     }
 

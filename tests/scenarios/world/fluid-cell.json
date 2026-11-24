@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "name": "world.fluid-cell",
+  "level": "UNITY_HOST",
+  "seed": 72,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 30
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "tank",
+      "position": [
+        3,
+        3
+      ],
+      "rows": [
+        "xxx",
+        "x.x",
+        "xxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1
+      }
+    },
+    {
+      "op": "fluid.fill",
+      "id": "water",
+      "position": [
+        4,
+        4
+      ],
+      "type": 1
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "fluid.cell",
+      "expected": 1,
+      "target": "water"
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.solidCount",
+      "expected": 8,
+      "target": "tank"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

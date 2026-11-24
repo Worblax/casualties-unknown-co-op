@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "name": "world.mob-target",
+  "level": "UNITY_ACTORS",
+  "seed": 72,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 30
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "mob.spawn",
+      "id": "tick",
+      "catalogId": "cavetick",
+      "aggro": 1,
+      "position": [
+        3,
+        1
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "mob.alive",
+      "expected": 1,
+      "target": "tick"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "mob.hasNativeTarget",
+        "actor": "local",
+        "target": "tick"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

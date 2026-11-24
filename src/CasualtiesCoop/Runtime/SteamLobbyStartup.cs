@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Lobby;
 using HarmonyLib;
 using Steamworks;
@@ -12,21 +13,26 @@ internal sealed class SteamLobbyStartup : IDisposable
 {
     private static readonly FieldInfo? Initialized = AccessTools.Field(typeof(SteamManager), "initialized");
     private readonly ManualLogSource log;
+    private readonly IMonotonicClock clock;
     private bool failed;
     private float nextProbe;
 
     internal SteamLobby? Lobby { get; private set; }
     internal string Status { get; private set; } = "Waiting for Steam.";
 
-    internal SteamLobbyStartup(ManualLogSource log) => this.log = log;
+    internal SteamLobbyStartup(ManualLogSource log, IMonotonicClock clock)
+    {
+        this.log = log;
+        this.clock = clock;
+    }
 
     internal SteamLobby? TryOpen()
     {
-        if (Lobby is not null || failed || Time.unscaledTime < nextProbe)
+        if (Lobby is not null || failed || clock.Now < nextProbe)
         {
             return Lobby;
         }
-        nextProbe = Time.unscaledTime + 0.35f;
+        nextProbe = clock.Now + 0.35f;
 
         try
         {
@@ -42,7 +48,7 @@ internal sealed class SteamLobbyStartup : IDisposable
                 return null;
             }
 
-            Lobby = new SteamLobby(log);
+            Lobby = new SteamLobby(log, clock);
             log.LogInfo("Steam lobby integration ready.");
             return Lobby;
         }

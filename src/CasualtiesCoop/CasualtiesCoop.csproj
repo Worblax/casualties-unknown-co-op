@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <LangVersion>latest</LangVersion>
@@ -7,6 +7,11 @@
     <GameManagedDir Condition="'$(GameManagedDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\Casualties Unknown\CasualtiesUnknown_Data\Managed</GameManagedDir>
     <BepInExCoreDir Condition="'$(BepInExCoreDir)' == ''">N:\Steam\steamapps\common\Casualties Unknown\BepInEx\core</BepInExCoreDir>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CasualtiesCoop.Testing" />
+    <ProjectReference Include="../CasualtiesCoop.Core/CasualtiesCoop.Core.csproj" />
+    <ProjectReference Include="../CasualtiesCoop.Protocol/CasualtiesCoop.Protocol.csproj" />
+  </ItemGroup>
   <ItemGroup>
     <Reference Include="BepInEx">
       <HintPath>$(BepInExCoreDir)\BepInEx.dll</HintPath>
@@ -73,4 +78,17 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+  <!-- Preserve the handshake's plugin MVID as the identity of the full managed build. -->
+  <Target Name="FingerprintCoopAssemblies" BeforeTargets="GetAssemblyAttributes" DependsOnTargets="ResolveProjectReferences">
+    <ItemGroup>
+      <_CoopAssembly Include="@(_ResolvedProjectReferencePaths)"
+        Condition="'%(_ResolvedProjectReferencePaths.Filename)' == 'CasualtiesCoop.Core' Or '%(_ResolvedProjectReferencePaths.Filename)' == 'CasualtiesCoop.Protocol'" />
+    </ItemGroup>
+    <GetFileHash Files="@(_CoopAssembly)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="_CoopAssemblyHash" />
+    </GetFileHash>
+    <ItemGroup>
+      <AssemblyMetadata Include="%(_CoopAssemblyHash.Filename).SHA256" Value="%(_CoopAssemblyHash.FileHash)" />
+    </ItemGroup>
+  </Target>
 </Project>

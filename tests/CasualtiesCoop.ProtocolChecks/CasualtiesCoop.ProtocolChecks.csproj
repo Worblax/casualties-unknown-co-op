@@ -5,10 +5,6 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../src/CasualtiesCoop/Lobby/RoomRules.cs" Link="RoomRules.cs" />
-    <Compile Include="../../src/CasualtiesCoop/Session/RoomLaunchPlan.cs" Link="RoomLaunchPlan.cs" />
-    <Compile Include="../../src/CasualtiesCoop/Networking/RoomWire.cs" Link="RoomWire.cs" />
-    <Compile Include="../../src/CasualtiesCoop/Networking/GameplayWire.cs" Link="GameplayWire.cs" />
-    <Compile Include="../../src/CasualtiesCoop/Gameplay/Characters/CharacterPoseWire.cs" Link="CharacterPoseWire.cs" />
+    <ProjectReference Include="../../src/CasualtiesCoop.Protocol/CasualtiesCoop.Protocol.csproj" />
   </ItemGroup>
 </Project>

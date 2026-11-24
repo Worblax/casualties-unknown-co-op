@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "name": "items.alcohol-throw",
+  "level": "UNITY_GUEST",
+  "seed": 42,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 50,
+    "jitterMs": 10
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "position": [
+        -1,
+        0
+      ]
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "alcohol",
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.typeAlcohol",
+      "item": "target",
+      "expected": 1
+    },
+    {
+      "op": "item.pickup",
+      "peer": "alice",
+      "item": "target",
+      "slot": "$fixture.emptyPickupSlot"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.guestSlotContainsReplica",
+        "item": "target"
+      }
+    },
+    {
+      "op": "item.drop",
+      "peer": "alice",
+      "item": "target"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.guestWorldReplica",
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.activeWorldCount",
+      "item": "target",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.guestSlotContainsReplica",
+      "item": "target",
+      "expected": 0
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.acceptedCount",
+      "item": "target",
+      "expected": 2
+    },
+    {
+      "op": "assert.equal",
+      "query": "network.pendingOperations",
+      "expected": 0
+    }
+  ]
+}

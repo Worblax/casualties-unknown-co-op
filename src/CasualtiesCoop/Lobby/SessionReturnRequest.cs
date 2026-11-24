@@ -1,18 +1,23 @@
 using System;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Gameplay.Recovery;
 using CasualtiesCoop.Networking;
-using UnityEngine;
 
 namespace CasualtiesCoop.Lobby;
 
 internal sealed class SessionReturnRequest
 {
     private readonly SteamLobby lobby;
+    private readonly IMonotonicClock clock;
     private Guid session;
     private Guid attempt;
     private float nextSend;
 
-    internal SessionReturnRequest(SteamLobby lobby) => this.lobby = lobby;
+    internal SessionReturnRequest(SteamLobby lobby, IMonotonicClock clock)
+    {
+        this.lobby = lobby;
+        this.clock = clock;
+    }
 
     internal void Tick()
     {
@@ -23,7 +28,7 @@ internal sealed class SessionReturnRequest
             nextSend = 0;
         }
 
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         if (session != Guid.Empty && now >= nextSend && lobby.Link.GetState(lobby.Owner) == RoomLinkState.Verified)
         {
             nextSend = now + 1f;

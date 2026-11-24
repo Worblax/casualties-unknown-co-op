@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "name": "world.layout",
+  "level": "UNITY_ACTORS",
+  "seed": 72,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 30
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "frame",
+      "position": [
+        3,
+        3
+      ],
+      "rows": [
+        ".xx",
+        "x..",
+        "xxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1
+      }
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.solidCount",
+      "expected": 6,
+      "target": "frame"
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.firstBlock",
+      "expected": 0,
+      "target": "frame"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

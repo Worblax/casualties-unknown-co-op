@@ -14,7 +14,7 @@ internal sealed class SharedItemObjects
     private GameObject? GetPrefab(string definition)
     {
         if (!ItemWire.IsDefinition(definition) || !Item.GlobalItems.TryGetValue(definition, out ItemInfo info) ||
-            info.wearable || info is LiquidItemInfo)
+            info.wearable || (info is LiquidItemInfo && definition != "alcohol"))
         {
             return null;
         }
@@ -34,7 +34,7 @@ internal sealed class SharedItemObjects
         // Items with their own behaviours need a separate serializer before they can be shared.
         foreach (MonoBehaviour behaviour in prefab.GetComponentsInChildren<MonoBehaviour>(true))
         {
-            if (behaviour is not Item)
+            if (behaviour is not Item && (definition != "alcohol" || behaviour is not WaterContainerItem))
             {
                 return prefabs[definition] = null;
             }
@@ -43,15 +43,14 @@ internal sealed class SharedItemObjects
         return prefabs[definition] = prefab;
     }
 
-    internal Item? CreateReplica(SharedItemState state)
+    internal Item? CreateReplica(string definition, ItemLocation at)
     {
-        GameObject? prefab = GetPrefab(state.Definition);
+        GameObject? prefab = GetPrefab(definition);
         if (!prefab)
         {
             return null;
         }
 
-        ItemLocation at = state.Location;
         GameObject instance = UnityEngine.Object.Instantiate(prefab!, new Vector3(at.X, at.Y, 0),
             Quaternion.Euler(0, 0, at.Angle));
         Item item = instance.GetComponent<Item>();

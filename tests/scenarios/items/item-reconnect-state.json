@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "name": "items.reconnect-state",
+  "level": "UNITY_HOST",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "mode": "VirtualOnly",
+      "position": [
+        1,
+        0
+      ]
+    },
+    {
+      "op": "peer.add",
+      "id": "bob",
+      "role": "guest",
+      "mode": "VirtualOnly",
+      "position": [
+        -1,
+        0
+      ]
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "stick",
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.replicated",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "peer.disconnect",
+      "peer": "bob"
+    },
+    {
+      "op": "assert.equal",
+      "query": "peer.synced",
+      "expected": 0,
+      "target": "bob"
+    },
+    {
+      "op": "item.pickup",
+      "peer": "alice",
+      "item": "target",
+      "slot": "$fixture.emptyPickupSlot"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.acceptedCount",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.replicated",
+      "expected": 0,
+      "item": "target"
+    },
+    {
+      "op": "network.profile",
+      "profile": {
+        "latencyMs": 30,
+        "unreliableLoss": 0.1,
+        "unreliableDuplication": 0.3
+      }
+    },
+    {
+      "op": "peer.reconnect",
+      "peer": "bob"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.converged",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "item.drop",
+      "peer": "alice",
+      "item": "target"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.unowned",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.motion",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.replicated",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "item.remove",
+      "item": "target"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.removed",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "items.replicated",
+        "expected": 1,
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

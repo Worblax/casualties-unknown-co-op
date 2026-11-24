@@ -2,9 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Lobby;
 using Steamworks;
-using UnityEngine;
 
 namespace CasualtiesCoop.Networking;
 
@@ -31,16 +32,17 @@ internal sealed class SteamRoomLink : IDisposable
     {
         internal readonly CSteamID Id;
         internal readonly HSteamNetConnection Connection;
-        internal readonly float Deadline = Time.unscaledTime + HandshakeTimeout;
+        internal readonly float Deadline;
         internal MessageKind Expected;
         internal bool Connected;
         internal bool Verified => Expected == MessageKind.None;
 
-        internal Peer(CSteamID id, HSteamNetConnection connection, MessageKind expected)
+        internal Peer(CSteamID id, HSteamNetConnection connection, MessageKind expected, float deadline)
         {
             Id = id;
             Connection = connection;
             Expected = expected;
+            Deadline = deadline;
         }
     }
 
@@ -49,6 +51,7 @@ internal sealed class SteamRoomLink : IDisposable
     private readonly Guid gameBuild;
     private readonly Guid modBuild;
     private readonly ManualLogSource log;
+    private readonly IMonotonicClock clock;
     private readonly Callback<SteamNetConnectionStatusChangedCallback_t> connections;
     private readonly List<Peer> peers = new(RoomRules.Capacity - 1);
     private readonly HashSet<CSteamID> incompatible = new();
@@ -66,13 +69,14 @@ internal sealed class SteamRoomLink : IDisposable
     internal string? Status { get; private set; }
     private bool Hosting => host == localUser;
 
-    internal SteamRoomLink(CSteamID localUser, Func<CSteamID, bool> isRoomMember, Guid gameBuild, Guid modBuild, ManualLogSource log)
+    internal SteamRoomLink(CSteamID localUser, Func<CSteamID, bool> isRoomMember, Guid gameBuild, Guid modBuild, ManualLogSource log, IMonotonicClock clock)
     {
         this.localUser = localUser;
         this.isRoomMember = isRoomMember;
         this.gameBuild = gameBuild;
         this.modBuild = modBuild;
         this.log = log;
+        this.clock = clock;
         connections = Callback<SteamNetConnectionStatusChangedCallback_t>.Create(OnConnectionChanged);
     }
 
@@ -100,7 +104,7 @@ internal sealed class SteamRoomLink : IDisposable
             return;
         }
 
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         if (now >= retryAt && (Hosting ? listener == HSteamListenSocket.Invalid : peers.Count == 0 && !incompatible.Contains(host)))
         {
             TryOpenSocket(now);
@@ -154,7 +158,8 @@ internal sealed class SteamRoomLink : IDisposable
             HSteamNetConnection connection = SteamNetworkingSockets.ConnectP2P(ref identity, VirtualPort, 0, NoOptions);
             if (connection != HSteamNetConnection.Invalid)
             {
-                peers.Add(new Peer(host, connection, MessageKind.HostWelcome));
+                peers.Add(new Peer(host, connection, MessageKind.HostWelcome, clock.Now + HandshakeTimeout));
+                CoopDiagnostics.Trace("Steam", "Opened a P2P connection to the room host.");
             }
 
             Status = connection == HSteamNetConnection.Invalid ? "Could not reach the host. Retrying…" : "Connecting to the host…";
@@ -231,7 +236,7 @@ internal sealed class SteamRoomLink : IDisposable
         }
 
         incompatible.Remove(player);
-        peers.Add(new Peer(player, connection, MessageKind.GuestHello));
+        peers.Add(new Peer(player, connection, MessageKind.GuestHello, clock.Now + HandshakeTimeout));
     }
 
     private void Receive(Peer peer)
@@ -256,6 +261,7 @@ internal sealed class SteamRoomLink : IDisposable
 
                 byte[] message = new byte[native.m_cbSize];
                 Marshal.Copy(native.m_pData, message, 0, message.Length);
+                CoopDiagnostics.RecordFrame((MessageKind)message[0], message.Length, sent: false);
                 if (peer.Verified)
                 {
                     if (HandleFrame?.Invoke(peer.Id, message) != true)
@@ -265,7 +271,7 @@ internal sealed class SteamRoomLink : IDisposable
                     }
                 }
                 // Unreliable gameplay updates can overtake the reliable confirmation after reconnecting.
-                else if ((MessageKind)message[0] is not (MessageKind.CharacterPose or MessageKind.CharacterSound or MessageKind.ItemMotion or
+                else if ((MessageKind)message[0] is not (MessageKind.CharacterPose or MessageKind.CharacterSound or MessageKind.ClawEffect or MessageKind.ItemMotion or
                     MessageKind.FluidChunk or MessageKind.FluidPush or MessageKind.LightSnapshot) &&
                     !CompleteHandshakeStep(peer, message))
                 {
@@ -328,8 +334,10 @@ internal sealed class SteamRoomLink : IDisposable
         try
         {
             int flags = reliable ? Constants.k_nSteamNetworkingSend_Reliable : Constants.k_nSteamNetworkingSend_UnreliableNoDelay;
-            return SteamNetworkingSockets.SendMessageToConnection(peer.Connection, data.AddrOfPinnedObject(),
+            bool accepted = SteamNetworkingSockets.SendMessageToConnection(peer.Connection, data.AddrOfPinnedObject(),
                 (uint)message.Length, flags, out _) == EResult.k_EResultOK;
+            CoopDiagnostics.RecordFrame((MessageKind)message[0], message.Length, sent: true, accepted);
+            return accepted;
         }
         finally
         {
@@ -341,6 +349,10 @@ internal sealed class SteamRoomLink : IDisposable
 
     private void Drop(Peer peer, int reason, string message)
     {
+        if (CoopDiagnostics.Enabled)
+        {
+            CoopDiagnostics.Trace("Steam", $"Closing a P2P connection ({reason}). {message}");
+        }
         peers.Remove(peer);
         SteamNetworkingSockets.CloseConnection(peer.Connection, reason, message, false);
         if (reason == BuildMismatch)
@@ -350,7 +362,7 @@ internal sealed class SteamRoomLink : IDisposable
 
         if (!Hosting)
         {
-            retryAt = Time.unscaledTime + RetryDelay;
+            retryAt = clock.Now + RetryDelay;
             Status = reason == BuildMismatch ? message : message + " Retrying…";
         }
 

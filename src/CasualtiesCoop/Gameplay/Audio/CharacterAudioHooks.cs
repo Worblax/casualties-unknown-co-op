@@ -52,7 +52,7 @@ internal static class CharacterAudioHooks
     {
         if (!__state.Sliding && ___slideSource && ___slideSource.isPlaying && ___slideSource.clip && IsLocal(__instance))
         {
-            CoopRuntime.ActiveWorld?.CaptureSound("slide", ___slideSource.clip, __instance.transform.position, ___slideSource);
+            CoopRuntime.ActiveWorld?.CaptureSound("slide", ___slideSource.clip, __instance.transform.position, ___slideSource, followPlayer: true);
         }
     }
 
@@ -88,7 +88,7 @@ internal static class CharacterAudioHooks
 
     private static void Capture(string? key, Vector2 position, Transform? follow, AudioSource? playback)
     {
-        if (CoopRuntime.ActiveWorld is not { } sandbox || !playback || !playback!.clip ||
+        if (CoopRuntime.ActiveWorld is not { } world || !playback || !playback!.clip ||
             !PlayerCamera.main || !PlayerCamera.main.body)
         {
             return;
@@ -98,7 +98,7 @@ internal static class CharacterAudioHooks
         bool followsLocalPlayer = follow && (follow == body || follow!.IsChildOf(body));
         if (emitterDepth > 0 || followsLocalPlayer)
         {
-            sandbox.CaptureSound(key, playback.clip, position, playback);
+            world.CaptureSound(key, playback.clip, position, playback, followsLocalPlayer);
         }
     }
 }

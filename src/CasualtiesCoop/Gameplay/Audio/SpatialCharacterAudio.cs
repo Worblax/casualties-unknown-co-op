@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Gameplay.Characters;
 using UnityEngine;
 
@@ -11,7 +12,10 @@ internal sealed class SpatialCharacterAudio : IDisposable
     private const int MaxPlayback = 48;
     private readonly Dictionary<string, AudioClip> clips = new(StringComparer.Ordinal);
     private readonly Dictionary<AudioClip, string> clipKeys = new();
-    private readonly List<(AudioSource Source, Vector2 Origin, float Volume)> playing = new();
+    private readonly List<(AudioSource Source, Vector2 Origin, float Volume, ulong Follow, Vector2 Offset)> playing = new();
+    private readonly PlayerPositionLookup playerPosition;
+
+    internal SpatialCharacterAudio(PlayerPositionLookup playerPosition) => this.playerPosition = playerPosition;
 
     internal string GetClipKey(AudioClip clip, Body body)
     {
@@ -46,7 +50,7 @@ internal sealed class SpatialCharacterAudio : IDisposable
         }
     }
 
-    internal void Play(CharacterSound sound, byte character, Vector2 listener)
+    internal void Play(CharacterSound sound, byte character, Vector2 emitter, Vector2 listener)
     {
         Vector2 origin = new(sound.X, sound.Y);
         if ((origin - listener).sqrMagnitude >= HearDistance * HearDistance || playing.Count >= MaxPlayback)
@@ -73,6 +77,7 @@ internal sealed class SpatialCharacterAudio : IDisposable
 
         if (!clip)
         {
+            CoopDiagnostics.Count("Audio", "Clip unavailable locally");
             return;
         }
 
@@ -80,8 +85,9 @@ internal sealed class SpatialCharacterAudio : IDisposable
             volume: sound.Volume * DistanceGain(origin, listener), pitch: sound.Pitch);
         if (source)
         {
+            CoopDiagnostics.Count("Audio played", sound.Clip);
             SetPan(source, origin, listener);
-            playing.Add((source, origin, sound.Volume));
+            playing.Add((source, origin, sound.Volume, sound.FollowPlayer ? sound.Player : 0, origin - emitter));
         }
     }
 
@@ -96,6 +102,12 @@ internal sealed class SpatialCharacterAudio : IDisposable
                 continue;
             }
 
+            if (entry.Follow != 0 && playerPosition(entry.Follow, out Vector2 at))
+            {
+                entry.Origin = at + entry.Offset;
+                playing[index] = entry;
+                entry.Source.transform.position = entry.Origin;
+            }
             entry.Source.volume = entry.Volume * DistanceGain(entry.Origin, listener);
             SetPan(entry.Source, entry.Origin, listener);
         }

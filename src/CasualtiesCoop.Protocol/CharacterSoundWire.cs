@@ -14,9 +14,10 @@ internal readonly struct CharacterSound
     internal readonly float Y;
     internal readonly float Volume;
     internal readonly float Pitch;
+    internal readonly bool FollowPlayer;
     internal readonly string Clip;
 
-    internal CharacterSound(ulong player, uint sequence, float x, float y, float volume, float pitch, string clip)
+    internal CharacterSound(ulong player, uint sequence, float x, float y, float volume, float pitch, string clip, bool followPlayer)
     {
         Player = player;
         Sequence = sequence;
@@ -24,13 +25,14 @@ internal readonly struct CharacterSound
         Y = y;
         Volume = volume;
         Pitch = pitch;
+        FollowPlayer = followPlayer;
         Clip = clip;
     }
 }
 
 internal static class CharacterSoundWire
 {
-    private const int SoundHeaderSize = 45;
+    private const int SoundHeaderSize = 46;
     private const int MaxClipLength = 100;
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
 
@@ -49,6 +51,7 @@ internal static class CharacterSoundWire
         WriteFloat(message.AsSpan(33), sound.Y);
         WriteFloat(message.AsSpan(37), sound.Volume);
         WriteFloat(message.AsSpan(41), sound.Pitch);
+        message[45] = sound.FollowPlayer ? (byte)1 : (byte)0;
         name.CopyTo(message, SoundHeaderSize);
         return message;
     }
@@ -69,7 +72,7 @@ internal static class CharacterSoundWire
         float volume = ReadFloat(message.Slice(37));
         float pitch = ReadFloat(message.Slice(41));
         if (player == 0 || !IsCoordinate(x) || !IsCoordinate(y) || !InRange(volume, 1) || volume < 0 ||
-            !InRange(pitch, 3) || pitch < 0.05f)
+            !InRange(pitch, 3) || pitch < 0.05f || message[45] > 1)
         {
             return false;
         }
@@ -82,7 +85,7 @@ internal static class CharacterSoundWire
             return false;
         }
 
-        sound = new CharacterSound(player, sequence, x, y, volume, pitch, clip);
+        sound = new CharacterSound(player, sequence, x, y, volume, pitch, clip, message[45] != 0);
         return true;
     }
 

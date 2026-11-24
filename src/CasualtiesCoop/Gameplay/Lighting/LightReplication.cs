@@ -1,6 +1,8 @@
 using CasualtiesCoop.Gameplay.Characters;
 using System;
+using CasualtiesCoop.Core;
 using System.Collections.Generic;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Session;
 using UnityEngine;
@@ -21,6 +23,7 @@ internal sealed class LightReplication : IDisposable
     }
 
     private readonly SessionPeers peers;
+    private readonly IMonotonicClock clock;
     private readonly PlayerPositionLookup playerPosition;
     private readonly Action<byte[]> sendLocal;
     private readonly Action<byte[], ulong> relay;
@@ -40,9 +43,10 @@ internal sealed class LightReplication : IDisposable
     private float emptyUntil;
 
     internal LightReplication(SessionPeers peers, PlayerPositionLookup playerPosition,
-        Action<byte[]> sendLocal, Action<byte[], ulong> relay)
+        Action<byte[]> sendLocal, Action<byte[], ulong> relay, IMonotonicClock clock)
     {
         this.peers = peers;
+        this.clock = clock;
         this.playerPosition = playerPosition;
         this.sendLocal = sendLocal;
         this.relay = relay;
@@ -66,7 +70,7 @@ internal sealed class LightReplication : IDisposable
             return;
         }
 
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         Vector2 observer = body.transform.position;
         if (now >= nextSend)
         {
@@ -222,6 +226,7 @@ internal sealed class LightReplication : IDisposable
     {
         if (!LightWire.TryRead(message, peers.SessionId, out ulong player, out uint sequence, out LightSample[] samples))
         {
+            CoopDiagnostics.Count("Lighting", "Invalid light frame");
             return true;
         }
 
@@ -257,9 +262,13 @@ internal sealed class LightReplication : IDisposable
             return true;
         }
 
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         owner.Sequence = sequence;
         owner.LastSeen = now;
+        if (CoopDiagnostics.Enabled && owner.Sources.Count != samples.Length)
+        {
+            CoopDiagnostics.Trace("Lighting", $"Received source count {owner.Sources.Count} → {samples.Length}.");
+        }
         present.Clear();
         foreach (LightSample sample in samples)
         {

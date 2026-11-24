@@ -1,5 +1,7 @@
 using System;
+using CasualtiesCoop.Core;
 using System.Collections.Generic;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Session;
 using UnityEngine;
@@ -10,10 +12,7 @@ internal sealed class TerrainFluidReplication : IDisposable
 {
     private const int ZoneSize = 128;
     private const int StripHeight = 16;
-    private const int InterestRadius = 72;
-    private const int ChunkBudget = 12;
     private const float NetworkInterval = 0.12f;
-    private const float RepairInterval = 2.5f;
     private const int Size = FluidWire.ChunkSize;
 
     private sealed class Chunk
@@ -23,26 +22,19 @@ internal sealed class TerrainFluidReplication : IDisposable
         internal uint ScanRound;
     }
 
-    private sealed class SentChunk
-    {
-        internal uint Version;
-        internal float LastSent;
-        internal float LastFull;
-    }
-
     private readonly SessionPeers peers;
+    private readonly IMonotonicClock clock;
     private readonly PlayerPositionLookup playerPosition;
     private readonly bool host;
     private readonly HashSet<Vector2Int> uniqueZones = new();
     private readonly List<Vector2Int> zones = new();
-    private readonly Dictionary<Vector2Int, Chunk> chunks = new();
-    private readonly Dictionary<ulong, Dictionary<Vector2Int, SentChunk>> subscriptions = new();
-    private readonly Dictionary<Vector2Int, uint> applied = new();
-    private readonly List<(Vector2Int Key, Chunk Chunk, SentChunk? Sent)> candidates = new();
-    private readonly List<Vector2Int> expired = new();
+    private readonly Dictionary<(int X, int Y), Chunk> chunks = new();
+    private readonly FluidChunkSchedule schedule = new();
+    private readonly FluidChunkProgress progress = new();
+    private readonly Func<(int X, int Y), uint> captureRevision;
     private readonly Dictionary<Vector2Int, (Vector2Int Cell, byte Direction)> flow = new();
     private readonly List<GameObject> receivedPushers = new();
-    private readonly Dictionary<ulong, (ulong Operation, Vector2Int Cell, byte Liquid, float At)> drinks = new();
+    private readonly FluidDrinkAuthority drinks;
     private byte[,]? cells;
     private WorldGeneration? world;
     private int strip;
@@ -53,9 +45,12 @@ internal sealed class TerrainFluidReplication : IDisposable
     private float nextDrinkRetry;
     private bool applyingDrink;
 
-    internal TerrainFluidReplication(SessionPeers peers, PlayerPositionLookup playerPosition)
+    internal TerrainFluidReplication(SessionPeers peers, PlayerPositionLookup playerPosition, IMonotonicClock clock)
     {
         this.peers = peers;
+        this.clock = clock;
+        drinks = new FluidDrinkAuthority(clock);
+        captureRevision = CaptureRevision;
         this.playerPosition = playerPosition;
         host = peers.IsHost;
         peers.ConnectionChanged += OnPeerChanged;
@@ -63,18 +58,18 @@ internal sealed class TerrainFluidReplication : IDisposable
 
     internal bool IsGuest => !host && IsBound(FluidManager.main);
 
-    internal ulong LastDrink(ulong player) => drinks.TryGetValue(player, out var receipt) ? receipt.Operation : 0;
+    internal ulong LastDrink(ulong player) => drinks.LastOperation(player);
 
     internal void BeginRecovery(ulong confirmedDrink)
     {
         drinkNumber = Math.Max(drinkNumber, confirmedDrink);
         pendingDrink = null;
-        applied.Clear();
+        progress.RequireFreshSnapshots();
     }
 
     internal void ResendNearby(ulong player)
     {
-        subscriptions.Remove(player);
+        schedule.Forget(player);
         nextNetwork = 0;
     }
 
@@ -99,7 +94,7 @@ internal sealed class TerrainFluidReplication : IDisposable
         {
             for (int x = minX; x <= maxX; x++)
             {
-                if (!applied.ContainsKey(new Vector2Int(x, y)))
+                if (!progress.HasCurrent((x, y)))
                 {
                     return false;
                 }
@@ -119,7 +114,7 @@ internal sealed class TerrainFluidReplication : IDisposable
             return;
         }
 
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         if (!host)
         {
             if (pendingDrink is { } && now >= nextDrinkRetry)
@@ -151,28 +146,43 @@ internal sealed class TerrainFluidReplication : IDisposable
 
     private bool Bind()
     {
-        if (cells is not null)
+        WorldGeneration currentWorld = WorldGeneration.world;
+        FluidManager manager = FluidManager.main;
+        if (IsBound(manager))
         {
             return true;
         }
 
-        WorldGeneration currentWorld = WorldGeneration.world;
-        FluidManager manager = FluidManager.main;
+        // Changing worlds requires a new session identity. A replacement map in the same world keeps its revisions.
         if (!currentWorld || !currentWorld.worldExists || currentWorld.generatingWorld || !manager ||
-            manager.fluid is not { } map || map.GetLength(0) is < 3 or > ushort.MaxValue ||
-            map.GetLength(1) is < 3 or > ushort.MaxValue)
+            (world is not null && !ReferenceEquals(world, currentWorld)) || manager.fluid is not { } map ||
+            map.GetLength(0) is < 3 or > ushort.MaxValue || map.GetLength(1) is < 3 or > ushort.MaxValue)
         {
             return false;
         }
 
+        if (cells is not null)
+        {
+            schedule.Clear();
+            progress.RequireFreshSnapshots();
+            flow.Clear();
+            DestroyPushers();
+            strip = 0;
+            nextNetwork = 0;
+        }
         world = currentWorld;
         cells = map;
+        if (CoopDiagnostics.Enabled)
+        {
+            CoopDiagnostics.Trace("Fluids", $"Bound {map.GetLength(0)}×{map.GetLength(1)} terrain grid as {(host ? "host" : "guest")}.");
+        }
         if (!host)
         {
             Array.Clear(map, 0, map.Length);
         }
         return true;
     }
+
 
     internal bool TryStep(FluidManager manager)
     {
@@ -238,73 +248,23 @@ internal sealed class TerrainFluidReplication : IDisposable
 
     private void SendNearby(ulong peer, Vector2Int center, float now)
     {
-        if (!subscriptions.TryGetValue(peer, out Dictionary<Vector2Int, SentChunk> sent))
+        var updates = schedule.Plan(peer, center.x, center.y, cells!.GetLength(0), cells.GetLength(1), now, captureRevision);
+        for (int index = 0; index < updates.Count; index++)
         {
-            sent = new Dictionary<Vector2Int, SentChunk>();
-            subscriptions.Add(peer, sent);
-        }
-
-        int minX = Math.Max(0, center.x - InterestRadius) / Size;
-        int minY = Math.Max(0, center.y - InterestRadius) / Size;
-        int maxX = Math.Min(cells!.GetLength(0) - 1, center.x + InterestRadius) / Size;
-        int maxY = Math.Min(cells.GetLength(1) - 1, center.y + InterestRadius) / Size;
-        expired.Clear();
-        foreach (Vector2Int key in sent.Keys)
-        {
-            if (key.x < minX || key.x > maxX || key.y < minY || key.y > maxY)
+            FluidChunkSchedule.Update update = updates[index];
+            var key = update.Key;
+            byte[] frame = FluidWire.WriteChunk(peers.SessionId, key.X, key.Y, update.Revision, chunks[key].Cells);
+            if (peers.Send(peer, frame, update.Reliable))
             {
-                expired.Add(key);
+                schedule.RecordAccepted(peer, update, now);
             }
-        }
-        foreach (Vector2Int key in expired)
-        {
-            sent.Remove(key);
-        }
-
-        candidates.Clear();
-        for (int y = minY; y <= maxY; y++)
-        {
-            for (int x = minX; x <= maxX; x++)
-            {
-                Vector2Int key = new(x, y);
-                Chunk chunk = Capture(key);
-                sent.TryGetValue(key, out SentChunk? previous);
-                if (previous is null || previous.Version != chunk.Version || now - previous.LastFull >= RepairInterval)
-                {
-                    candidates.Add((key, chunk, previous));
-                }
-            }
-        }
-
-        Vector2Int centerChunk = new(center.x / Size, center.y / Size);
-        candidates.Sort((a, b) =>
-        {
-            int order = (a.Sent?.LastSent ?? -1f).CompareTo(b.Sent?.LastSent ?? -1f);
-            return order != 0 ? order : (a.Key - centerChunk).sqrMagnitude.CompareTo((b.Key - centerChunk).sqrMagnitude);
-        });
-
-        for (int index = 0; index < Math.Min(ChunkBudget, candidates.Count); index++)
-        {
-            var update = candidates[index];
-            bool reliable = update.Sent is null || now - update.Sent.LastFull >= RepairInterval;
-            byte[] frame = FluidWire.WriteChunk(peers.SessionId, update.Key.x, update.Key.y, update.Chunk.Version, update.Chunk.Cells);
-            if (!peers.Send(peer, frame, reliable))
-            {
-                continue;
-            }
-
-            SentChunk stamp = update.Sent ?? new SentChunk();
-            stamp.Version = update.Chunk.Version;
-            stamp.LastSent = now;
-            if (reliable)
-            {
-                stamp.LastFull = now;
-            }
-            sent[update.Key] = stamp;
         }
     }
 
-    private Chunk Capture(Vector2Int key)
+    private uint CaptureRevision((int X, int Y) key) => Capture(key).Version;
+
+
+    private Chunk Capture((int X, int Y) key)
     {
         if (!chunks.TryGetValue(key, out Chunk chunk))
         {
@@ -318,8 +278,8 @@ internal sealed class TerrainFluidReplication : IDisposable
 
         Span<byte> packed = stackalloc byte[FluidWire.PackedSize];
         packed.Clear();
-        int startX = key.x * Size;
-        int startY = key.y * Size;
+        int startX = key.X * Size;
+        int startY = key.Y * Size;
         int width = Math.Min(Size, cells!.GetLength(0) - startX);
         int height = Math.Min(Size, cells.GetLength(1) - startY);
         for (int y = 0; y < height; y++)
@@ -373,7 +333,7 @@ internal sealed class TerrainFluidReplication : IDisposable
             case MessageKind.FluidChunk:
                 if (FluidWire.TryReadChunk(frame, peers.SessionId, out int chunkX, out int chunkY, out uint version, out int offset))
                 {
-                    ApplyChunk(new Vector2Int(chunkX, chunkY), version, frame.AsSpan(offset));
+                    ApplyChunk((chunkX, chunkY), version, frame.AsSpan(offset));
                 }
                 return true;
             case MessageKind.FluidPush:
@@ -393,12 +353,12 @@ internal sealed class TerrainFluidReplication : IDisposable
         }
     }
 
-    private void ApplyChunk(Vector2Int key, uint revision, ReadOnlySpan<byte> packed)
+    private void ApplyChunk((int X, int Y) key, uint revision, ReadOnlySpan<byte> packed)
     {
-        int startX = key.x * Size;
-        int startY = key.y * Size;
+        int startX = key.X * Size;
+        int startY = key.Y * Size;
         if (startX >= cells!.GetLength(0) || startY >= cells.GetLength(1) ||
-            (applied.TryGetValue(key, out uint current) && revision < current))
+            !progress.TryObserve(key, revision))
         {
             return;
         }
@@ -412,7 +372,6 @@ internal sealed class TerrainFluidReplication : IDisposable
                 cells[startX + x, startY + y] = FluidWire.Unpack(packed, y * Size + x);
             }
         }
-        applied[key] = revision;
     }
 
     internal void NoteFlow(FluidManager manager, Vector2 direction, Vector2Int cell)
@@ -492,7 +451,7 @@ internal sealed class TerrainFluidReplication : IDisposable
     {
         if (pendingDrink is { } drink)
         {
-            nextDrinkRetry = Time.unscaledTime + 1f;
+            nextDrinkRetry = clock.Now + 1f;
             peers.Send(peers.Host, FluidWire.WriteDrink(MessageKind.FluidDrinkRequest, peers.SessionId,
                 drink.Operation, drink.Cell.x, drink.Cell.y, drink.Liquid));
         }
@@ -500,34 +459,33 @@ internal sealed class TerrainFluidReplication : IDisposable
 
     private void RespondToDrink(ulong peer, ulong operation, Vector2Int cell, byte expected)
     {
-        float now = Time.unscaledTime;
-        drinks.TryGetValue(peer, out var receipt);
-        if (operation > receipt.Operation)
+        if (!drinks.TryDecide(peer, operation, cell.x, cell.y, expected, () => TryConsume(peer, cell, expected),
+            out FluidDrinkAuthority.Receipt receipt, out bool executed))
         {
-            byte liquid = 0;
-            float lastAccepted = receipt.At;
-            if ((receipt.Operation == 0 || now - lastAccepted >= 0.65f) && InBounds(cell) && expected != 0 &&
-                cells![cell.x, cell.y] == expected && playerPosition(peer, out Vector2 at) &&
-                (at - world!.BlockToWorldPos(cell)).sqrMagnitude <= 4f * 4f)
-            {
-                liquid = expected;
-                lastAccepted = now;
-                if (expected != 3 && expected != 6)
-                {
-                    cells[cell.x, cell.y] = 0;
-                    nextNetwork = 0;
-                }
-            }
-            receipt = (operation, cell, liquid, lastAccepted);
-            drinks[peer] = receipt;
+            return;
         }
 
-        if (receipt.Operation == operation)
-        {
-            peers.Send(peer, FluidWire.WriteDrink(MessageKind.FluidDrinkResult, peers.SessionId,
-                operation, receipt.Cell.x, receipt.Cell.y, receipt.Liquid));
-        }
+        CoopDiagnostics.Count("Fluids", executed ? receipt.Liquid == 0 ? "Drink rejected" : "Drink confirmed" : "Drink replay");
+        peers.Send(peer, FluidWire.WriteDrink(MessageKind.FluidDrinkResult, peers.SessionId,
+            operation, receipt.X, receipt.Y, receipt.Liquid));
     }
+
+    private bool TryConsume(ulong peer, Vector2Int cell, byte expected)
+    {
+        if (!InBounds(cell) || cells![cell.x, cell.y] != expected || !playerPosition(peer, out Vector2 at) ||
+            (at - world!.BlockToWorldPos(cell)).sqrMagnitude > 4f * 4f)
+        {
+            return false;
+        }
+
+        if (expected != 3 && expected != 6)
+        {
+            cells[cell.x, cell.y] = 0;
+            nextNetwork = 0;
+        }
+        return true;
+    }
+
 
     private void ApplyDrink(ulong operation, Vector2Int cell, byte liquid)
     {
@@ -567,13 +525,18 @@ internal sealed class TerrainFluidReplication : IDisposable
         }
         else
         {
-            subscriptions.Remove(peer);
+            schedule.Forget(peer);
         }
     }
 
     public void Dispose()
     {
         peers.ConnectionChanged -= OnPeerChanged;
+        DestroyPushers();
+    }
+
+    private void DestroyPushers()
+    {
         foreach (GameObject push in receivedPushers)
         {
             if (push)
@@ -581,5 +544,6 @@ internal sealed class TerrainFluidReplication : IDisposable
                 UnityEngine.Object.Destroy(push);
             }
         }
+        receivedPushers.Clear();
     }
 }

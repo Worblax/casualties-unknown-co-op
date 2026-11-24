@@ -1,4 +1,5 @@
 using BepInEx;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -21,10 +22,14 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         previousRunInBackground = Application.runInBackground;
         Application.runInBackground = true;
 
-        runtime = new CoopRuntime(Logger);
+        CoopDiagnostics.Install(Config, Logger);
         harmony = new Harmony(PluginId);
         CoopPatches.Install(harmony);
-        SceneManager.sceneLoaded += runtime.SceneLoaded;
+        if (!CoopRuntime.IsTestMode)
+        {
+            runtime = new CoopRuntime(Logger);
+            SceneManager.sceneLoaded += runtime.SceneLoaded;
+        }
         Logger.LogInfo($"Casualties Co-op {PluginVersion} initialized.");
     }
 
@@ -41,6 +46,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         }
 
         harmony?.UnpatchSelf();
+        CoopDiagnostics.Close();
         Application.runInBackground = previousRunInBackground;
     }
 }

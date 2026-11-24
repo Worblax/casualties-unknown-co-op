@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "name": "world.guest-terrain",
+  "level": "UNITY_GUEST",
+  "seed": 88,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 25
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "position": [
+        1,
+        0
+      ]
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "target",
+      "position": [
+        3,
+        2
+      ],
+      "rows": [
+        "x"
+      ],
+      "legend": {
+        "x": 1
+      }
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "terrain.state",
+      "target": "target",
+      "material": 1,
+      "damage": 20
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 4000,
+      "condition": {
+        "op": "terrain.hostDamage",
+        "expected": 20,
+        "target": "target"
+      }
+    },
+    {
+      "op": "terrain.state",
+      "target": "target",
+      "material": 0,
+      "damage": 0
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 4000,
+      "condition": {
+        "op": "world.firstBlock",
+        "expected": 0,
+        "target": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.hostDamage",
+      "expected": 0,
+      "item": "target"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

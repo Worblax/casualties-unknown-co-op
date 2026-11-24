@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "name": "world.mob-target-switch",
+  "level": "UNITY_ACTORS",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "arena",
+      "position": [
+        -8,
+        -3
+      ],
+      "rows": [
+        "................",
+        "................",
+        "................",
+        "................",
+        "xxxxxxxxxxxxxxxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1,
+        "b": 42
+      }
+    },
+    {
+      "op": "character.place",
+      "target": "local",
+      "position": [
+        -2,
+        0
+      ]
+    },
+    {
+      "op": "character.spawn",
+      "id": "other",
+      "character": 0,
+      "position": [
+        20,
+        0
+      ]
+    },
+    {
+      "op": "mob.spawn",
+      "id": "tick",
+      "catalogId": "cavetick",
+      "position": [
+        1,
+        0
+      ],
+      "aggro": 1,
+      "seeDistance": 7
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "mob.hasNativeTarget",
+        "expected": 1,
+        "target": "tick",
+        "actor": "local"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "mob.hasNativeTarget",
+      "expected": 0,
+      "target": "tick",
+      "actor": "other"
+    },
+    {
+      "op": "snapshot.capture",
+      "id": "target-local"
+    },
+    {
+      "op": "parallel",
+      "actions": [
+        {
+          "op": "character.place",
+          "target": "local",
+          "position": [
+            -20,
+            0
+          ]
+        },
+        {
+          "op": "character.place",
+          "target": "other",
+          "position": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 5000,
+      "condition": {
+        "op": "mob.hasNativeTarget",
+        "expected": 1,
+        "target": "tick",
+        "actor": "other"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "mob.hasNativeTarget",
+      "expected": 0,
+      "target": "tick",
+      "actor": "local"
+    },
+    {
+      "op": "assert.equal",
+      "query": "character.localCameraPreserved",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

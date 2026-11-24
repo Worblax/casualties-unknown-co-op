@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "name": "debug.pause-step",
+  "level": "UNITY_ACTORS",
+  "seed": 42,
+  "timeoutMs": 45000,
+  "network": {
+    "latencyMs": 45,
+    "jitterMs": 5
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "character.spawn",
+      "id": "actor",
+      "character": 0,
+      "position": [
+        3,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "debug.pauseCycle"
+    },
+    {
+      "op": "assert.equal",
+      "query": "debug.pauseCyclePassed",
+      "expected": 1
+    },
+    {
+      "op": "wait.physicsTicks",
+      "count": 4
+    },
+    {
+      "op": "wait.frames",
+      "count": 4
+    },
+    {
+      "op": "debug.observeActor",
+      "target": "actor"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 2000,
+      "condition": { "op": "debug.cameraFollows", "target": "actor" }
+    },
+    {
+      "op": "snapshot.capture",
+      "id": "after-resume"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

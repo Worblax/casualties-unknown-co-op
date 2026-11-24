@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Networking;
 using Steamworks;
-using UnityEngine;
 
 namespace CasualtiesCoop.Session;
 
@@ -15,16 +15,18 @@ internal sealed class RoomLaunchPreparation : IDisposable
     private readonly SteamLobby lobby;
     private readonly SteamRoomLink link;
     private readonly ManualLogSource log;
+    private readonly IMonotonicClock clock;
     private readonly HashSet<CSteamID> confirmed = new();
     private RoomLaunchPlan? plan;
     private bool guestConfirmed;
     private float nextPoll;
     private float expiresAt;
 
-    internal RoomLaunchPreparation(SteamLobby lobby, ManualLogSource log)
+    internal RoomLaunchPreparation(SteamLobby lobby, ManualLogSource log, IMonotonicClock clock)
     {
         this.lobby = lobby;
         this.log = log;
+        this.clock = clock;
         link = lobby.Link;
         lobby.LaunchInputsChanged += Reset;
     }
@@ -85,7 +87,7 @@ internal sealed class RoomLaunchPreparation : IDisposable
 
     internal void Tick()
     {
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         if (now < nextPoll)
         {
             return;
@@ -170,7 +172,7 @@ internal sealed class RoomLaunchPreparation : IDisposable
 
         plan = received;
         guestConfirmed = false;
-        expiresAt = Time.unscaledTime + ConfirmationTimeout;
+        expiresAt = clock.Now + ConfirmationTimeout;
         return true;
     }
 

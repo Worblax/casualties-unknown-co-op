@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Gameplay.Characters;
 using CasualtiesCoop.Gameplay.Recovery;
 using CasualtiesCoop.Networking;
@@ -10,38 +10,33 @@ namespace CasualtiesCoop.Gameplay;
 
 internal sealed partial class WorldSession
 {
-    private const float RecoveryRetry = 1f;
-    private readonly HashSet<ulong> returningPeers = new();
-    private readonly Dictionary<ulong, (SessionRejoinState State, byte[] Message)> recoveryReceipts = new();
-    private Guid recoveryAttempt;
-    private SessionRejoinState? recoveryState;
-    private float nextRecoverySend;
+    private readonly HostRecovery hostRecovery = new();
     private float nextRecoveryNotice;
     private bool positionRestored;
-    private bool recoveryAcknowledged;
 
-    internal bool WaitingForRecovery => recoveryAttempt != Guid.Empty;
+    internal bool WaitingForRecovery => guestRecovery.Waiting;
     internal RoomLaunchPlan Plan => plan;
 
     private void OnRecoveryPeerChanged(ulong peer, bool connected)
     {
+        if (!connected)
+        {
+            Terrain.ResetPeer(peer);
+            Items.ResetPeer(peer);
+        }
         if (peers.IsHost)
         {
             if (plan.TryGetPlayer(peer, out _))
             {
-                returningPeers.Add(peer);
-                recoveryReceipts.Remove(peer);
+                hostRecovery.MarkReturning(peer);
             }
         }
         else if (peer == peers.Host && !connected)
         {
-            recoveryAttempt = Guid.NewGuid();
-            recoveryState = null;
+            guestRecovery.Begin(Guid.NewGuid());
             positionRestored = false;
-            recoveryAcknowledged = false;
-            nextRecoverySend = 0;
             nextRecoveryNotice = 0;
-            Items.BeginRecovery(0, freshBody: false);
+            Items.SuspendForRecovery();
             Fluids.BeginRecovery(0);
         }
     }
@@ -57,15 +52,14 @@ internal sealed partial class WorldSession
             }
 
             Guid attempt = SessionRejoinWire.ReadReference(bytes, frame, plan.Id);
-            if (attempt != Guid.Empty && Ready)
+            if (attempt != Guid.Empty && SceneReady)
             {
                 if (frame == MessageKind.SessionRejoinRequest)
                 {
                     OfferRecovery(peer, attempt);
                 }
-                else if (recoveryReceipts.TryGetValue(peer, out var receipt) && receipt.State.Attempt == attempt &&
-                    peers.Send(peer, SessionRejoinWire.WriteReference(MessageKind.SessionRejoinCommitted, plan.Id, attempt)) &&
-                    returningPeers.Remove(peer))
+                else if (hostRecovery.TryCommit(peer, attempt, target => peers.Send(target,
+                    SessionRejoinWire.WriteReference(MessageKind.SessionRejoinCommitted, plan.Id, attempt))))
                 {
                     log.LogInfo("A returning sandbox guest applied the snapshot. Control was released.");
                 }
@@ -79,16 +73,13 @@ internal sealed partial class WorldSession
         }
 
         if (frame == MessageKind.SessionRejoinState && SessionRejoinWire.TryReadState(bytes, plan.Id, out SessionRejoinState state) &&
-            state.Attempt == recoveryAttempt && recoveryState is null)
+            guestRecovery.ExpectsState(state.Attempt))
         {
             RestoreFrom(state);
         }
-        else if (frame == MessageKind.SessionRejoinCommitted && recoveryAcknowledged && WaitingForRecovery &&
-            SessionRejoinWire.ReadReference(bytes, frame, plan.Id) == recoveryAttempt)
+        else if (frame == MessageKind.SessionRejoinCommitted &&
+            guestRecovery.TryCommit(SessionRejoinWire.ReadReference(bytes, frame, plan.Id)))
         {
-            recoveryAttempt = Guid.Empty;
-            recoveryState = null;
-            nextUpdate = 0;
             log.LogInfo("Sandbox rejoin complete.");
             if (PlayerCamera.main)
             {
@@ -100,43 +91,38 @@ internal sealed partial class WorldSession
 
     private void OfferRecovery(ulong peer, Guid attempt)
     {
-        if (!returningPeers.Contains(peer))
+        byte[]? message = hostRecovery.Offer(peer, attempt, () => CaptureRecovery(peer, attempt), out bool created);
+        if (message is null)
         {
             return;
         }
 
-        if (!recoveryReceipts.TryGetValue(peer, out var receipt) || receipt.State.Attempt != attempt)
+        if (created)
         {
-            remotes.TryGetValue(peer, out RemotePlayer? remote);
-            CharacterPose previous = remote?.Pose ?? default;
-            bool hasPosition = previous.Player != 0 && IsWorldPosition(new Vector2(previous.X, previous.Y));
-            SessionRejoinState state = new(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
-                lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer),
-                previous.X, previous.Y, hasPosition);
-            if (SessionRejoinWire.WriteState(state) is not { } message)
-            {
-                return;
-            }
-
-            receipt = (state, message);
-            recoveryReceipts[peer] = receipt;
             Fluids.ResendNearby(peer);
             log.LogInfo("Preparing the reserved sandbox seat for a returning guest.");
         }
-        peers.Send(peer, receipt.Message);
+        peers.Send(peer, message);
+    }
+
+    private SessionRejoinState CaptureRecovery(ulong peer, Guid attempt)
+    {
+        remotes.TryGetValue(peer, out RemotePlayer? remote);
+        CharacterPose previous = remote?.Pose ?? default;
+        bool hasPosition = previous.Player != 0 && IsWorldPosition(new Vector2(previous.X, previous.Y));
+        return new SessionRejoinState(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
+            lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer),
+            previous.X, previous.Y, hasPosition);
     }
 
     internal void RestoreFrom(SessionRejoinState state)
     {
-        recoveryAttempt = state.Attempt;
-        recoveryState = state;
+        guestRecovery.RestoreFrom(state);
         positionRestored = false;
-        recoveryAcknowledged = false;
-        nextRecoverySend = 0;
-        AdvanceSequence(ref sequence, state.PoseSequence);
+        poseSampler.Resume(state.PoseSequence);
         AdvanceSequence(ref soundSequence, state.SoundSequence);
         lights.AdvanceLocalSequence(state.LightSequence);
-        Items.BeginRecovery(state.ItemOperation, freshBody: !Ready);
+        Items.BeginRecovery(state.ItemOperation, freshBody: !SceneReady);
         Fluids.BeginRecovery(state.DrinkOperation);
     }
 
@@ -161,22 +147,23 @@ internal sealed partial class WorldSession
             body.rb.velocity = Vector2.zero;
         }
 
-        float now = Time.unscaledTime;
+        float now = clock.Now;
         if (now >= nextRecoveryNotice)
         {
             nextRecoveryNotice = now + 6f;
-            PlayerCamera.main.DoAlert(recoveryState is null ? "Reconnecting to the co-op host…" : "Restoring your co-op state…");
+            PlayerCamera.main.DoAlert(guestRecovery.Snapshot is null ? "Reconnecting to the co-op host…" : "Restoring your co-op state…");
         }
 
-        if (recoveryState is not { } state)
+        if (guestRecovery.Snapshot is not { } state)
         {
-            SendRecovery(MessageKind.SessionRejoinRequest, now);
+            guestRecovery.Tick(snapshotApplied: false, SendRecovery);
             return;
         }
 
+        Vector2 at = new(state.X, state.Y);
         if (state.HasPosition)
         {
-            MoveToRecoveryPosition(body, new Vector2(state.X, state.Y));
+            MoveToRecoveryPosition(body, at);
             if (!positionRestored)
             {
                 Transform camera = PlayerCamera.main.transform;
@@ -185,21 +172,11 @@ internal sealed partial class WorldSession
         }
         positionRestored = true;
 
-        if (Items.RecoveryComplete() && (!state.HasPosition || Fluids.HasSnapshotNear(new Vector2(state.X, state.Y))))
-        {
-            recoveryAcknowledged |= SendRecovery(MessageKind.SessionRejoinApplied, now);
-        }
+        guestRecovery.Tick(Items.RecoveryComplete() && (!state.HasPosition || Fluids.HasSnapshotNear(at)), SendRecovery);
     }
 
-    private bool SendRecovery(MessageKind frame, float now)
-    {
-        if (now >= nextRecoverySend)
-        {
-            nextRecoverySend = now + RecoveryRetry;
-            return peers.Send(peers.Host, SessionRejoinWire.WriteReference(frame, plan.Id, recoveryAttempt));
-        }
-        return false;
-    }
+    private bool SendRecovery(MessageKind frame, Guid attempt) =>
+        peers.Send(peers.Host, SessionRejoinWire.WriteReference(frame, plan.Id, attempt));
 
     private static bool IsWorldPosition(Vector2 position)
     {

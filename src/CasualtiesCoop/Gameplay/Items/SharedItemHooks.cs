@@ -11,7 +11,17 @@ namespace CasualtiesCoop.Gameplay.Items;
 internal static class SharedItemHooks
 {
     private static readonly Color PendingTint = new(1f, 1f, 1f, 0.5f);
-    private static SharedItemReplication? Items => CoopRuntime.ActiveWorld?.Items;
+    private static SharedItemReplication? testItems;
+    private static SharedItemReplication? Items => CoopRuntime.IsTestMode ? testItems : CoopRuntime.ActiveWorld?.Items;
+
+    internal static void BindTestItems(SharedItemReplication? items)
+    {
+        if (!CoopRuntime.IsTestMode)
+        {
+            throw new InvalidOperationException("Item test hooks require an opt-in test process.");
+        }
+        testItems = items;
+    }
 
     internal static void Install(Harmony harmony)
     {

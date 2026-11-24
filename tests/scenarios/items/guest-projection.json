@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "name": "items.guest-projection",
+  "level": "UNITY_GUEST",
+  "seed": 42,
+  "timeoutMs": 60000,
+  "network": {
+    "latencyMs": 50,
+    "jitterMs": 10,
+    "unreliableLoss": 0.05
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "alice",
+      "role": "guest",
+      "position": [
+        1,
+        0
+      ]
+    },
+    {
+      "op": "item.spawn",
+      "id": "target",
+      "catalogId": "$fixture.pickupableItem",
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "parallel",
+      "actions": [
+        {
+          "op": "item.pickup",
+          "peer": "alice",
+          "item": "target",
+          "slot": "$fixture.emptyPickupSlot"
+        }
+      ]
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 10000,
+      "condition": {
+        "op": "items.guestSlotContainsReplica",
+        "item": "target"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.acceptedCount",
+      "item": "target",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.rejectedCount",
+      "item": "target",
+      "expected": 0
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.distinctSubmittedPeers",
+      "item": "target",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.requestRevisionCount",
+      "item": "target",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "items.activeWorldCount",
+      "item": "target",
+      "expected": 0
+    },
+    {
+      "op": "assert.equal",
+      "query": "network.pendingOperations",
+      "expected": 0
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

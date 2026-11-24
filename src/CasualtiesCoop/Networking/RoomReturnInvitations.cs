@@ -2,9 +2,9 @@ using System;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using BepInEx.Logging;
+using CasualtiesCoop.Core;
 using CasualtiesCoop.Lobby;
 using Steamworks;
-using UnityEngine;
 
 namespace CasualtiesCoop.Networking;
 
@@ -18,6 +18,7 @@ internal sealed class RoomReturnInvitations : IDisposable
     private readonly Func<CSteamID, bool> canReceive;
     private readonly Func<CSteamID, CSteamID, Guid, bool> invite;
     private readonly ManualLogSource log;
+    private readonly IMonotonicClock clock;
     private readonly Callback<SteamNetworkingMessagesSessionRequest_t> sessionRequests;
     private readonly IntPtr[] incoming = new IntPtr[8];
     private RoomReturnAddress? pending;
@@ -28,11 +29,12 @@ internal sealed class RoomReturnInvitations : IDisposable
     internal string? Status { get; private set; }
 
     internal RoomReturnInvitations(Func<CSteamID, bool> canReceive, Func<CSteamID, CSteamID, Guid, bool> invite,
-        ManualLogSource log)
+        ManualLogSource log, IMonotonicClock clock)
     {
         this.canReceive = canReceive;
         this.invite = invite;
         this.log = log;
+        this.clock = clock;
         sessionRequests = Callback<SteamNetworkingMessagesSessionRequest_t>.Create(OnSessionRequested);
     }
 
@@ -49,7 +51,7 @@ internal sealed class RoomReturnInvitations : IDisposable
             if (Send(address.Host, RequestInvite, address.Room, address.Session))
             {
                 pending = address;
-                expiresAt = Time.unscaledTime + 15f;
+                expiresAt = clock.Now + 15f;
                 Status = "Requesting a Steam invitation from the host…";
                 return;
             }
@@ -68,7 +70,7 @@ internal sealed class RoomReturnInvitations : IDisposable
             return;
         }
 
-        if (Waiting && Time.unscaledTime >= expiresAt)
+        if (Waiting && clock.Now >= expiresAt)
         {
             pending = null;
             Status = "The host did not respond. Try again or ask for a Steam invitation.";
