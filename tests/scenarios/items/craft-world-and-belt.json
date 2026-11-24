@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "name": "items.craft-world-and-belt",
+  "level": "UNITY_HOST",
+  "seed": 143,
+  "timeoutMs": 60000,
+  "network": { "latencyMs": 25 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "peer.add", "id": "alice", "role": "guest", "position": [1, 0] },
+    { "op": "item.spawn", "id": "heldLeaf", "catalogId": "foliage", "position": [0, 0] },
+    { "op": "item.spawn", "id": "floorLeaf", "catalogId": "foliage", "position": [0.5, 0] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.nativePickup", "item": "heldLeaf" },
+    { "op": "assert.equal", "query": "items.nativeDefinitionInSlots", "target": "foliage", "expected": 1 },
+    { "op": "assert.eventually", "timeoutMs": 5000, "condition": {
+      "op": "character.nearItem", "item": "floorLeaf", "actor": "local", "distance": 10
+    } },
+    { "op": "item.craft", "recipe": 0 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.nativeDefinitionCount", "target": "rope", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "items.nativeDefinitionCount", "target": "foliage", "expected": 0 },
+    { "op": "assert.equal", "query": "items.nativeDefinitionInSlots", "target": "foliage", "expected": 0 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

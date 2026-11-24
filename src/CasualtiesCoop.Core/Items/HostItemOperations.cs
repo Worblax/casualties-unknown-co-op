@@ -9,6 +9,10 @@ internal interface IItemWorld
     ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition);
     bool TryPickUp(ParticipantId player, ulong item, byte slot, out float condition);
     ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location, out float condition);
+    bool TryApplyState(ulong item, byte[] payload);
+    bool HasRecipe(int recipe);
+    ItemDecision CheckCraftIngredient(ParticipantId player, ulong item);
+    void RemoveItem(ulong item);
 }
 
 internal sealed class HostItemOperations
@@ -76,7 +80,7 @@ internal sealed class HostItemOperations
                     return ItemDecision.SlotOccupied;
                 }
 
-                change = items.Commit(state.Id, player, request.Slot, state.Location, condition);
+                change = items.Commit(state.Id, player, request.Slot, state.Location, condition, state.Payload);
                 return ItemDecision.Accepted;
             }
 
@@ -85,10 +89,20 @@ internal sealed class HostItemOperations
                 return ItemDecision.Unavailable;
             }
 
+            byte[] payload = request.Payload.Length > 0 ? request.Payload : state.Payload;
+            if (!ItemWire.IsPayload(payload))
+            {
+                return ItemDecision.Unavailable;
+            }
+            if (payload.Length > 0 && !world.TryApplyState(state.Id, payload))
+            {
+                return ItemDecision.Unavailable;
+            }
+
             decision = world.Drop(player, state.Id, request, out ItemLocation location, out condition);
             if (decision == ItemDecision.Accepted)
             {
-                change = items.Commit(state.Id, default, ItemWire.NoSlot, location, condition);
+                change = items.Commit(state.Id, default, location, condition, payload);
             }
             return decision;
         }

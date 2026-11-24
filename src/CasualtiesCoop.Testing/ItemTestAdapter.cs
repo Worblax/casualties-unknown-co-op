@@ -169,6 +169,60 @@ internal sealed class ItemTestAdapter : IDisposable
         }
     }
 
+    internal void Place(string alias, JObject command)
+    {
+        var position = ScenarioDocument.Position(command);
+        ItemFor(alias).transform.position = new Vector3(position.X, position.Y, 0f);
+    }
+
+    internal void SetCondition(string alias, float condition) => ItemFor(alias).condition = Mathf.Clamp01(condition);
+
+    internal void SetWet(string alias, bool wet)
+    {
+        Item item = ItemFor(alias);
+        item.wetTime = wet ? Time.time : -1000f;
+    }
+
+    internal void SetGun(string alias, int rounds, int magazine, bool hasMag, bool safe, bool racked)
+    {
+        Item item = ItemFor(alias);
+        GunScript? gun = item.GetComponent<GunScript>();
+        if (!gun) throw new TestBlocked($"{alias} is not a gun.");
+        gun.roundsInMag = Mathf.Clamp(rounds, 0, gun.magCapacity);
+        gun.hasMag = hasMag;
+        gun.safe = safe;
+        gun.racked = racked;
+        gun.roundInChamber = magazine switch
+        {
+            1 => GunScript.RoundInChamber.Round,
+            2 => GunScript.RoundInChamber.Casing,
+            _ => GunScript.RoundInChamber.None
+        };
+    }
+
+    internal void SetLiquid(string alias, string liquid, float amount, bool clear)
+    {
+        Item item = ItemFor(alias);
+        WaterContainerItem? water = item.GetComponent<WaterContainerItem>();
+        if (!water) throw new TestBlocked($"{alias} has no liquid container.");
+        if (clear) water.stack.Clear();
+        water.AddLiquid(liquid, amount);
+        water.UpdateCondition();
+    }
+
+    internal void Craft(int recipe, string? peer)
+    {
+        if (recipe < 0 || recipe >= Recipes.recipes.Count) throw new FormatException("Unknown recipe index.");
+        Recipe selected = Recipes.recipes[recipe];
+        if (peer is null)
+        {
+            selected.TryMake();
+            return;
+        }
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.ItemReplication is null)
+            throw new TestBlocked($"Guest {peer} has no production item replication.");
+        Cluster.RunAs(actor, items => items.TryCraft(selected));
+    }
     private static readonly Dictionary<string, Func<ItemTestAdapter, string, ulong, Item, int>> NetworkQueries = new(StringComparer.Ordinal)
     {
         ["items.acceptedCount"] = (r, _, id, _) => r.Cluster.Results.Count(result => result.Id == id && result.Decision == ItemDecision.Accepted),
@@ -185,9 +239,20 @@ internal sealed class ItemTestAdapter : IDisposable
         ["items.replicated"] = (r, _, id, _) => r.Replicated(id, ownedOnly: false) ? 1 : 0,
         ["items.removed"] = (r, _, id, _) => !r.Cluster.Host.Session.TryGet(id, out _) ? 1 : 0,
         ["items.unowned"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var loose) && loose.Owner.IsNone ? 1 : 0,
+        ["items.unownedConverged"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var loose) &&
+            loose.Owner.IsNone && r.Cluster.Guests.All(actor => actor.Guest!.Replicas.TryGet(id, out var replica) &&
+                SameState(loose, replica)) ? 1 : 0,
         ["items.motion"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var moving) &&
             (Mathf.Abs(moving.Location.VelocityX) > 0.1f || Mathf.Abs(moving.Location.VelocityY) > 0.1f) ? 1 : 0,
         ["items.converged"] = (r, _, id, _) => r.Replicated(id, ownedOnly: true) ? 1 : 0,
+        ["items.hostCondition"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var state) ? Mathf.RoundToInt(state.Condition * 100f) : -1,
+        ["items.hostPlacement"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var state) ? (int)state.Placement : -1,
+        ["items.replicaPayloadMatches"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var authority) &&
+            r.Cluster.Guests.All(actor => actor.Guest!.Replicas.TryGet(id, out var replica) && replica.Payload.SequenceEqual(authority.Payload)) ? 1 : 0,
+        ["items.hostWet"] = (r, alias, _, item) => item && item.isWet ? 1 : 0,
+        ["items.hostGunRounds"] = (r, alias, _, item) => item && item.TryGetComponent<GunScript>(out var gun) ? gun.roundsInMag : -1,
+        ["items.hostLiquidMl"] = (r, alias, _, item) => item && item.TryGetComponent<WaterContainerItem>(out var water)
+            ? Mathf.RoundToInt(water.CurrentTotal) : -1,
         ["items.guestSlotContainsReplica"] = (r, alias, id, item) => r.Cluster.ProjectedActor is { } actor &&
             r.slots.TryGetValue(actor.Name + "/" + alias, out byte slot) && r.Cluster.HoldsReplica(slot, id, item) ? 1 : 0
     };
@@ -232,8 +297,9 @@ internal sealed class ItemTestAdapter : IDisposable
     }
 
     private static bool SameState(ItemState a, ItemState b) =>
-        a.Id == b.Id && a.Definition == b.Definition && a.Owner == b.Owner && a.Slot == b.Slot &&
-        a.Revision == b.Revision && a.Sample == b.Sample && a.Removed == b.Removed &&
+        a.Id == b.Id && a.Definition == b.Definition && a.Owner == b.Owner && a.Parent == b.Parent &&
+        a.Slot == b.Slot && a.Placement == b.Placement && a.Revision == b.Revision && a.Sample == b.Sample &&
+        a.Removed == b.Removed && Mathf.Abs(a.Condition - b.Condition) < 0.01f && a.Payload.SequenceEqual(b.Payload) &&
         Mathf.Abs(a.Condition - b.Condition) < 0.001f &&
         Mathf.Abs(a.Location.X - b.Location.X) < 0.01f && Mathf.Abs(a.Location.Y - b.Location.Y) < 0.01f &&
         Mathf.Abs(Mathf.DeltaAngle(a.Location.Angle, b.Location.Angle)) < 0.01f &&
@@ -241,10 +307,15 @@ internal sealed class ItemTestAdapter : IDisposable
         Mathf.Abs(a.Location.VelocityY - b.Location.VelocityY) < 0.01f &&
         Mathf.Abs(a.Location.Spin - b.Location.Spin) < 0.01f;
 
+    private static bool SameContent(ItemState a, ItemState b) =>
+        a.Id == b.Id && a.Definition == b.Definition && a.Owner == b.Owner && a.Parent == b.Parent &&
+        a.Slot == b.Slot && a.Placement == b.Placement && a.Revision == b.Revision &&
+        a.Removed == b.Removed && Mathf.Abs(a.Condition - b.Condition) < 0.001f && a.Payload.SequenceEqual(b.Payload);
+
     private static object Describe(ItemState state) => new
     {
-        state.Id, state.Definition, owner = state.Owner.Seat, state.Revision, state.Sample, state.Slot, state.Condition,
-        state.Removed, location = new { state.Location.X, state.Location.Y, state.Location.Angle, state.Location.VelocityX,
+        state.Id, state.Definition, owner = state.Owner.Seat, state.Revision, state.Sample, state.Slot, state.Parent,
+        placement = (int)state.Placement, payload = state.Payload?.Length ?? 0, state.Condition, state.Removed, location = new { state.Location.X, state.Location.Y, state.Location.Angle, state.Location.VelocityX,
             state.Location.VelocityY, state.Location.Spin }
     };
 
@@ -271,6 +342,41 @@ internal sealed class ItemTestAdapter : IDisposable
 
     internal bool Near(string alias, Body body, float distance) =>
         ((Vector2)(ItemFor(alias).transform.position - body.transform.position)).sqrMagnitude <= distance * distance;
+
+    internal int CountNativeDefinition(string definition) =>
+        Item.allItems.Count(item => item && item.id == definition);
+
+    internal int CountAuthoritativeDefinition(string definition) =>
+        Cluster.Host.Session.Snapshot().Count(state => !state.Removed && state.Definition == definition);
+
+    internal int CountReplicaDefinition(string peer, string definition)
+    {
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.Guest is null)
+            throw new FormatException($"Unknown guest {peer}.");
+        return actor.Guest.Replicas.States.Count(state => !state.Removed && state.Definition == definition);
+    }
+
+    internal bool DefinitionConverged(string definition)
+    {
+        ItemState[] authority = Cluster.Host.Session.Snapshot()
+            .Where(state => !state.Removed && state.Definition == definition).OrderBy(state => state.Id).ToArray();
+        return Cluster.Guests.All(actor =>
+        {
+            ItemState[] replicas = actor.Guest!.Replicas.States
+                .Where(state => !state.Removed && state.Definition == definition).OrderBy(state => state.Id).ToArray();
+            if (replicas.Length != authority.Length) return false;
+            for (int index = 0; index < replicas.Length; index++)
+                if (!SameContent(authority[index], replicas[index])) return false;
+            return true;
+        });
+    }
+
+    internal int CountNativeDefinitionInSlots(string definition)
+    {
+        Body body = Cluster.Body;
+        return Item.allItems.Count(item => item && item.id == definition &&
+            Enumerable.Range(0, body.slots.Length).Any(slot => body.GetItem(slot) == item));
+    }
 
     internal void ActorPickup(Body body, string alias)
     {

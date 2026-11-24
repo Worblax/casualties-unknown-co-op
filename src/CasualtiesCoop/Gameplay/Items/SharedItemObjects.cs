@@ -13,8 +13,7 @@ internal sealed class SharedItemObjects
 
     private GameObject? GetPrefab(string definition)
     {
-        if (!ItemWire.IsDefinition(definition) || !Item.GlobalItems.TryGetValue(definition, out ItemInfo info) ||
-            info.wearable || (info is LiquidItemInfo && definition != "alcohol"))
+        if (!ItemWire.IsDefinition(definition) || !Item.GlobalItems.TryGetValue(definition, out _))
         {
             return null;
         }
@@ -25,19 +24,9 @@ internal sealed class SharedItemObjects
         }
 
         GameObject prefab = Resources.Load<GameObject>(definition);
-        if (!prefab || !prefab.GetComponent<Item>() || !prefab.GetComponent<Rigidbody2D>() ||
-            !prefab.GetComponent<Collider2D>() || !prefab.GetComponent<SpriteRenderer>())
+        if (!prefab || !prefab.GetComponent<Item>())
         {
             return prefabs[definition] = null;
-        }
-
-        // Items with their own behaviours need a separate serializer before they can be shared.
-        foreach (MonoBehaviour behaviour in prefab.GetComponentsInChildren<MonoBehaviour>(true))
-        {
-            if (behaviour is not Item && (definition != "alcohol" || behaviour is not WaterContainerItem))
-            {
-                return prefabs[definition] = null;
-            }
         }
 
         return prefabs[definition] = prefab;
@@ -54,21 +43,23 @@ internal sealed class SharedItemObjects
         GameObject instance = UnityEngine.Object.Instantiate(prefab!, new Vector3(at.X, at.Y, 0),
             Quaternion.Euler(0, 0, at.Angle));
         Item item = instance.GetComponent<Item>();
-        foreach (MonoBehaviour behaviour in instance.GetComponentsInChildren<MonoBehaviour>(true))
+        if (!item.rb)
         {
-            behaviour.enabled = false;
+            UnityEngine.Object.Destroy(instance);
+            return null;
         }
-
         item.rb.bodyType = RigidbodyType2D.Kinematic;
         item.rb.gravityScale = 0;
         foreach (Collider2D collider in instance.GetComponentsInChildren<Collider2D>(true))
         {
             collider.isTrigger = true;
         }
-
         item.rb.simulated = false;
         return item;
     }
+
+    internal bool Apply(Item item, byte[] payload, float condition, ItemPlacement placement) =>
+        ItemStateCodec.TryApply(item, payload, condition, placement);
 
     internal static ItemLocation Read(Item item)
     {
@@ -82,9 +73,10 @@ internal sealed class SharedItemObjects
         item.transform.SetParent(null, true);
         item.transform.localScale = Vector3.one;
         item.transform.SetPositionAndRotation(new Vector3(at.X, at.Y, 0), Quaternion.Euler(0, 0, at.Angle));
-        if (GetPrefab(item.id) is { } prefab)
+        if (GetPrefab(item.id) is { } prefab && item.TryGetComponent<SpriteRenderer>(out SpriteRenderer sprite) &&
+            prefab.TryGetComponent<SpriteRenderer>(out SpriteRenderer source))
         {
-            item.GetComponent<SpriteRenderer>().sortingOrder = prefab.GetComponent<SpriteRenderer>().sortingOrder;
+            sprite.sortingOrder = source.sortingOrder;
         }
         item.gameObject.SetActive(true);
         item.rb.simulated = true;

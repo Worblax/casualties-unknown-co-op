@@ -1,3 +1,5 @@
+using UnityEngine;
+
 namespace CasualtiesCoop.Gameplay.Items;
 
 internal sealed class SharedItemInventory
@@ -65,6 +67,70 @@ internal sealed class SharedItemInventory
         {
             body.DropItem(item);
             return !body.HoldingItem(item) && !item.transform.parent;
+        }
+        finally
+        {
+            Applying = false;
+        }
+    }
+
+    internal bool TryWear(Item item)
+    {
+        Body? body = Body;
+        if (!body || !item || !item.Stats.wearable)
+        {
+            return false;
+        }
+        if (body!.GetWearableBySlotID(item.Stats.wearSlotId) == item)
+        {
+            return true;
+        }
+
+        Applying = true;
+        try
+        {
+            if (body.HoldingItem(item)) body.DropItem(item);
+            if (item.TryGetParentContainer(out Container parent)) parent.UnloadItem(item);
+            body.WearWearable(item);
+            return body!.GetWearableBySlotID(item.Stats.wearSlotId) == item;
+        }
+        finally
+        {
+            Applying = false;
+        }
+    }
+
+    internal bool TryAttach(Item containerItem, Item child)
+    {
+        if (!containerItem || !containerItem.container || !child)
+        {
+            return false;
+        }
+        if (child.transform.parent == containerItem.transform)
+        {
+            return true;
+        }
+
+        Applying = true;
+        try
+        {
+            Container container = containerItem.container;
+            child.transform.SetParent(container.transform);
+            child.rb.simulated = false;
+            child.transform.position = container.transform.position;
+            SpriteRenderer sprite = child.GetComponent<SpriteRenderer>();
+            sprite.enabled = container.itemsVisible;
+            if (container.itemsVisible)
+            {
+                if (containerItem.TryGetComponent<SpriteRenderer>(out SpriteRenderer parentSprite))
+                {
+                    sprite.sortingOrder = parentSprite.sortingOrder;
+                }
+                child.transform.localEulerAngles = new Vector3(0f, 0f, 180f);
+            }
+            if (child.TryGetComponent<Wearable>(out Wearable wearable)) wearable.ClearSprites();
+            Container.UpdateItemLight(child.gameObject, inContainer: !container.itemsVisible);
+            return true;
         }
         finally
         {

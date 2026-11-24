@@ -12,6 +12,7 @@ param(
     [string]$BepInExCoreDir,
     [ValidateRange(10, 3600)][int]$TimeoutSeconds = 90,
     [switch]$Visible,
+    [switch]$DirectLaunch,
     [switch]$HoldOnFailure,
     [ValidateRange(0, 3600)][int]$HoldOnFailureSeconds = 15,
     [switch]$NoBuild
@@ -143,7 +144,11 @@ function Invoke-Scenario([string]$File) {
         }
 
         $launchAttempted = $true
-        Start-Process -FilePath $steam.Path -ArgumentList @('-applaunch', '4576490', '--coop-test', ('"{0}"' -f $manifest)) -WindowStyle Hidden
+        if ($DirectLaunch) {
+            Start-Process -FilePath $exe -ArgumentList @('--coop-test', ('"{0}"' -f $manifest)) -WindowStyle Hidden
+        } else {
+            Start-Process -FilePath $steam.Path -ArgumentList @('-applaunch', '4576490', '--coop-test', ('"{0}"' -f $manifest)) -WindowStyle Hidden
+        }
         $watch = [Diagnostics.Stopwatch]::StartNew()
         while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             if (!$owned -and (Test-Path -LiteralPath $startedPath)) {

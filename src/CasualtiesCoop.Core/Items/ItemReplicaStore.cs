@@ -87,7 +87,6 @@ internal sealed class ItemReplicaStore
         {
             if (pending.Deltas.Count == DeltaBufferLimit)
             {
-                // A later snapshot can cover churn that exceeded the bounded replay buffer.
                 snapshot = null;
             }
             else
@@ -109,7 +108,6 @@ internal sealed class ItemReplicaStore
         sequence = number;
         return true;
     }
-
     internal bool ApplySample(ItemState incoming, bool motion, out ItemState? previous)
     {
         previous = null;
@@ -119,6 +117,11 @@ internal sealed class ItemReplicaStore
             return false;
         }
 
+        if (incoming.Payload.Length == 0)
+        {
+            incoming.Payload = current.Payload;
+            incoming.ClientKey = current.ClientKey;
+        }
         previous = current;
         replicas[incoming.Id] = incoming;
         return true;
@@ -148,5 +151,6 @@ internal sealed class ItemReplicaStore
 
     private static bool SameStructure(ItemState current, ItemState incoming) =>
         !incoming.Removed && current.Definition == incoming.Definition && current.Revision == incoming.Revision &&
-        current.Owner == incoming.Owner && current.Slot == incoming.Slot;
+        current.Owner == incoming.Owner && current.Parent == incoming.Parent && current.Slot == incoming.Slot &&
+        current.Placement == incoming.Placement;
 }

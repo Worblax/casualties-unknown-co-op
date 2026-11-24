@@ -7,7 +7,7 @@ namespace CasualtiesCoop.Core.Items;
 
 internal sealed class AuthoritativeItemRegistry
 {
-    internal const int Limit = 256;
+    internal const int Limit = 4096;
     private const float RefreshInterval = 3f;
     private const float PreviousPositionWindow = 0.22f;
 
@@ -24,20 +24,31 @@ internal sealed class AuthoritativeItemRegistry
     private ulong nextId;
 
     internal bool HasCapacity => items.Count < Limit && nextId != ulong.MaxValue;
+    internal int Count => items.Count;
     internal ulong Sequence { get; private set; }
 
-    internal bool TryRegister(string definition, ItemLocation location, float condition, out ItemState state)
+    internal bool TryRegister(string definition, ItemLocation location, float condition, out ItemState state) =>
+        TryRegister(definition, ItemPlacement.World, default, 0, ItemWire.NoSlot, location, condition,
+            Array.Empty<byte>(), 0, out state);
+
+    internal bool TryRegister(string definition, ItemPlacement placement, ParticipantId owner, ulong parent, byte slot,
+        ItemLocation location, float condition, byte[] payload, ulong clientKey, out ItemState state)
     {
         state = default;
-        if (!HasCapacity || !ItemWire.IsDefinition(definition))
+        if (!HasCapacity || !ItemWire.IsDefinition(definition) || !ItemWire.IsPayload(payload) ||
+            !IsPlacementValid(placement, owner, parent, slot))
         {
             return false;
         }
 
-        state = new ItemState { Id = ++nextId, Revision = 1, Definition = definition, Slot = ItemWire.NoSlot,
-            Condition = condition, Location = location };
-        items.Add(state.Id, new Record { State = state });
+        state = new ItemState
+        {
+            Id = ++nextId, Revision = 1, Definition = definition, Owner = owner, Parent = parent, Slot = slot,
+            ClientKey = clientKey, Placement = placement, Condition = condition, Location = location, Payload = payload
+        };
         Sequence++;
+        state.Sequence = Sequence;
+        items.Add(state.Id, new Record { State = state });
         return true;
     }
 
@@ -60,6 +71,27 @@ internal sealed class AuthoritativeItemRegistry
         return snapshot;
     }
 
+    internal ulong RootId(ulong id)
+    {
+        ulong root = id;
+        for (int depth = 0; depth < 32 && items.TryGetValue(root, out Record? record); depth++)
+        {
+            if (record.State.Parent == 0) return root;
+            root = record.State.Parent;
+        }
+        return root;
+    }
+    internal bool OwnedBy(ulong id, ParticipantId player)
+    {
+        for (int depth = 0; depth < 32 && items.TryGetValue(id, out Record? record); depth++)
+        {
+            ItemState state = record.State;
+            if (state.Owner == player) return true;
+            if (state.Parent == 0) return false;
+            id = state.Parent;
+        }
+        return false;
+    }
     internal bool Occupied(ParticipantId player, byte slot)
     {
         foreach (Record record in items.Values)
@@ -74,22 +106,79 @@ internal sealed class AuthoritativeItemRegistry
 
     internal ItemLocation? PreviousWorldPosition(ulong id, float now)
     {
-        Record record = items[id];
+        if (!items.TryGetValue(id, out Record? record))
+        {
+            return null;
+        }
         return record.PreviousAt > 0 && now - record.PreviousAt <= PreviousPositionWindow ? record.Previous : null;
     }
 
-    internal ItemState Commit(ulong id, ParticipantId owner, byte slot, ItemLocation location, float condition)
+    internal ItemState Commit(ulong id, ParticipantId owner, ItemLocation location, float condition, byte[] payload)
     {
         Record record = items[id];
         record.State.Owner = owner;
-        record.State.Slot = slot;
+        record.State.Parent = 0;
+        record.State.Slot = ItemWire.NoSlot;
+        record.State.Placement = owner.IsNone ? ItemPlacement.World : ItemPlacement.Inventory;
         record.State.Location = location;
         record.State.Condition = condition;
+        record.State.Payload = payload;
         if (owner.IsNone)
         {
             record.WasMoving = true;
         }
         return Advance(record);
+    }
+
+    internal ItemState Commit(ulong id, ParticipantId owner, byte slot, ItemLocation location, float condition,
+        byte[] payload) => Commit(id, owner, location, condition, payload, slot, ItemPlacement.Inventory);
+
+    internal ItemState Commit(ulong id, ParticipantId owner, ItemLocation location, float condition, byte[] payload,
+        byte slot, ItemPlacement placement)
+    {
+        Record record = items[id];
+        record.State.Owner = owner;
+        record.State.Parent = 0;
+        record.State.Slot = slot;
+        record.State.Placement = placement;
+        record.State.Location = location;
+        record.State.Condition = condition;
+        record.State.Payload = payload;
+        if (owner.IsNone)
+        {
+            record.WasMoving = true;
+        }
+        return Advance(record);
+    }
+
+    internal ItemState CommitPlacement(ulong id, ItemPlacement placement, ParticipantId owner, ulong parent, byte slot,
+        ItemLocation location, float condition, byte[] payload)
+    {
+        Record record = items[id];
+        record.State.Placement = placement;
+        record.State.Owner = owner;
+        record.State.Parent = parent;
+        record.State.Slot = slot;
+        record.State.Location = location;
+        record.State.Condition = condition;
+        record.State.Payload = payload;
+        record.State.ClientKey = 0;
+        record.WasMoving = placement == ItemPlacement.World;
+        return Advance(record);
+    }
+
+    internal bool TryCommitPayload(ulong id, uint revision, float condition, byte[] payload, out ItemState state)
+    {
+        state = default;
+        if (!items.TryGetValue(id, out Record record) || record.State.Removed || record.State.Revision != revision ||
+            !ItemWire.IsPayload(payload))
+        {
+            return false;
+        }
+        record.State.Payload = payload;
+        record.State.Condition = condition;
+        state = Advance(record);
+        return true;
     }
 
     internal bool TryRemove(ulong id, out ItemState state)
@@ -101,7 +190,9 @@ internal sealed class AuthoritativeItemRegistry
         }
 
         record.State.Owner = default;
+        record.State.Parent = 0;
         record.State.Slot = ItemWire.NoSlot;
+        record.State.Placement = ItemPlacement.World;
         record.State.Removed = true;
         state = Advance(record);
         items.Remove(id);
@@ -112,7 +203,8 @@ internal sealed class AuthoritativeItemRegistry
     {
         state = default;
         reliable = false;
-        if (!items.TryGetValue(id, out Record record) || record.State.Removed || !record.State.Owner.IsNone)
+        if (!items.TryGetValue(id, out Record record) || record.State.Removed || !record.State.Owner.IsNone ||
+            record.State.Placement != ItemPlacement.World)
         {
             return false;
         }
@@ -144,9 +236,19 @@ internal sealed class AuthoritativeItemRegistry
         return true;
     }
 
+    private static bool IsPlacementValid(ItemPlacement placement, ParticipantId owner, ulong parent, byte slot) => placement switch
+    {
+        ItemPlacement.World => owner.IsNone && parent == 0 && slot == ItemWire.NoSlot,
+        ItemPlacement.Inventory => !owner.IsNone && parent == 0 && slot != ItemWire.NoSlot,
+        ItemPlacement.Worn => !owner.IsNone && parent == 0 && slot == ItemWire.NoSlot,
+        ItemPlacement.Container => owner.IsNone && parent != 0 && slot == ItemWire.NoSlot,
+        _ => false
+    };
+
     private ItemState Advance(Record record)
     {
         Sequence++;
+        record.State.Sequence = Sequence;
         record.State.Revision++;
         record.State.Sample = 0;
         record.PreviousAt = 0;

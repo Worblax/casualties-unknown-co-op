@@ -108,6 +108,7 @@ internal static class HostItemChecks
         internal int Drops;
         internal bool RejectPickup;
         internal bool RejectDrop;
+        internal byte[] Applied = System.Array.Empty<byte>();
 
         public ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition) =>
             ItemDecision.Accepted;
@@ -125,6 +126,18 @@ internal static class HostItemChecks
             location = request.Location;
             condition = 1;
             return RejectDrop ? ItemDecision.Unavailable : ItemDecision.Accepted;
+        }
+
+        public bool HasRecipe(int recipe) => true;
+
+        public ItemDecision CheckCraftIngredient(ParticipantId player, ulong item) => ItemDecision.Accepted;
+
+        public void RemoveItem(ulong item) { }
+
+        public bool TryApplyState(ulong item, byte[] payload)
+        {
+            Applied = payload;
+            return true;
         }
     }
 }

@@ -2,6 +2,7 @@ TransportChecks.Run();
 ItemChecks.Run();
 HostItemChecks.Run();
 GuestItemChecks.Run();
+CraftChecks.Run();
 RecoveryChecks.Run();
 FluidChecks.Run();
 WorldChunkChecks.Run();

@@ -12,7 +12,7 @@ namespace CasualtiesCoop;
 internal sealed class CoopPlugin : BaseUnityPlugin
 {
     private const string PluginId = "casualtiesunknown.coop";
-    private const string PluginVersion = "0.1.16";
+    private const string PluginVersion = "0.1.17";
     private CoopRuntime? runtime;
     private Harmony? harmony;
     private bool previousRunInBackground;

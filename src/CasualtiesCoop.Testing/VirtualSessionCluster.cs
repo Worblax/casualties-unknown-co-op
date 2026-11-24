@@ -29,6 +29,7 @@ internal sealed class VirtualSessionCluster : IDisposable
         internal TestChunkGrid? Terrain;
         internal readonly SessionPeers Peers;
         internal GuestItemSession? Guest;
+        internal SharedItemReplication? ItemReplication;
         internal uint TerrainHit;
         internal int TerrainSyncRequests;
         internal uint Claws;
@@ -46,6 +47,7 @@ internal sealed class VirtualSessionCluster : IDisposable
     internal readonly SharedItemHostScene Host;
     internal readonly Dictionary<string, Actor> Actors = new(StringComparer.Ordinal);
     internal readonly List<(string Peer, ulong Id, ItemDecision Decision)> Results = new();
+    internal readonly List<(string Peer, int Recipe, ItemDecision Decision)> CraftResults = new();
     internal readonly Body Body;
     internal readonly Actor? ProjectedActor;
     private SharedItemProjection? projection;
@@ -62,6 +64,7 @@ internal sealed class VirtualSessionCluster : IDisposable
     {
         Body = body;
         origin = body.transform.position;
+        bool guestCraft = scenario.Steps.Any(UsesGuestCraft);
         terrainFixture = scenario.Level == "UNITY_GUEST" && scenario.Steps.Any(s => s.Value<string>("op") == "terrain.state");
         standaloneItems = scenario.StandaloneItems;
         Network = new SimulatedNetwork(scenario.Seed, scenario.Profile);
@@ -79,9 +82,21 @@ internal sealed class VirtualSessionCluster : IDisposable
             {
                 continue;
             }
-            var guest = new GuestItemSession(peers, Network.Clock);
+            GuestItemSession guest;
+            if (guestCraft)
+            {
+                if (member.Body is null) throw new FormatException("Guest crafting requires NativeActor guests.");
+                var replication = new SharedItemReplication(peers, PositionOf, Network.Clock);
+                actor.ItemReplication = replication;
+                guest = replication.TestGuest ?? throw new InvalidOperationException("Guest item replication has no session.");
+            }
+            else
+            {
+                guest = new GuestItemSession(peers, Network.Clock);
+            }
             actor.Guest = guest;
             guest.ResultAccepted += (request, decision) => Results.Add((actor.Name, request.ItemId, decision));
+            guest.CraftResultAccepted += (_, recipe, decision) => CraftResults.Add((actor.Name, recipe, decision));
             if (!terrainFixture)
                 actor.Terrain = new TestChunkGrid((int)WorldGeneration.world.width, (int)WorldGeneration.world.height);
             actor.WorldChunks = new WorldChunkReplication(peers, Network.Clock, PositionOf, actor.Terrain);
@@ -95,7 +110,9 @@ internal sealed class VirtualSessionCluster : IDisposable
                 {
                     return true;
                 }
-                return guest.Receive(sender, bytes);
+                return actor.ItemReplication is { } replication
+                    ? RunAs(actor, items => items.Receive(sender, bytes))
+                    : guest.Receive(sender, bytes);
             });
         }
 
@@ -156,6 +173,11 @@ internal sealed class VirtualSessionCluster : IDisposable
         command["actions"] is JArray actions &&
         actions.Cast<JObject>().Any(UsesNativePickup);
 
+    private static bool UsesGuestCraft(JObject command) =>
+        command.Value<string>("op") == "item.craft" && command["peer"] is not null ||
+        command["actions"] is JArray actions &&
+        actions.Cast<JObject>().Any(UsesGuestCraft);
+
     internal IEnumerable<Actor> Guests => Actors.Values.Where(actor => actor.Guest is not null);
     internal bool Ready => Guests.All(actor => actor.Guest!.Synced);
 
@@ -165,7 +187,10 @@ internal sealed class VirtualSessionCluster : IDisposable
         else if (!standaloneItems) Host.Tick();
         foreach (Actor actor in Guests)
         {
-            actor.Guest!.Tick();
+            if (actor.ItemReplication is not null)
+                RunAs(actor, items => { items.Tick(actor.NativeBody!); return true; });
+            else
+                actor.Guest!.Tick();
             if (actor.Peers.IsVerified(actor.Peers.Host)) actor.WorldChunks!.Tick();
         }
         Network.Advance(Math.Min(Time.unscaledDeltaTime, 0.05f));
@@ -175,6 +200,28 @@ internal sealed class VirtualSessionCluster : IDisposable
         if (ProjectedActor is { Guest: { } guest } && projection is not null)
         {
             projection.Tick(guest.Replicas, guest.Synced);
+        }
+    }
+
+    internal bool RunAs(Actor actor, Func<SharedItemReplication, bool> action)
+    {
+        SharedItemReplication items = actor.ItemReplication ??
+            throw new InvalidOperationException("Guest production item replication is unavailable.");
+        Body body = actor.NativeBody ??
+            throw new InvalidOperationException("Guest production item replication requires a native body.");
+        SharedItemReplication? previousItems = SharedItemHooks.TestItems;
+        PlayerCamera? camera = PlayerCamera.main;
+        Body? previousBody = camera ? camera.body : null;
+        SharedItemHooks.BindTestItems(items);
+        if (camera) camera.body = body;
+        try
+        {
+            return action(items);
+        }
+        finally
+        {
+            if (camera) camera.body = previousBody;
+            SharedItemHooks.BindTestItems(previousItems);
         }
     }
 
@@ -313,7 +360,8 @@ internal sealed class VirtualSessionCluster : IDisposable
         }
         foreach (Actor actor in Actors.Values)
         {
-            actor.Guest?.Dispose();
+            if (actor.ItemReplication is { } replication) replication.Dispose();
+            else actor.Guest?.Dispose();
             actor.Peers.Dispose();
         }
     }

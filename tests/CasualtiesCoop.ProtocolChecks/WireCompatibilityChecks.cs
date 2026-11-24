@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using CasualtiesCoop.Gameplay.Fluids;
 using CasualtiesCoop.Gameplay.Items;
 using CasualtiesCoop.Gameplay.Recovery;
@@ -32,55 +33,74 @@ internal static class WireCompatibilityChecks
         SharedItemRequest request = new()
         {
             Operation = Operation, ItemId = ItemId, Revision = Revision, Action = ItemAction.Throw,
-            Slot = 2, Location = new ItemLocation(1, -2, 4, 0.5f, -1)
+            Slot = 2, Location = new ItemLocation(1, -2, 4, 0.5f, -1, 2), Payload = new byte[] { 1, 2, 3 }
         };
-        byte[] frame = Match("ItemRequest", ItemWire.WriteRequest(Session, request),
-            "0A" + SessionBytes + OperationBytes + ItemIdBytes + RevisionBytes + "0302" + LocationBytes);
+        byte[] frame = ItemWire.WriteRequest(Session, request);
         Require(ItemWire.TryReadRequest(frame, Session, out SharedItemRequest decoded) &&
             decoded.Operation == request.Operation && decoded.ItemId == request.ItemId &&
             decoded.Revision == request.Revision && decoded.Action == request.Action &&
-            decoded.Slot == 2 && decoded.Location.Y == -2, "ItemRequest fixture decodes");
+            decoded.Slot == 2 && decoded.Location.Y == -2 && decoded.Payload.Length == 3,
+            "ItemRequest with state payload round trips");
+        Require(frame.Length <= RoomWire.MaxFrameSize, "ItemRequest fits the transport frame");
         Require(!ItemWire.TryReadRequest(frame, Attempt, out _), "ItemRequest rejects another session");
         Require(!ItemWire.TryReadRequest(frame.AsSpan(0, frame.Length - 1), Session, out _), "ItemRequest rejects truncation");
 
         SharedItemState state = new()
         {
             Id = ItemId, Revision = Revision, Sample = 3, Definition = "stick", Owner = Operation,
-            Slot = 2, Condition = 0.75f, Location = new ItemLocation(1, -2, 4, 0.5f, -1, 8)
+            Placement = ItemPlacement.Inventory, Slot = 2, Condition = 0.75f,
+            Location = new ItemLocation(1, -2, 4, 0.5f, -1, 8), Payload = new byte[] { 9, 8, 7 }
         };
-        const string stateTail = "05000000403F" + LocationBytes + "00000041737469636B";
-        frame = Match("ItemState", ItemWire.WriteState(MessageKind.ItemState, Session, state),
-            "0B" + SessionBytes + ItemIdBytes + RevisionBytes + "03000000" + OperationBytes + "02" + stateTail);
+        frame = ItemWire.WriteState(MessageKind.ItemState, Session, state);
         Require(ItemWire.TryReadState(frame, MessageKind.ItemState, Session, out SharedItemState copy) &&
-            copy.Owner == Operation && copy.Sample == 3 && copy.Definition == "stick" && copy.Location.Spin == 8,
-            "ItemState fixture decodes");
+            copy.Owner == Operation && copy.Placement == ItemPlacement.Inventory && copy.Sample == 3 &&
+            copy.Definition == "stick" && copy.Location.Spin == 8 && copy.Payload.SequenceEqual(new byte[] { 9, 8, 7 }),
+            "ItemState carries placement and opaque component state");
         state.Owner = 0;
+        state.Placement = ItemPlacement.World;
         state.Slot = ItemWire.NoSlot;
-        Match("ItemMotion", ItemWire.WriteState(MessageKind.ItemMotion, Session, state),
-            "0D" + SessionBytes + ItemIdBytes + RevisionBytes + "030000000000000000000000FF" + stateTail);
+        frame = ItemWire.WriteState(MessageKind.ItemMotion, Session, state);
+        Require(ItemWire.TryReadState(frame, MessageKind.ItemMotion, Session, out copy) && copy.Payload.Length == 0,
+            "Motion frames stay compact and never repeat component state");
+        state.Placement = (ItemPlacement)9;
+        Require(!ItemWire.TryReadState(ItemWire.WriteState(MessageKind.ItemState, Session, state), MessageKind.ItemState,
+            Session, out _), "Unknown placement is rejected");
 
-        frame = Match("ItemResult", ItemWire.WriteResult(Session, Operation, ItemDecision.Accepted),
-            "0C" + SessionBytes + OperationBytes + "01");
-        Require(ItemWire.TryReadResult(frame, Session, out ulong accepted, out ItemDecision decision) &&
-            accepted == Operation && decision == ItemDecision.Accepted, "ItemResult fixture decodes");
-        byte[] sync = Match("ItemSyncRequest", ItemSnapshotWire.WriteRequest(Session, Operation), "0E" + SessionBytes + OperationBytes);
-        Require(ItemSnapshotWire.TryReadRequest(sync, Session, out ulong requestId) && requestId == Operation &&
-            !ItemSnapshotWire.TryReadRequest(sync.AsSpan(0, 17), Session, out _), "v10 request requires its snapshot ID");
-        byte[] done = Match("ItemSyncDone", ItemSnapshotWire.WriteDone(Session, Operation, ItemId, 256),
-            "0F" + SessionBytes + OperationBytes + ItemIdBytes + "0001");
-        Require(ItemSnapshotWire.TryReadDone(done, Session, out ulong snapshotId, out ulong sequence, out ushort count) &&
-            snapshotId == Operation && sequence == ItemId && count == 256 &&
-            !ItemSnapshotWire.TryReadDone(done.AsSpan(0, 17), Session, out _, out _, out _), "v10 completion carries its boundary");
-        string payload = "0B" + SessionBytes + ItemIdBytes + RevisionBytes + "030000000000000000000000FF" + stateTail;
-        Match("ItemDelta", ItemSnapshotWire.WriteState(MessageKind.ItemDelta, Session, Operation, state),
-            "19" + SessionBytes + OperationBytes + payload);
-        byte[] entry = Match("ItemSnapshotEntry", ItemSnapshotWire.WriteState(MessageKind.ItemSnapshotEntry, Session, Operation, state),
-            "1A" + SessionBytes + OperationBytes + payload);
-        Require(ItemSnapshotWire.TryReadState(entry, MessageKind.ItemSnapshotEntry, Session, out ulong entryId, out _) &&
-            entryId == Operation && !ItemSnapshotWire.TryReadState(entry, MessageKind.ItemDelta, Session, out _, out _),
-            "Snapshot entries and live deltas cannot be confused");
+        var registration = new SharedItemRegistration
+        {
+            Operation = Operation, ClientKey = ItemId, Definition = "stick", Placement = ItemPlacement.Inventory,
+            Slot = 2, Location = new ItemLocation(1, -2, 4), Payload = new byte[] { 4, 5 }
+        };
+        frame = ItemWire.WriteRegistration(Session, registration);
+        Require(ItemWire.TryReadRegistration(frame, Session, out SharedItemRegistration registered) &&
+            registered.ClientKey == ItemId && registered.Payload.Length == 2 && registered.Placement == ItemPlacement.Inventory,
+            "Guest-created item registration round trips");
+        frame = ItemWire.WriteRegistered(Session, Operation, ItemId, Operation + 1, Revision);
+        Require(ItemWire.TryReadRegistered(frame, Session, out ulong operation, out ulong key, out ulong item, out uint revision) &&
+            operation == Operation && key == ItemId && item == Operation + 1 && revision == Revision,
+            "Registration acknowledgment maps the local item key");
+        var report = new SharedItemStateReport { Operation = Operation, ItemId = ItemId, Revision = Revision,
+            Condition = .4f, Payload = new byte[] { 6 } };
+        Require(ItemWire.TryReadReport(ItemWire.WriteReport(Session, report), Session, out SharedItemStateReport read) &&
+            read.Condition == .4f && read.Payload.Length == 1, "Owner state report round trips");
+
+        var craft = new ItemCraftRequest { Operation = Operation, Recipe = 4, ItemIds = new[] { ItemId, ItemId + 1 },
+            Revisions = new[] { Revision, Revision } };
+        Require(ItemCraftWire.TryReadRequest(ItemCraftWire.WriteRequest(Session, craft), Session, out ItemCraftRequest craftRead) &&
+            craftRead.Recipe == 4 && craftRead.ItemIds.Length == 2, "Craft reservation request round trips");
+        byte[] craftResult = ItemCraftWire.WriteResult(Session, Operation, 4, ItemDecision.Accepted);
+        Require(ItemCraftWire.TryReadResult(craftResult, Session, out _, out int recipe, out ItemDecision result) &&
+            recipe == 4 && result == ItemDecision.Accepted, "Craft result round trips");
+        var commit = new ItemCraftCommit { Operation = Operation, Recipe = 4 };
+        commit.Removed.Add(ItemId);
+        commit.Updated.Add(new CraftUpdatedItem { Id = ItemId + 1, Revision = Revision, Condition = .5f,
+            Payload = new byte[] { 2 } });
+        commit.Created.Add(new CraftCreatedItem { ClientKey = ItemId + 2, Definition = "stick",
+            Placement = ItemPlacement.Inventory, Slot = 2, Location = new ItemLocation(1, 2, 3), Payload = new byte[] { 3 } });
+        Require(ItemCraftWire.TryReadCommit(ItemCraftWire.WriteCommit(Session, commit), Session, out ItemCraftCommit commitRead) &&
+            commitRead.Removed.Count == 1 && commitRead.Updated.Count == 1 && commitRead.Created.Count == 1 &&
+            commitRead.Created[0].Definition == "stick", "Atomic craft commit round trips");
     }
-
     private static void FluidFrames()
     {
         Match("FluidPush", FluidWire.WritePush(Session, 0x1234, 0x5678, 2), "11" + SessionBytes + "3412785602");

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "items.chunk-state-return",
+  "level": "UNITY_HOST",
+  "seed": 142,
+  "timeoutMs": 60000,
+  "network": { "latencyMs": 40, "jitterMs": 10 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "peer.add", "id": "alice", "role": "guest", "position": [1, 0] },
+    { "op": "item.spawn", "id": "lamp", "catalogId": "flashlight", "position": [0, 0] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.condition", "item": "lamp", "condition": 0.42 },
+    { "op": "item.wet", "item": "lamp", "wet": true },
+    { "op": "assert.eventually", "timeoutMs": 8000, "condition": { "op": "items.replicaPayloadMatches", "item": "lamp" } },
+    { "op": "item.place", "item": "lamp", "position": [60, 60] },
+    { "op": "wait.frames", "count": 45 },
+    { "op": "assert.eventually", "timeoutMs": 8000, "condition": { "op": "items.replicaPayloadMatches", "item": "lamp" } },
+    { "op": "assert.equal", "query": "items.hostCondition", "item": "lamp", "expected": 42 },
+    { "op": "item.place", "item": "lamp", "position": [0, 0] },
+    { "op": "wait.frames", "count": 45 },
+    { "op": "assert.eventually", "timeoutMs": 8000, "condition": { "op": "items.replicaPayloadMatches", "item": "lamp" } },
+    { "op": "assert.equal", "query": "items.hostWet", "item": "lamp", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

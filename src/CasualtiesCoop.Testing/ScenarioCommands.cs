@@ -96,6 +96,26 @@ internal static class ScenarioCommands
         }, (r, c) => r.Items.PickUp(c)),
         ["item.drop"] = Apply(Both, "peer item", PeerItem, (r, c) => r.Items.Drop(c)),
         ["item.remove"] = Apply(Both, "item", Item, (r, c) => r.Items.Remove(String(c, "item"))),
+        ["item.place"] = Apply(Both, "item position", c => { Item(c); Position(c); }, (r, c) => r.Items.Place(String(c, "item"), c)),
+        ["item.condition"] = Apply(Both, "item condition", c => { Item(c); Scalar(c, "condition", 0, 1); },
+            (r, c) => r.Items.SetCondition(String(c, "item"), Scalar(c, "condition", 0, 1))),
+        ["item.wet"] = Apply(Both, "item wet", c => { Item(c); Flag(c, "wet"); },
+            (r, c) => r.Items.SetWet(String(c, "item"), Flag(c, "wet"))),
+        ["item.gun"] = Apply(Both, "item rounds chamber hasMag safe racked", c =>
+        {
+            Item(c); Integer(c, "rounds", 0, 999); Integer(c, "chamber", 0, 2); Flag(c, "hasMag");
+            Flag(c, "safe"); Flag(c, "racked");
+        }, (r, c) => r.Items.SetGun(String(c, "item"), Integer(c, "rounds", 0, 999), Integer(c, "chamber", 0, 2),
+            Flag(c, "hasMag"), Flag(c, "safe"), Flag(c, "racked"))),
+        ["item.liquid"] = Apply(Both, "item liquid amount clear", c =>
+        {
+            Item(c); String(c, "liquid"); Scalar(c, "amount", 0, 5000); Flag(c, "clear");
+        }, (r, c) => r.Items.SetLiquid(String(c, "item"), String(c, "liquid"), Scalar(c, "amount", 0, 5000), Flag(c, "clear"))),
+        ["item.craft"] = Apply(Both, "recipe peer", c =>
+        {
+            Integer(c, "recipe", 0, 10000);
+            if (c["peer"] is not null) Peer(c);
+        }, (r, c) => r.Items.Craft(Integer(c, "recipe", 0, 10000), c.Value<string>("peer"))),
         ["terrain.hit"] = Apply(Both, "peer target damage", c => { Peer(c); Damage(c); }, (r, c) =>
         {
             var cell = r.Fixtures.Terrain.Cell(String(c, "target"));

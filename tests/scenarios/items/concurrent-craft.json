@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "name": "items.concurrent-craft",
+  "level": "UNITY_ACTORS",
+  "seed": 146,
+  "timeoutMs": 60000,
+  "network": { "latencyMs": 35, "jitterMs": 5, "unreliableLoss": 0.02 },
+  "limits": { "items": 4, "bodies": 4 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "character.spawn", "id": "right", "character": 0, "position": [3, 0] },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "peer.add", "id": "bob", "role": "guest", "mode": "NativeActor", "body": "right" },
+    { "op": "item.spawn", "id": "fernA", "catalogId": "foliage", "position": [-0.6, 0.5] },
+    { "op": "item.spawn", "id": "fernB", "catalogId": "foliage", "position": [0.6, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "assert.equal", "query": "character.nativeCount", "expected": 3 },
+    { "op": "assert.eventually", "timeoutMs": 5000, "condition": {
+      "op": "character.nearItem", "actor": "left", "item": "fernA", "distance": 6
+    } },
+    { "op": "assert.eventually", "timeoutMs": 5000, "condition": {
+      "op": "character.nearItem", "actor": "right", "item": "fernB", "distance": 6
+    } },
+    { "op": "snapshot.capture", "id": "before-race" },
+    { "op": "parallel", "actions": [
+      { "op": "item.craft", "peer": "alice", "recipe": 0 },
+      { "op": "item.craft", "peer": "bob", "recipe": 0 }
+    ] },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": {
+      "op": "items.craftAcceptedCount", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": {
+      "op": "items.craftRejectedCount", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "items.craftPeerCount", "expected": 2 },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": {
+      "op": "items.definitionConverged", "target": "rope", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": {
+      "op": "items.definitionConverged", "target": "foliage", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "rope", "expected": 1 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "foliage", "expected": 0 },
+    { "op": "assert.equal", "query": "items.replicaDefinitionCount", "actor": "alice", "target": "rope", "expected": 1 },
+    { "op": "assert.equal", "query": "items.replicaDefinitionCount", "actor": "bob", "target": "rope", "expected": 1 },
+    { "op": "assert.equal", "query": "items.replicaDefinitionCount", "actor": "alice", "target": "foliage", "expected": 0 },
+    { "op": "assert.equal", "query": "items.replicaDefinitionCount", "actor": "bob", "target": "foliage", "expected": 0 },
+    { "op": "assert.equal", "query": "character.localCameraPreserved", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

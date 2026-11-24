@@ -75,6 +75,7 @@ internal static class ItemChecks
     private static void CapacityAfterChurn()
     {
         using var scenario = new Scenario(First);
+        scenario.Network.SetProfile(new NetworkProfile(QueueLimit: 16384));
         ulong lastId = scenario.Id;
         for (int index = 0; index < 600; index++)
         {
@@ -94,7 +95,7 @@ internal static class ItemChecks
         Check.That(!scenario.Host.TryRegister("rock", default, 1, out _), "The cap still bounds active items.");
         scenario.Host.Remove(scenario.Id);
         Check.That(scenario.Host.TryRegister("stick", default, 1, out _), "Retirement frees an active slot immediately.");
-        scenario.Network.Advance(0);
+        while (scenario.Network.Queued > 0) scenario.Network.Advance(0);
         Check.That(scenario.Guests.Values.All(guest => guest.Replicas.States.Count == AuthoritativeItemRegistry.Limit),
             "Replica capacity reflects active items only.");
     }

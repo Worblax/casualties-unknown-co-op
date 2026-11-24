@@ -219,11 +219,22 @@ internal sealed class TestRuntime : IDisposable
                 message = "The save, settings or scoped PlayerPrefs changed during the test.";
             }
         }
+        if (items is not null)
+        {
+            try
+            {
+                Capture("final");
+            }
+            catch (Exception error)
+            {
+                final = "FAIL";
+                message = "Final snapshot failed: " + error;
+            }
+        }
         status = final;
         bool hold = final != "PASS" && report.HoldOnFailure && report.Visible;
         resultAt = hold && report.HoldSeconds == 0 ? float.PositiveInfinity :
             Time.realtimeSinceStartup + (hold ? report.HoldSeconds : 0.15f);
-        if (items is not null) Capture("final");
         File.WriteAllLines(Path.Combine(report.DirectoryPath, "game.log"), loggedErrors);
         float simulation = items?.Cluster.Network.Clock.Now ?? 0;
         string[] covered = items is null ? Array.Empty<string>() : Scenario.Level == "UNITY_GUEST"

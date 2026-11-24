@@ -17,7 +17,16 @@ internal enum ItemDecision : byte
     Accepted = 1,
     Unavailable,
     OutOfReach,
-    SlotOccupied
+    SlotOccupied,
+    Conflict
+}
+
+internal enum ItemPlacement : byte
+{
+    World = 0,
+    Inventory = 1,
+    Container = 2,
+    Worn = 3
 }
 
 internal readonly struct ItemLocation
@@ -47,10 +56,14 @@ internal struct SharedItemState
     internal uint Sample;
     internal string Definition;
     internal ulong Owner;
+    internal ulong Parent;
     internal byte Slot;
+    internal ulong ClientKey;
+    internal ItemPlacement Placement;
     internal bool Removed;
     internal float Condition;
     internal ItemLocation Location;
+    internal byte[] Payload;
 }
 
 internal struct SharedItemRequest
@@ -61,38 +74,78 @@ internal struct SharedItemRequest
     internal ItemAction Action;
     internal byte Slot;
     internal ItemLocation Location;
+    internal byte[] Payload;
+}
+
+internal struct SharedItemRegistration
+{
+    internal ulong Operation;
+    internal ulong ClientKey;
+    internal string Definition;
+    internal ItemPlacement Placement;
+    internal ulong Parent;
+    internal byte Slot;
+    internal ItemLocation Location;
+    internal byte[] Payload;
+}
+
+internal struct SharedItemStateReport
+{
+    internal ulong Operation;
+    internal ulong ItemId;
+    internal uint Revision;
+    internal float Condition;
+    internal byte[] Payload;
 }
 
 internal static class ItemWire
 {
-    private const int StateHeaderSize = 72;
-    private const int MaxDefinitionLength = 64;
-    private const int RequestSize = 59;
-    private const int ResultSize = 26;
+    internal const int MaxDefinitionLength = 64;
+    internal const int MaxPayloadLength = 12288;
     internal const byte NoSlot = byte.MaxValue;
+
+    private const int StateHeaderSize = 83;
+    private const int RequestHeaderSize = 65;
+    private const int RegistrationHeaderSize = 70;
+    private const int RegisteredSize = 45;
+    private const int ReportHeaderSize = 43;
+    private const int ResultSize = 26;
 
     internal static byte[] WriteState(MessageKind frame, Guid session, SharedItemState state)
     {
         byte[] definition = Encoding.ASCII.GetBytes(state.Definition);
-        byte[] message = GameplayWire.NewFrame(frame, session, StateHeaderSize + definition.Length);
+        byte[] payload = frame == MessageKind.ItemMotion || state.Removed ? Array.Empty<byte>() : state.Payload ?? Array.Empty<byte>();
+        byte[] message = GameplayWire.NewFrame(frame, session, StateHeaderSize + definition.Length + payload.Length);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), state.Id);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(25), state.Revision);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(29), state.Sample);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(33), state.Owner);
-        message[41] = state.Slot;
-        message[42] = (byte)definition.Length;
-        message[43] = state.Removed ? (byte)1 : (byte)0;
-        GameplayWire.WriteFloat(message.AsSpan(44), state.Condition);
-        WriteLocation(message.AsSpan(48), state.Location);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(41), state.Parent);
+        message[49] = state.Slot;
+        message[50] = (byte)state.Placement;
+        message[51] = (byte)definition.Length;
+        message[52] = state.Removed ? (byte)1 : (byte)0;
+        GameplayWire.WriteFloat(message.AsSpan(53), state.Condition);
+        WriteLocation(message.AsSpan(57), state.Location);
+        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(81), (ushort)payload.Length);
         definition.CopyTo(message, StateHeaderSize);
+        payload.CopyTo(message, StateHeaderSize + definition.Length);
         return message;
     }
 
     internal static bool TryReadState(ReadOnlySpan<byte> message, MessageKind frame, Guid session, out SharedItemState state)
     {
         state = default;
-        int length = message.Length - StateHeaderSize;
-        if (length is < 1 or > MaxDefinitionLength || !GameplayWire.HasHeader(message, frame, session) || message[42] != length)
+        if (!GameplayWire.HasHeader(message, frame, session) || message.Length < StateHeaderSize)
+        {
+            return false;
+        }
+
+        int definitionLength = message[51];
+        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(81));
+        if (definitionLength is < 1 or > MaxDefinitionLength || payloadLength > MaxPayloadLength ||
+            message.Length != StateHeaderSize + definitionLength + payloadLength ||
+            (frame == MessageKind.ItemMotion && payloadLength != 0))
         {
             return false;
         }
@@ -101,14 +154,17 @@ internal static class ItemWire
         state.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(25));
         state.Sample = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(29));
         state.Owner = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(33));
-        state.Slot = message[41];
-        state.Definition = Encoding.ASCII.GetString(message.Slice(StateHeaderSize));
-        state.Removed = message[43] == 1;
-        state.Condition = GameplayWire.ReadFloat(message.Slice(44));
-        state.Location = ReadLocation(message.Slice(48));
-        return state.Id != 0 && state.Revision != 0 && IsDefinition(state.Definition) &&
-            message[43] <= 1 && ((state.Owner == 0) == (state.Slot == NoSlot)) && (!state.Removed || state.Owner == 0) &&
-            state.Condition is >= 0f and <= 1f && IsLocationValid(state.Location);
+        state.Parent = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(41));
+        state.Slot = message[49];
+        state.Placement = (ItemPlacement)message[50];
+        state.Definition = Encoding.ASCII.GetString(message.Slice(StateHeaderSize, definitionLength));
+        state.Removed = message[52] == 1;
+        state.Condition = GameplayWire.ReadFloat(message.Slice(53));
+        state.Location = ReadLocation(message.Slice(57));
+        state.Payload = message.Slice(StateHeaderSize + definitionLength, payloadLength).ToArray();
+        return state.Id != 0 && state.Revision != 0 && IsDefinition(state.Definition) && message[52] <= 1 &&
+            state.Placement <= ItemPlacement.Worn && IsPlacementValid(state) && state.Condition is >= 0f and <= 1f &&
+            IsLocationValid(state.Location);
     }
 
     internal static bool IsDefinition(string? definition)
@@ -128,27 +184,33 @@ internal static class ItemWire
         return true;
     }
 
+    internal static bool IsPayload(byte[]? payload) => payload is not null && payload.Length <= MaxPayloadLength;
+
     internal static byte[] WriteRequest(Guid session, SharedItemRequest request)
     {
-        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRequest, session, RequestSize);
+        byte[] payload = request.Payload ?? Array.Empty<byte>();
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRequest, session, RequestHeaderSize + payload.Length);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), request.Operation);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), request.ItemId);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(33), request.Revision);
         message[37] = (byte)request.Action;
         message[38] = request.Slot;
-        ItemLocation location = request.Location;
-        GameplayWire.WriteFloat(message.AsSpan(39), location.X);
-        GameplayWire.WriteFloat(message.AsSpan(43), location.Y);
-        GameplayWire.WriteFloat(message.AsSpan(47), location.Angle);
-        GameplayWire.WriteFloat(message.AsSpan(51), location.VelocityX);
-        GameplayWire.WriteFloat(message.AsSpan(55), location.VelocityY);
+        WriteLocation(message.AsSpan(39), request.Location);
+        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(63), (ushort)payload.Length);
+        payload.CopyTo(message, RequestHeaderSize);
         return message;
     }
 
     internal static bool TryReadRequest(ReadOnlySpan<byte> message, Guid session, out SharedItemRequest request)
     {
         request = default;
-        if (message.Length != RequestSize || !GameplayWire.HasHeader(message, MessageKind.ItemRequest, session))
+        if (!GameplayWire.HasHeader(message, MessageKind.ItemRequest, session) || message.Length < RequestHeaderSize)
+        {
+            return false;
+        }
+
+        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(63));
+        if (payloadLength > MaxPayloadLength || message.Length != RequestHeaderSize + payloadLength)
         {
             return false;
         }
@@ -158,10 +220,122 @@ internal static class ItemWire
         request.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(33));
         request.Action = (ItemAction)message[37];
         request.Slot = message[38];
-        request.Location = new ItemLocation(GameplayWire.ReadFloat(message.Slice(39)), GameplayWire.ReadFloat(message.Slice(43)),
-            GameplayWire.ReadFloat(message.Slice(47)), GameplayWire.ReadFloat(message.Slice(51)), GameplayWire.ReadFloat(message.Slice(55)));
+        request.Location = ReadLocation(message.Slice(39));
+        request.Payload = message.Slice(RequestHeaderSize).ToArray();
         return request.Operation != 0 && request.ItemId != 0 && request.Revision != 0 && request.Slot != NoSlot &&
             request.Action is >= ItemAction.PickUp and <= ItemAction.Throw && IsLocationValid(request.Location);
+    }
+
+    internal static byte[] WriteRegistration(Guid session, SharedItemRegistration registration)
+    {
+        byte[] definition = Encoding.ASCII.GetBytes(registration.Definition);
+        byte[] payload = registration.Payload ?? Array.Empty<byte>();
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRegister, session,
+            RegistrationHeaderSize + definition.Length + payload.Length);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), registration.Operation);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), registration.ClientKey);
+        message[33] = (byte)definition.Length;
+        message[34] = (byte)registration.Placement;
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(35), registration.Parent);
+        message[43] = registration.Slot;
+        WriteLocation(message.AsSpan(44), registration.Location);
+        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(68), (ushort)payload.Length);
+        definition.CopyTo(message, RegistrationHeaderSize);
+        payload.CopyTo(message, RegistrationHeaderSize + definition.Length);
+        return message;
+    }
+
+    internal static bool TryReadRegistration(ReadOnlySpan<byte> message, Guid session, out SharedItemRegistration registration)
+    {
+        registration = default;
+        if (!GameplayWire.HasHeader(message, MessageKind.ItemRegister, session) || message.Length < RegistrationHeaderSize)
+        {
+            return false;
+        }
+
+        int definitionLength = message[33];
+        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(68));
+        if (definitionLength is < 1 or > MaxDefinitionLength || payloadLength > MaxPayloadLength ||
+            message.Length != RegistrationHeaderSize + definitionLength + payloadLength)
+        {
+            return false;
+        }
+
+        registration.Operation = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(17));
+        registration.ClientKey = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(25));
+        registration.Definition = Encoding.ASCII.GetString(message.Slice(RegistrationHeaderSize, definitionLength));
+        registration.Placement = (ItemPlacement)message[34];
+        registration.Parent = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(35));
+        registration.Slot = message[43];
+        registration.Location = ReadLocation(message.Slice(44));
+        registration.Payload = message.Slice(RegistrationHeaderSize + definitionLength, payloadLength).ToArray();
+        var state = new SharedItemState
+        {
+            Owner = registration.Placement == ItemPlacement.Inventory || registration.Placement == ItemPlacement.Worn
+                ? ulong.MaxValue : 0,
+            Parent = registration.Parent, Slot = registration.Slot, Placement = registration.Placement
+        };
+        return registration.Operation != 0 && registration.ClientKey != 0 && IsDefinition(registration.Definition) &&
+            registration.Placement is >= ItemPlacement.World and <= ItemPlacement.Worn && IsPlacementValid(state) &&
+            IsLocationValid(registration.Location);
+    }
+
+    internal static byte[] WriteRegistered(Guid session, ulong operation, ulong clientKey, ulong item, uint revision)
+    {
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRegistered, session, RegisteredSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), operation);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), clientKey);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(33), item);
+        BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(41), revision);
+        return message;
+    }
+
+    internal static bool TryReadRegistered(ReadOnlySpan<byte> message, Guid session, out ulong operation,
+        out ulong clientKey, out ulong item, out uint revision)
+    {
+        operation = clientKey = item = revision = 0;
+        if (message.Length != RegisteredSize || !GameplayWire.HasHeader(message, MessageKind.ItemRegistered, session))
+        {
+            return false;
+        }
+        operation = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(17));
+        clientKey = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(25));
+        item = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(33));
+        revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(41));
+        return operation != 0 && clientKey != 0 && item != 0 && revision != 0;
+    }
+
+    internal static byte[] WriteReport(Guid session, SharedItemStateReport report)
+    {
+        byte[] payload = report.Payload ?? Array.Empty<byte>();
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemStateReport, session, ReportHeaderSize + payload.Length);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), report.Operation);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), report.ItemId);
+        BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(33), report.Revision);
+        GameplayWire.WriteFloat(message.AsSpan(37), report.Condition);
+        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(41), (ushort)payload.Length);
+        payload.CopyTo(message, ReportHeaderSize);
+        return message;
+    }
+
+    internal static bool TryReadReport(ReadOnlySpan<byte> message, Guid session, out SharedItemStateReport report)
+    {
+        report = default;
+        if (!GameplayWire.HasHeader(message, MessageKind.ItemStateReport, session) || message.Length < ReportHeaderSize)
+        {
+            return false;
+        }
+        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(41));
+        if (payloadLength > MaxPayloadLength || message.Length != ReportHeaderSize + payloadLength)
+        {
+            return false;
+        }
+        report.Operation = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(17));
+        report.ItemId = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(25));
+        report.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(33));
+        report.Condition = GameplayWire.ReadFloat(message.Slice(37));
+        report.Payload = message.Slice(ReportHeaderSize).ToArray();
+        return report.Operation != 0 && report.ItemId != 0 && report.Revision != 0 && report.Condition is >= 0f and <= 1f;
     }
 
     internal static byte[] WriteResult(Guid session, ulong operation, ItemDecision decision)
@@ -183,7 +357,23 @@ internal static class ItemWire
 
         operation = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(17));
         decision = (ItemDecision)message[25];
-        return operation != 0 && decision is >= ItemDecision.Accepted and <= ItemDecision.SlotOccupied;
+        return operation != 0 && decision is >= ItemDecision.Accepted and <= ItemDecision.Conflict;
+    }
+
+    private static bool IsPlacementValid(SharedItemState state)
+    {
+        if (state.Removed)
+        {
+            return state.Owner == 0 && state.Parent == 0 && state.Slot == NoSlot;
+        }
+        return state.Placement switch
+        {
+            ItemPlacement.World => state.Owner == 0 && state.Parent == 0 && state.Slot == NoSlot,
+            ItemPlacement.Inventory => state.Owner != 0 && state.Parent == 0 && state.Slot != NoSlot,
+            ItemPlacement.Worn => state.Owner != 0 && state.Parent == 0 && state.Slot == NoSlot,
+            ItemPlacement.Container => state.Owner == 0 && state.Parent != 0 && state.Slot == NoSlot,
+            _ => false
+        };
     }
 
     private static bool IsLocationValid(ItemLocation location) =>

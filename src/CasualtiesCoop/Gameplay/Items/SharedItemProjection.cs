@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CasualtiesCoop.Core;
 using CasualtiesCoop.Core.Items;
 using CasualtiesCoop.Core.Session;
@@ -16,7 +17,9 @@ internal sealed class SharedItemProjection : IDisposable
     {
         internal Item? Item;
         internal int UnityId;
+        internal int CreatedFrame;
         internal uint AppliedRevision;
+        internal byte[]? AppliedPayload;
         internal float NextReplicaAttempt;
         internal bool SnapNextMotion;
     }
@@ -27,7 +30,9 @@ internal sealed class SharedItemProjection : IDisposable
     private readonly ParticipantId local;
     private readonly Dictionary<ulong, View> views = new();
     private readonly Dictionary<int, ulong> byObject = new();
+    private static readonly HashSet<int> ReplicaIds = new();
     private readonly List<ulong> released = new();
+    private readonly HashSet<ulong> suppressed = new();
     private bool restoringFreshBody;
 
     internal SharedItemProjection(SharedItemInventory inventory, SharedItemObjects objects, IMonotonicClock clock, ParticipantId local)
@@ -39,6 +44,7 @@ internal sealed class SharedItemProjection : IDisposable
     }
 
     internal bool TryGetId(Item item, out ulong id) => byObject.TryGetValue(item.GetInstanceID(), out id);
+    internal static bool IsReplica(Item item) => item && ReplicaIds.Contains(item.GetInstanceID());
 
     internal Sprite? SpriteFor(ulong id) => views.TryGetValue(id, out View view) && view.Item
         ? view.Item!.GetComponent<SpriteRenderer>()?.sprite : null;
@@ -46,6 +52,10 @@ internal sealed class SharedItemProjection : IDisposable
     internal Item? FindReplica(ulong id) => views.TryGetValue(id, out View view) ? view.Item : null;
 
     internal void BeginRecovery(bool freshBody) => restoringFreshBody = freshBody;
+    internal void Suppress(ulong id, bool value)
+    {
+        if (value) suppressed.Add(id); else suppressed.Remove(id);
+    }
 
     internal bool InventoryReady(ItemReplicaStore replicas)
     {
@@ -65,7 +75,7 @@ internal sealed class SharedItemProjection : IDisposable
         foreach (ItemState state in replicas.States)
         {
             if (state.Owner == local &&
-                (!views.TryGetValue(state.Id, out View view) || NeedsInventoryProjection(state, view)))
+                (!views.TryGetValue(state.Id, out View view) || NeedsProjection(state, view)))
             {
                 return false;
             }
@@ -85,27 +95,63 @@ internal sealed class SharedItemProjection : IDisposable
         }
     }
 
+    internal void BindCreated(ulong id, Item item)
+    {
+        if (!item)
+        {
+            return;
+        }
+        if (views.TryGetValue(id, out View existing) && existing.Item && existing.Item != item)
+        {
+            Destroy(existing);
+        }
+        var view = new View { Item = item, UnityId = item.GetInstanceID(), CreatedFrame = Time.frameCount - 1 };
+        views[id] = view;
+        byObject[view.UnityId] = id;
+    }
+
     internal void Tick(ItemReplicaStore replicas, bool synced)
     {
         RemoveRetiredViews(replicas);
         float now = clock.Now;
-        foreach (ItemState state in replicas.States)
+        IReadOnlyList<ItemState> ordered = OrderRelevant(replicas);
+        foreach (ItemState state in ordered)
         {
             if (!views.TryGetValue(state.Id, out View view))
             {
-                if (!state.Owner.IsNone && state.Owner != local)
+                view = new View();
+                views[state.Id] = view;
+            }
+
+            if (!state.Owner.IsNone && state.Owner != local)
+            {
+                Hide(view);
+                view.AppliedRevision = state.Revision;
+                view.AppliedPayload = state.Payload;
+                continue;
+            }
+
+            if (!view.Item && !Create(state, view, now))
+            {
+                continue;
+            }
+            if (!view.Item || Time.frameCount <= view.CreatedFrame)
+            {
+                continue;
+            }
+
+            if (view.AppliedRevision != state.Revision || view.AppliedPayload is null ||
+                !view.AppliedPayload.SequenceEqual(state.Payload) || NeedsProjection(state, view))
+            {
+                if (!Apply(state, view))
                 {
                     continue;
                 }
-                view = new View();
-                views.Add(state.Id, view);
+                view.AppliedRevision = state.Revision;
+                view.AppliedPayload = state.Payload;
             }
 
-            if (view.AppliedRevision != state.Revision || (synced && NeedsInventoryProjection(state, view)))
-            {
-                Apply(state, view, now);
-            }
-            if (state.Owner.IsNone && view.Item)
+            if (state.Placement == ItemPlacement.World && view.Item)
             {
                 Interpolate(view.Item!, state.Location, view.SnapNextMotion);
                 view.SnapNextMotion = false;
@@ -114,12 +160,57 @@ internal sealed class SharedItemProjection : IDisposable
         }
     }
 
+    private IReadOnlyList<ItemState> OrderRelevant(ItemReplicaStore replicas)
+    {
+        var ordered = new List<ItemState>();
+        var depths = new Dictionary<ulong, int>();
+        foreach (ItemState state in replicas.States)
+        {
+            if (IsRelevant(state, replicas, depths, 0))
+            {
+                ordered.Add(state);
+            }
+        }
+        ordered.Sort((left, right) => Depth(left, replicas, depths, 0).CompareTo(Depth(right, replicas, depths, 0)));
+        return ordered;
+    }
+
+    private bool IsRelevant(ItemState state, ItemReplicaStore replicas, Dictionary<ulong, int> depths, int depth)
+    {
+        if (depth > 32 || state.Removed)
+        {
+            return false;
+        }
+        if (state.Owner == local || (state.Owner.IsNone && state.Parent == 0))
+        {
+            return true;
+        }
+        if (!state.Owner.IsNone || state.Parent == 0)
+        {
+            return false;
+        }
+        return replicas.TryGet(state.Parent, out ItemState parent) && IsRelevant(parent, replicas, depths, depth + 1);
+    }
+
+    private static int Depth(ItemState state, ItemReplicaStore replicas, Dictionary<ulong, int> depths, int depth)
+    {
+        if (depths.TryGetValue(state.Id, out int known))
+        {
+            return known;
+        }
+        if (depth > 32 || state.Parent == 0 || !replicas.TryGet(state.Parent, out ItemState parent))
+        {
+            return depths[state.Id] = depth;
+        }
+        return depths[state.Id] = Depth(parent, replicas, depths, depth + 1);
+    }
+
     private void RemoveRetiredViews(ItemReplicaStore replicas)
     {
         foreach (var pair in views)
         {
             View view = pair.Value;
-            if (!replicas.TryGet(pair.Key, out _) && (!view.Item || inventory.TryDrop(view.Item!)))
+            if (!replicas.TryGet(pair.Key, out _) && (!view.Item || Detach(view.Item!)))
             {
                 Destroy(view);
                 released.Add(pair.Key);
@@ -132,53 +223,72 @@ internal sealed class SharedItemProjection : IDisposable
         released.Clear();
     }
 
-    private bool NeedsInventoryProjection(ItemState state, View view)
+    private bool NeedsProjection(ItemState state, View view)
     {
         Body? body = inventory.Body;
-        return state.Owner == local && (view.AppliedRevision != state.Revision ||
-            !view.Item || !body || state.Slot >= body!.slots.Length || body.GetItem(state.Slot) != view.Item);
+        if (!view.Item)
+        {
+            return true;
+        }
+        if (state.Placement == ItemPlacement.Inventory)
+        {
+            return !body || state.Slot >= body!.slots.Length || body.GetItem(state.Slot) != view.Item;
+        }
+        if (state.Placement == ItemPlacement.Worn)
+        {
+            return !body || body!.GetWearableBySlotID(view.Item!.Stats.wearSlotId) != view.Item;
+        }
+        if (state.Placement == ItemPlacement.Container)
+        {
+            return !view.Item!.TryGetParentContainer(out Container container) ||
+                !views.TryGetValue(state.Parent, out View parent) || parent.Item != container.GetComponent<Item>();
+        }
+        return view.Item!.transform.parent;
     }
 
-    private void Apply(ItemState state, View view, float now)
+    private bool Apply(ItemState state, View view)
     {
-        if (!state.Owner.IsNone && state.Owner != local)
+        Item replica = view.Item!;
+        if (!objects.Apply(replica, state.Payload, state.Condition, state.Placement))
         {
-            if (view.Item && !inventory.TryDrop(view.Item!))
-            {
-                return;
-            }
-            if (view.Item)
-            {
-                view.Item!.rb.simulated = false;
-                view.Item.gameObject.SetActive(false);
-            }
+            CoopDiagnostics.Count("Items", "State payload rejected");
+            return false;
         }
-        else
-        {
-            if (!view.Item && !Create(state, view, now))
-            {
-                return;
-            }
 
-            Item replica = view.Item!;
-            replica.condition = state.Condition;
-            if (state.Owner == local)
-            {
-                if (!ApplyInventory(state, replica))
-                {
-                    return;
-                }
-            }
-            else
-            {
-                if (!inventory.TryDrop(replica))
-                {
-                    return;
-                }
+        Detach(replica);
+        switch (state.Placement)
+        {
+            case ItemPlacement.World:
                 objects.PutInWorld(replica, state.Location, authoritative: false);
-            }
+                return true;
+            case ItemPlacement.Inventory:
+                if (ApplyInventory(state, replica))
+                {
+                    return true;
+                }
+                replica.gameObject.SetActive(false);
+                return false;
+            case ItemPlacement.Worn:
+                return inventory.TryWear(replica);
+            case ItemPlacement.Container:
+                if (!views.TryGetValue(state.Parent, out View parent) || !parent.Item || !inventory.TryAttach(parent.Item!, replica))
+                {
+                    replica.gameObject.SetActive(false);
+                    return false;
+                }
+                return true;
+            default:
+                return false;
         }
-        view.AppliedRevision = state.Revision;
+    }
+
+    private bool Detach(Item item)
+    {
+        if (item.TryGetParentContainer(out Container container))
+        {
+            container.UnloadItem(item);
+        }
+        return inventory.TryDrop(item);
     }
 
     private bool Create(ItemState state, View view, float now)
@@ -193,11 +303,7 @@ internal sealed class SharedItemProjection : IDisposable
             if (state.Owner == local)
             {
                 view.NextReplicaAttempt = now + ReplicaRetryInterval;
-                CoopDiagnostics.Count("Items", "Inventory projection unavailable");
-            }
-            else
-            {
-                view.AppliedRevision = state.Revision;
+                CoopDiagnostics.Count("Items", "Replica unavailable");
             }
             return false;
         }
@@ -209,6 +315,8 @@ internal sealed class SharedItemProjection : IDisposable
         view.NextReplicaAttempt = 0;
         view.Item = item;
         view.UnityId = item!.GetInstanceID();
+        ReplicaIds.Add(view.UnityId);
+        view.CreatedFrame = Time.frameCount;
         byObject[view.UnityId] = state.Id;
         return true;
     }
@@ -231,8 +339,7 @@ internal sealed class SharedItemProjection : IDisposable
             occupant!.gameObject.SetActive(false);
             UnityEngine.Object.Destroy(occupant.gameObject);
         }
-        if (body.GetItem(state.Slot) != replica && body.HoldingItem(replica) &&
-            (!SharedItemInventory.CanPlaceInSlot(body, replica, state.Slot, force: true) || !inventory.TryDrop(replica)))
+        if (body.GetItem(state.Slot) != replica && body.HoldingItem(replica) && !inventory.TryDrop(replica))
         {
             return false;
         }
@@ -248,14 +355,31 @@ internal sealed class SharedItemProjection : IDisposable
         return false;
     }
 
+    private void Hide(View view)
+    {
+        if (!view.Item)
+        {
+            return;
+        }
+        Detach(view.Item!);
+        view.Item!.rb.simulated = false;
+        view.Item.gameObject.SetActive(false);
+    }
+
     private void Destroy(View view)
     {
-        byObject.Remove(view.UnityId);
+        if (view.UnityId != 0)
+        {
+            byObject.Remove(view.UnityId);
+            ReplicaIds.Remove(view.UnityId);
+        }
         if (view.Item)
         {
             view.Item!.gameObject.SetActive(false);
             UnityEngine.Object.Destroy(view.Item.gameObject);
         }
+        view.Item = null;
+        view.UnityId = 0;
     }
 
     private static void Interpolate(Item item, ItemLocation location, bool snap)
@@ -278,7 +402,7 @@ internal sealed class SharedItemProjection : IDisposable
         {
             if (view.Item)
             {
-                inventory.TryDrop(view.Item!);
+                Detach(view.Item!);
             }
             Destroy(view);
         }

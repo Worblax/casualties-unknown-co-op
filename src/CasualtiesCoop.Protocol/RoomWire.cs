@@ -35,6 +35,12 @@ internal enum MessageKind : byte
     SessionRejoinCommitted,
     ItemDelta,
     ItemSnapshotEntry,
+    ItemRegister,
+    ItemRegistered,
+    ItemStateReport,
+    ItemCraftRequest,
+    ItemCraftResult,
+    ItemCraftCommit,
     ClawEffect,
     TerrainHit,
     ReservedTerrainState,
@@ -46,8 +52,8 @@ internal enum MessageKind : byte
 
 internal static class RoomWire
 {
-    internal const string LobbyProtocolVersion = "12";
-    internal const int MaxFrameSize = 768;
+    internal const string LobbyProtocolVersion = "13";
+    internal const int MaxFrameSize = 16384;
     private const int HandshakeSize = 41;
     private const int PlanHeaderSize = 36;
     private const int PlayerSize = 9;

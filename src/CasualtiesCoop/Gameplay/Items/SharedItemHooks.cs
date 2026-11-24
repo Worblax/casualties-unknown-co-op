@@ -13,6 +13,7 @@ internal static class SharedItemHooks
     private static readonly Color PendingTint = new(1f, 1f, 1f, 0.5f);
     private static SharedItemReplication? testItems;
     private static SharedItemReplication? Items => CoopRuntime.IsTestMode ? testItems : CoopRuntime.ActiveWorld?.Items;
+    internal static SharedItemReplication? TestItems => testItems;
 
     internal static void BindTestItems(SharedItemReplication? items)
     {
@@ -40,16 +41,56 @@ internal static class SharedItemHooks
         Prefix(harmony, typeof(PlayerCamera), "TryPerformInventoryAction", nameof(InventoryAction),
             typeof(RaycastResult), typeof(List<RaycastResult>));
         Prefix(harmony, typeof(PlayerCamera), "TryPerformWorldActions", nameof(WorldActions));
+        Prefix(harmony, typeof(Recipe), nameof(Recipe.TryMake), nameof(Craft));
+        Prefix(harmony, typeof(Recipe), nameof(Recipe.GetItemsForRecipe), nameof(CraftIngredients));
         Prefix(harmony, typeof(RecipeItem), nameof(RecipeItem.GetMatchingItem), nameof(FilterIngredients),
             typeof(List<Item>), typeof(List<Item>));
         Prefix(harmony, typeof(Item), "Update", nameof(WorldItem));
+        harmony.Patch(AccessTools.Method(typeof(Item), "Start"),
+            postfix: new HarmonyMethod(typeof(SharedItemHooks), nameof(Started)));
+        Postfix(harmony, typeof(Body), nameof(Body.UseItem), nameof(MarkArgument), typeof(Item));
+        Postfix(harmony, typeof(Body), nameof(Body.UseItemInHand), nameof(MarkHand));
+        Postfix(harmony, typeof(Body), nameof(Body.WearWearable), nameof(MarkArgument), typeof(Item));
+        Postfix(harmony, typeof(Body), nameof(Body.CombineItems), nameof(MarkPair), typeof(Item), typeof(Item));
+        Postfix(harmony, typeof(Container), nameof(Container.LoadItem), nameof(MarkContainer), typeof(Item));
+        Postfix(harmony, typeof(Container), nameof(Container.UnloadItem), nameof(MarkComponent), typeof(Item), typeof(Body));
+        Postfix(harmony, typeof(GunScript), nameof(GunScript.TryRack), nameof(MarkComponent));
+        Postfix(harmony, typeof(GunScript), nameof(GunScript.ToggleSafety), nameof(MarkComponent));
+        Postfix(harmony, typeof(GunScript), nameof(GunScript.LoadMag), nameof(MarkComponent), typeof(AmmoScript));
+        Postfix(harmony, typeof(GunScript), nameof(GunScript.UnloadMag), nameof(MarkComponent));
+        Postfix(harmony, typeof(AmmoScript), nameof(AmmoScript.LoadRound), nameof(MarkComponent), typeof(AmmoScript));
+        Postfix(harmony, typeof(AmmoScript), nameof(AmmoScript.UnloadRound), nameof(MarkComponent));
+        Postfix(harmony, typeof(BatteryItem), nameof(BatteryItem.LoadBattery), nameof(MarkComponent), typeof(Item));
+        Postfix(harmony, typeof(BatteryItem), nameof(BatteryItem.UnloadBattery), nameof(MarkComponent), typeof(bool));
+        Postfix(harmony, typeof(WaterContainerItem), nameof(WaterContainerItem.AddLiquid), nameof(MarkComponent),
+            typeof(string), typeof(float));
+        Postfix(harmony, typeof(WaterContainerItem), nameof(WaterContainerItem.Drain), nameof(MarkComponent), typeof(List<float>));
+        Postfix(harmony, typeof(WaterContainerItem), nameof(WaterContainerItem.DrainAll), nameof(MarkComponent));
+        Postfix(harmony, typeof(LiquidTransfer), nameof(LiquidTransfer.Finish), nameof(MarkTransfer));
         harmony.Patch(AccessTools.Method(typeof(InvButton), nameof(InvButton.UpdateGraphic)),
             postfix: new HarmonyMethod(typeof(SharedItemHooks), nameof(DrawPending)));
     }
 
+    private static void Postfix(Harmony harmony, Type type, string method, string patch, params Type[] types) =>
+        harmony.Patch(AccessTools.Method(type, method, types), postfix: new HarmonyMethod(typeof(SharedItemHooks), patch));
     private static void Prefix(Harmony harmony, Type type, string method, string patch, params Type[] types) =>
         harmony.Patch(AccessTools.Method(type, method, types), prefix: new HarmonyMethod(typeof(SharedItemHooks), patch));
 
+    private static void Started(Item __instance) => Items?.Observe(__instance);
+    private static void MarkArgument(Item __0) => Items?.MarkDirty(__0);
+    private static void MarkPair(Item it1, Item it2) { Items?.MarkDirty(it1); Items?.MarkDirty(it2); }
+    private static void MarkComponent(Component __instance) => Items?.MarkDirty(__instance.GetComponent<Item>());
+    private static void MarkContainer(Container __instance, Item item)
+    {
+        Items?.MarkDirty(item);
+        Items?.MarkDirty(__instance.GetComponent<Item>());
+    }
+    private static void MarkHand(Body __instance) => Items?.MarkDirty(__instance.GetItem(__instance.handSlot));
+    private static void MarkTransfer(LiquidTransfer __instance)
+    {
+        Items?.MarkDirty(__instance.transferTo ? __instance.transferTo.GetComponent<Item>() : null);
+        Items?.MarkDirty(__instance.transferFrom ? __instance.transferFrom.GetComponent<Item>() : null);
+    }
     private static bool Pickup(Body __instance, Item item, int slot, bool force) =>
         Items?.MayPickup(__instance, item, slot, force) ?? true;
 
@@ -122,17 +163,37 @@ internal static class SharedItemHooks
         return false;
     }
 
+    private static bool Craft(Recipe __instance) => Items?.TryCraft(__instance) ?? true;
+
+    private static bool CraftIngredients(Recipe __instance, ref List<Item> __result)
+    {
+        if (Items?.CraftOverride(__instance, out List<Item>? approved) != true || approved is null) return true;
+        __result = approved;
+        return false;
+    }
     private static void FilterIngredients(ref List<Item> items)
     {
-        if (Items is { } shared && items.Exists(shared.IsTracked))
+        if (Items is { RestrictsCraftIngredients: true } shared)
         {
             List<Item> available = new(items);
-            available.RemoveAll(shared.IsTracked);
-            items = available;
+            available.AddRange(shared.CraftCandidates());
+            var unique = new List<Item>(available.Count);
+            var seen = new HashSet<int>();
+            foreach (Item item in available)
+            {
+                if (!shared.CanSelectCraftIngredient(item) || !seen.Add(item.GetInstanceID())) continue;
+                unique.Add(item);
+            }
+            items = unique;
         }
     }
 
-    private static bool WorldItem(Item __instance) => Items?.HandleWorldUpdate(__instance) ?? true;
+    private static bool WorldItem(Item __instance)
+    {
+        if (SharedItemProjection.IsReplica(__instance) && (Items is null || !Items.IsTracked(__instance)))
+            return false;
+        return Items?.HandleWorldUpdate(__instance) ?? true;
+    }
 
     private static void DrawPending(InvButton __instance)
     {

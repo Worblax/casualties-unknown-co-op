@@ -1,4 +1,5 @@
 using CasualtiesCoop.Networking;
+using CasualtiesCoop.Gameplay.Items;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using static CasualtiesCoop.Testing.ScenarioDocument;
@@ -40,6 +41,19 @@ internal static class ScenarioQueries
             c => { String(c, "item"); String(c, "actor"); Distance(c, 3); }),
         ["character.holdsItem"] = new((r, c) => Bool(r.Items.Holds(r.Fixtures.Characters.Get(String(c, "actor")), String(c, "item"))),
             c => { String(c, "item"); String(c, "actor"); }),
+        ["items.craftAcceptedCount"] = NoTarget((r, _) =>
+            r.Items.Cluster.CraftResults.Count(result => result.Decision == ItemDecision.Accepted)),
+        ["items.craftRejectedCount"] = NoTarget((r, _) =>
+            r.Items.Cluster.CraftResults.Count(result => result.Decision != ItemDecision.Accepted)),
+        ["items.craftPeerCount"] = NoTarget((r, _) =>
+            r.Items.Cluster.CraftResults.Select(result => result.Peer).Distinct().Count()),
+        ["items.authoritativeDefinitionCount"] = ForTarget((r, t) => r.Items.CountAuthoritativeDefinition(t)),
+        ["items.replicaDefinitionCount"] = new((r, c) =>
+            r.Items.CountReplicaDefinition(String(c, "actor"), String(c, "target")),
+            c => { String(c, "target"); String(c, "actor"); }),
+        ["items.definitionConverged"] = ForTarget((r, t) => Bool(r.Items.DefinitionConverged(t))),
+        ["items.nativeDefinitionCount"] = ForTarget((r, t) => r.Items.CountNativeDefinition(t)),
+        ["items.nativeDefinitionInSlots"] = ForTarget((r, t) => r.Items.CountNativeDefinitionInSlots(t)),
         ["world.solidCount"] = ForTarget((r, t) => r.Fixtures.Terrain.SolidCount(t)),
         ["world.firstBlock"] = ForTarget((r, t) => r.Fixtures.Terrain.Block(r.Fixtures.Terrain.Cell(t))),
         ["fluid.cell"] = ForTarget((r, t) => r.Fixtures.Fluids.Cell(t)),

@@ -13,6 +13,9 @@ internal sealed class GuestItemSession : IDisposable
     private readonly ItemSnapshotSync snapshot;
     private readonly Func<ulong, bool> requestSnapshot;
     private ulong lastOperation;
+    private ulong lastRegistrationOperation;
+    private ulong nextClientKey;
+    private ulong lastCraftOperation;
     private float nextResend;
 
     internal GuestItemSession(SessionPeers peers, IMonotonicClock clock)
@@ -31,12 +34,18 @@ internal sealed class GuestItemSession : IDisposable
 
     internal event Action<ItemState?, ItemState>? StateAccepted;
     internal event Action<SharedItemRequest, ItemDecision>? ResultAccepted;
+    internal event Action<ulong, ulong, uint>? RegistrationAccepted;
+    internal event Action<ulong, int, ItemDecision>? CraftResultAccepted;
 
     internal bool IsReserved(int slot) => Pending is { Action: ItemAction.PickUp } pickup && pickup.Slot == slot;
 
-    internal bool TrySubmit(ulong item, ItemAction action, byte slot, ItemLocation at)
+    internal bool TrySubmit(ulong item, ItemAction action, byte slot, ItemLocation at) =>
+        TrySubmit(item, action, slot, at, Array.Empty<byte>());
+
+    internal bool TrySubmit(ulong item, ItemAction action, byte slot, ItemLocation at, byte[] payload)
     {
         if (!CanSubmit || slot == ItemWire.NoSlot || !Replicas.TryGet(item, out ItemState state) || state.Removed ||
+            !ItemWire.IsPayload(payload) ||
             (action == ItemAction.PickUp
                 ? !state.Owner.IsNone
                 : action is not (ItemAction.Drop or ItemAction.Throw) || state.Owner != peers.LocalParticipant || state.Slot != slot))
@@ -46,11 +55,59 @@ internal sealed class GuestItemSession : IDisposable
 
         var request = new SharedItemRequest
         {
-            Operation = ++lastOperation, ItemId = item, Revision = state.Revision, Action = action, Slot = slot, Location = at
+            Operation = ++lastOperation, ItemId = item, Revision = state.Revision, Action = action, Slot = slot,
+            Location = at, Payload = payload
         };
         Pending = request;
         SendRequest(request);
         return true;
+    }
+
+    internal bool TryReportState(ulong item, uint revision, float condition, byte[] payload)
+    {
+        if (!Synced || Pending is not null || revision == 0 || !ItemWire.IsPayload(payload) ||
+            !Replicas.TryGet(item, out ItemState state) ||
+            state.Removed || state.Owner != peers.LocalParticipant)
+        {
+            return false;
+        }
+        var report = new SharedItemStateReport
+        {
+            Operation = ++lastRegistrationOperation, ItemId = item, Revision = revision, Condition = condition,
+            Payload = payload
+        };
+        return peers.Send(peers.Host, ItemWire.WriteReport(peers.SessionId, report));
+    }
+
+    internal ulong ReserveClientKey() => ++nextClientKey;
+
+    internal bool TryRequestCraft(int recipe, ulong[] ids, uint[] revisions, out ulong operation)
+    {
+        operation = 0;
+        if (!CanSubmit || recipe < 0 || ids is null || revisions is null || ids.Length != revisions.Length)
+        {
+            return false;
+        }
+        operation = ++lastCraftOperation;
+        return peers.Send(peers.Host, ItemCraftWire.WriteRequest(peers.SessionId, new ItemCraftRequest
+        {
+            Operation = operation, Recipe = recipe, ItemIds = ids, Revisions = revisions
+        }));
+    }
+
+    internal bool TryCommitCraft(ItemCraftCommit commit) =>
+        Synced && commit.Operation != 0 && peers.Send(peers.Host, ItemCraftWire.WriteCommit(peers.SessionId, commit));
+    internal bool TryRegister(SharedItemRegistration registration, out ulong clientKey)
+    {
+        clientKey = 0;
+        if (!Synced || registration.ClientKey != 0 || !ItemWire.IsDefinition(registration.Definition) ||
+            !ItemWire.IsPayload(registration.Payload) || nextClientKey == ulong.MaxValue)
+        {
+            return false;
+        }
+        registration.Operation = ++lastRegistrationOperation;
+        registration.ClientKey = clientKey = ++nextClientKey;
+        return peers.Send(peers.Host, ItemWire.WriteRegistration(peers.SessionId, registration));
     }
 
     internal void Tick()
@@ -116,6 +173,20 @@ internal sealed class GuestItemSession : IDisposable
                 {
                     Pending = null;
                     ResultAccepted?.Invoke(pending, decision);
+                }
+                return true;
+            case MessageKind.ItemCraftResult:
+                if (ItemCraftWire.TryReadResult(frame, peers.SessionId, out ulong craft, out int recipe,
+                    out ItemDecision craftDecision))
+                {
+                    CraftResultAccepted?.Invoke(craft, recipe, craftDecision);
+                }
+                return true;
+            case MessageKind.ItemRegistered:
+                if (ItemWire.TryReadRegistered(frame, peers.SessionId, out _, out ulong clientKey, out ulong item,
+                    out uint revision))
+                {
+                    RegistrationAccepted?.Invoke(clientKey, item, revision);
                 }
                 return true;
             case MessageKind.ItemSyncDone:
