@@ -13,6 +13,7 @@ internal sealed partial class WorldSession
     private readonly HostRecovery hostRecovery = new();
     private float nextRecoveryNotice;
     private bool positionRestored;
+    private bool recoveryFailureShown;
 
     internal bool WaitingForRecovery => guestRecovery.Waiting;
     internal RoomLaunchPlan Plan => plan;
@@ -22,6 +23,7 @@ internal sealed partial class WorldSession
         if (!connected)
         {
             Terrain.ResetPeer(peer);
+            WorldChunks.Forget(peer);
             Items.ResetPeer(peer);
         }
         if (peers.IsHost)
@@ -36,6 +38,7 @@ internal sealed partial class WorldSession
             guestRecovery.Begin(Guid.NewGuid());
             positionRestored = false;
             nextRecoveryNotice = 0;
+            recoveryFailureShown = false;
             Items.SuspendForRecovery();
             Fluids.BeginRecovery(0);
         }
@@ -80,6 +83,7 @@ internal sealed partial class WorldSession
         else if (frame == MessageKind.SessionRejoinCommitted &&
             guestRecovery.TryCommit(SessionRejoinWire.ReadReference(bytes, frame, plan.Id)))
         {
+            WorldChunks.CompleteRecovery();
             log.LogInfo("Sandbox rejoin complete.");
             if (PlayerCamera.main)
             {
@@ -91,7 +95,7 @@ internal sealed partial class WorldSession
 
     private void OfferRecovery(ulong peer, Guid attempt)
     {
-        byte[]? message = hostRecovery.Offer(peer, attempt, () => CaptureRecovery(peer, attempt), out bool created);
+        byte[]? message = hostRecovery.Offer(peer, attempt, () => CaptureRecovery(peer, attempt), out bool created, clock.Now);
         if (message is null)
         {
             return;
@@ -99,7 +103,7 @@ internal sealed partial class WorldSession
 
         if (created)
         {
-            Fluids.ResendNearby(peer);
+            WorldChunks.Forget(peer);
             log.LogInfo("Preparing the reserved sandbox seat for a returning guest.");
         }
         peers.Send(peer, message);
@@ -109,10 +113,10 @@ internal sealed partial class WorldSession
     {
         remotes.TryGetValue(peer, out RemotePlayer? remote);
         CharacterPose previous = remote?.Pose ?? default;
-        bool hasPosition = previous.Player != 0 && IsWorldPosition(new Vector2(previous.X, previous.Y));
+        Vector2 at = new(previous.X, previous.Y);
+        if (previous.Player == 0 || !IsWorldPosition(at)) at = initialSpawn;
         return new SessionRejoinState(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
-            lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer),
-            previous.X, previous.Y, hasPosition);
+            lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer), at.x, at.y, IsWorldPosition(at));
     }
 
     internal void RestoreFrom(SessionRejoinState state)
@@ -124,6 +128,7 @@ internal sealed partial class WorldSession
         lights.AdvanceLocalSequence(state.LightSequence);
         Items.BeginRecovery(state.ItemOperation, freshBody: !SceneReady);
         Fluids.BeginRecovery(state.DrinkOperation);
+        WorldChunks.Resume(state.Attempt);
     }
 
     private static void AdvanceSequence(ref uint local, uint confirmed)
@@ -145,6 +150,27 @@ internal sealed partial class WorldSession
         if (body.rb.simulated)
         {
             body.rb.velocity = Vector2.zero;
+        }
+
+        if (guestRecovery.TimedOut)
+        {
+            if (guestRecovery.TryRetry(Guid.NewGuid()))
+            {
+                Items.SuspendForRecovery();
+                WorldChunks.Suspend();
+                positionRestored = false;
+                nextRecoveryNotice = 0;
+            }
+            else
+            {
+                if (!recoveryFailureShown)
+                {
+                    recoveryFailureShown = true;
+                    log.LogWarning("Co-op recovery timed out after three attempts.");
+                    PlayerCamera.main.DoAlert("Co-op recovery timed out. Return to the menu and rejoin the room.");
+                }
+                return;
+            }
         }
 
         float now = clock.Now;
@@ -172,7 +198,7 @@ internal sealed partial class WorldSession
         }
         positionRestored = true;
 
-        guestRecovery.Tick(Items.RecoveryComplete() && (!state.HasPosition || Fluids.HasSnapshotNear(at)), SendRecovery);
+        guestRecovery.Tick(Items.RecoveryComplete() && WorldChunks.HasNear(state.HasPosition ? at : (Vector2)body.transform.position), SendRecovery);
     }
 
     private bool SendRecovery(MessageKind frame, Guid attempt) =>

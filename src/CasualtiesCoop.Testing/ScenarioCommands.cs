@@ -102,25 +102,39 @@ internal static class ScenarioCommands
             r.Items.Cluster.HitTerrain(String(c, "peer"), cell, r.Fixtures.Terrain.Block(cell), Integer(c, "damage", 1, 1000));
             r.Fixtures.CoveredPaths.Add("TerrainDamageReplication.Receive/WorldGeneration.DamageBlock");
         }),
-        ["control.terrainHistoryProbe"] = new(Step, "position", c => Position(c), (r, c) =>
+        ["terrain.breakArea"] = new(Step, "position", c => Position(c), (r, c) =>
         {
-            if (r.Scenario.Name != "control.terrain-history-limit") throw new FormatException("History load probe is a dedicated control.");
+            if (r.Scenario.Name != "world.terrain-history-limit") throw new FormatException("History load probe is a dedicated control.");
             return r.Fixtures.Terrain.BreakHistoryProbe(c, r.Items.Cluster);
         }),
         ["terrain.breakNative"] = Apply(Both, "target damage", Damage, (r, c) =>
         {
-            r.Fixtures.Terrain.DamageNative(String(c, "target"), Integer(c, "damage", 1, 1000));
+            r.Items.Cluster.ApplyHostTerrainHit(r.Fixtures.Terrain.Cell(String(c, "target")), Integer(c, "damage", 1, 1000));
             r.Fixtures.CoveredPaths.Add("WorldGeneration.DamageBlock");
         }),
-        ["terrain.state"] = Apply(Both, "target damage material", c =>
+        ["terrain.state"] = Apply(Both, "target damage material liquid", c =>
         {
             Target(c); Integer(c, "damage", 0, 99); Integer(c, "material", 0, ushort.MaxValue);
+            OptionalInt(c, "liquid", 0, 7, 0);
         }, (r, c) => r.PublishTerrainFixture(c)),
         ["effect.claw"] = Apply(Both, "peer", Peer, (r, c) =>
         {
             r.Items.Cluster.SendClaw(String(c, "peer"));
             r.Fixtures.CoveredPaths.Add("ClawEffects.Receive/ClawAnim");
         }),
+        ["peer.move"] = Apply(Both, "peer position", c => { Peer(c); Position(c); },
+            (r, c) =>
+            {
+                var at = Position(c);
+                r.Items.Cluster.MovePeer(String(c, "peer"), new Vector2(at.X, at.Y));
+            }),
+        ["fluid.setNative"] = Apply(Both, "target type", c => { Target(c); Integer(c, "type", 0, 7); }, (r, c) =>
+        {
+            var at = r.Fixtures.Terrain.Cell(String(c, "target"));
+            FluidManager.main.SetLiquid(at.x, at.y, r.Fixtures.Catalog.Liquid(Integer(c, "type", 0, 7)));
+        }),
+        ["terrain.setNative"] = Apply(Both, "target material", c => { Target(c); Integer(c, "material", 0, ushort.MaxValue); },
+            (r, c) => r.Fixtures.Terrain.SetNative(String(c, "target"), Integer(c, "material", 0, ushort.MaxValue))),
         ["peer.disconnect"] = Apply(Step, "peer", Peer, (r, c) => r.Items.Connect(c, false)),
         ["peer.reconnect"] = Apply(Step, "peer", Peer, (r, c) => r.Items.Connect(c, true)),
         ["network.profile"] = Apply(Step, "profile", c => ReadProfile(Object(c, "profile")), (r, c) =>

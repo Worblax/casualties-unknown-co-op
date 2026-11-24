@@ -91,7 +91,11 @@ internal sealed class ItemTestAdapter : IDisposable
         }
     }
 
-    internal void Tick() => Cluster.Tick();
+    internal void Tick()
+    {
+        Cluster.Tick();
+        if (standalone) FluidItemProbe.Tick();
+    }
     internal bool MovedWithFlow(string alias) => FluidItemProbe.Moved(ItemFor(alias));
     internal IEnumerable<KeyValuePair<string, Item>> All => items;
 
@@ -206,7 +210,7 @@ internal sealed class ItemTestAdapter : IDisposable
         Cluster.Host.Session.TryGet(id, out var host);
         return new
         {
-            alias = pair.Key, id, host = Describe(host),
+            alias = pair.Key, id, host = Describe(host), flow = standalone ? FluidItemProbe.Describe(item) : null,
             world = new { active = item && item.gameObject.activeSelf, parent = item && item.transform.parent,
                 x = item ? item.transform.position.x : 0, y = item ? item.transform.position.y : 0 },
             guests = Cluster.Guests.Select(actor =>

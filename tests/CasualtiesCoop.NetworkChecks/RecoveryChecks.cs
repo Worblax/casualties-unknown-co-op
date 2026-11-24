@@ -23,6 +23,7 @@ internal static class RecoveryChecks
         DisconnectDuringPickup(hostDecided: false);
         DisconnectDuringPickup(hostDecided: true);
         SessionReceiverLifetime();
+        RecoveryDeadlines();
     }
 
     private static void DisconnectDuringPickup(bool hostDecided)
@@ -78,6 +79,21 @@ internal static class RecoveryChecks
         Check.That(!scenario.GuestRecovery.Waiting && scenario.ReceivedResults == 0 &&
             scenario.World.Pickups == (hostDecided ? 1 : 0),
             "Disconnect and rejoin settle one authoritative result without replaying the operation.");
+    }
+
+    private static void RecoveryDeadlines()
+    {
+        var clock = new ManualClock();
+        var flow = new GuestRecovery(clock);
+        flow.Begin(Attempt);
+        clock.AdvanceTo(clock.Now + GuestRecovery.AttemptTimeout + 1);
+        Check.That(flow.TimedOut && !flow.ExpectsState(Attempt), "An expired attempt rejects its old offer.");
+        Check.That(flow.TryRetry(OldAttempt), "Recovery can start another identified attempt.");
+        clock.AdvanceTo(clock.Now + GuestRecovery.AttemptTimeout + 1);
+        Check.That(flow.TryRetry(PreviousSession), "Recovery permits a second bounded restart.");
+        clock.AdvanceTo(clock.Now + GuestRecovery.AttemptTimeout + 1);
+        Check.That(!flow.TryRetry(Attempt) && flow.Waiting && flow.TimedOut,
+            "After three attempts the guest remains blocked and stops sending.");
     }
 
     private static void SessionReceiverLifetime()

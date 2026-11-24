@@ -32,9 +32,9 @@ internal static class SandboxGameplayWire
             effect.Angle is >= 0 and <= 360;
     }
 
-    internal static byte[] WriteTerrain(Guid session, MessageKind kind, int x, int y, ushort block, uint sequence, float damage, byte flags = 0)
+    internal static byte[] WriteTerrainHit(Guid session, int x, int y, ushort block, uint sequence, float damage, byte flags = 0)
     {
-        byte[] frame = NewFrame(kind, session, 32);
+        byte[] frame = NewFrame(MessageKind.TerrainHit, session, 32);
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(17), checked((ushort)x));
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(19), checked((ushort)y));
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(21), block);
@@ -44,19 +44,18 @@ internal static class SandboxGameplayWire
         return frame;
     }
 
-    internal static bool TryReadTerrain(ReadOnlySpan<byte> frame, Guid session, MessageKind kind,
+    internal static bool TryReadTerrainHit(ReadOnlySpan<byte> frame, Guid session,
         out (int X, int Y, ushort Block, uint Sequence, float Damage, byte Flags) tile)
     {
         tile = default;
-        if (frame.Length != 32 || !HasHeader(frame, kind, session) || frame[31] > (kind == MessageKind.TerrainHit ? 3 : 0))
+        if (frame.Length != 32 || !HasHeader(frame, MessageKind.TerrainHit, session) || frame[31] > 3)
         {
             return false;
         }
         tile = (BinaryPrimitives.ReadUInt16LittleEndian(frame.Slice(17)), BinaryPrimitives.ReadUInt16LittleEndian(frame.Slice(19)),
             BinaryPrimitives.ReadUInt16LittleEndian(frame.Slice(21)), BinaryPrimitives.ReadUInt32LittleEndian(frame.Slice(23)),
             ReadFloat(frame.Slice(27)), frame[31]);
-        return tile.Sequence != 0 && tile.Damage is >= 0 and <= 100000f &&
-            (kind != MessageKind.TerrainHit || (tile.Damage > 0 && tile.Block != 0));
+        return tile.Sequence != 0 && tile.Damage is > 0 and <= 100000f && tile.Block != 0;
     }
 
     internal static byte[] WriteAlcohol(Guid session, uint operation, float x, float y, byte slot)

@@ -83,20 +83,6 @@ internal static class WireCompatibilityChecks
 
     private static void FluidFrames()
     {
-        byte[] cells = new byte[FluidWire.PackedSize];
-        FluidWire.Pack(cells, 0, 1);
-        FluidWire.Pack(cells, 2, 7);
-        FluidWire.Pack(cells, 3, 5);
-        FluidWire.Pack(cells, 1023, 4);
-
-        byte[] frame = Match("FluidChunk", FluidWire.WriteChunk(Session, 0x1234, 0x5678, Revision, cells),
-            "10" + SessionBytes + "34127856" + RevisionBytes + "C10B" + new string('0', 762) + "80");
-        Require(FluidWire.TryReadChunk(frame, Session, out int x, out int y, out uint revision, out int offset) &&
-            x == 0x1234 && y == 0x5678 && revision == Revision && offset == 25 &&
-            FluidWire.Unpack(frame.AsSpan(offset), 2) == 7 && FluidWire.Unpack(frame.AsSpan(offset), 1023) == 4,
-            "FluidChunk fixture decodes");
-        Require(!FluidWire.TryReadChunk(frame, Attempt, out _, out _, out _, out _), "FluidChunk rejects another session");
-
         Match("FluidPush", FluidWire.WritePush(Session, 0x1234, 0x5678, 2), "11" + SessionBytes + "3412785602");
         Match("FluidDrinkRequest", FluidWire.WriteDrink(MessageKind.FluidDrinkRequest, Session, Operation, 0x1234, 0x5678, 7),
             "12" + SessionBytes + OperationBytes + "3412785607");

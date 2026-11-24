@@ -24,7 +24,7 @@ internal enum MessageKind : byte
     ItemMotion,
     ItemSyncRequest,
     ItemSyncDone,
-    FluidChunk,
+    ReservedFluidChunk,
     FluidPush,
     FluidDrinkRequest,
     FluidDrinkResult,
@@ -37,14 +37,16 @@ internal enum MessageKind : byte
     ItemSnapshotEntry,
     ClawEffect,
     TerrainHit,
-    TerrainState,
-    TerrainSync,
-    SandboxAlcohol
+    ReservedTerrainState,
+    ReservedTerrainSync,
+    SandboxAlcohol,
+    WorldChunkControl,
+    WorldChunkSnapshot
 }
 
 internal static class RoomWire
 {
-    internal const string LobbyProtocolVersion = "11";
+    internal const string LobbyProtocolVersion = "12";
     internal const int MaxFrameSize = 768;
     private const int HandshakeSize = 41;
     private const int PlanHeaderSize = 36;

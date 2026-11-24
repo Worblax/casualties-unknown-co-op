@@ -44,10 +44,7 @@ internal sealed class TerrainFixtures
     internal float Damage(Vector2Int cell) => World.GetBlockDamage(cell)?.damage ?? 0;
     internal int SolidCount(string alias) => layouts[alias].Count(cell => Block(cell) != 0);
 
-    internal void DamageNative(string alias, float damage)
-    {
-        World.DamageBlock(Cell(alias), damage, false, false, true);
-    }
+    internal void SetNative(string alias, int material) => World.SetBlock(Cell(alias), catalog.Material(material));
 
     internal bool BreakHistoryProbe(JObject command, VirtualSessionCluster cluster)
     {

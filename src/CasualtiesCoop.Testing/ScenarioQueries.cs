@@ -1,3 +1,4 @@
+using CasualtiesCoop.Networking;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using static CasualtiesCoop.Testing.ScenarioDocument;
@@ -50,13 +51,30 @@ internal static class ScenarioQueries
             return Bool(r.Fixtures.Mobs.Targets(Alias(c), r.Fixtures.Characters.Get(c.Value<string>("actor") ?? "local")));
         }, c => { Alias(c); if (c["actor"] is not null) String(c, "actor"); }),
         ["terrain.syncRequests"] = ForTarget((r, t) => r.Items.Cluster.Actors[t].TerrainSyncRequests),
+        ["terrain.guestMatch"] = new((r, c) => Bool(r.Items.Cluster.TerrainMatches(r.Fixtures.Terrain.Cell(String(c, "target")), String(c, "actor"))),
+            c => { String(c, "target"); String(c, "actor"); }),
+        ["terrain.cellLiquid"] = ForTarget((r, t) =>
+        {
+            var cell = r.Fixtures.Terrain.Cell(t);
+            return FluidManager.main.GetLiquid(cell.x, cell.y);
+        }),
+        ["terrain.gateBeforeWater"] = new((r, c) =>
+        {
+            var gate = r.Fixtures.Terrain.Cell(String(c, "target"));
+            var drain = r.Fixtures.Terrain.Cell(String(c, "item"));
+            return Bool(r.Items.Cluster.GateBeforeWater(gate, drain));
+        }, c => { String(c, "target"); String(c, "item"); }),
+        ["terrain.sameChunk"] = new((r, c) =>
+        {
+            var a = r.Fixtures.Terrain.Cell(String(c, "target"));
+            var b = r.Fixtures.Terrain.Cell(String(c, "item"));
+            return Bool(WorldChunkKey.At(a.x, a.y).Equals(WorldChunkKey.At(b.x, b.y)));
+        }, c => { String(c, "target"); String(c, "item"); }),
         ["terrain.hostDamage"] = ForTarget((r, t) => Mathf.RoundToInt(r.Fixtures.Terrain.Damage(r.Fixtures.Terrain.Cell(t)))),
         ["terrain.guestsMatch"] = ForTarget((r, t) =>
         {
             var cell = r.Fixtures.Terrain.Cell(t);
-            var cluster = r.Items.Cluster;
-            return Bool(cluster.Guests.Any() && cluster.Guests.All(actor => actor.Terrain.TryGetValue(cell, out var observed) &&
-                observed.Block == r.Fixtures.Terrain.Block(cell) && Mathf.Abs(observed.Damage - r.Fixtures.Terrain.Damage(cell)) < 0.1f));
+            return Bool(r.Items.Cluster.TerrainMatches(cell));
         }),
         ["effect.clawVisible"] = NoTarget((_, _) => Bool(GameObject.Find("ClawAnim(Clone)") is { } fx && fx && fx.GetComponentInChildren<SpriteRenderer>())),
         ["debug.cameraFollows"] = ForTarget((r, t) => Bool(r.CameraFollows(t))),

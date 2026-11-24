@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CasualtiesCoop.Networking;
 using UnityEngine;
 
 namespace CasualtiesCoop.Testing;
@@ -16,6 +17,7 @@ internal sealed class TestObservation
     private float previousMaxDelta;
     private bool steppingLimit;
     private string? cameraTarget;
+    private int observedPeer = -1;
     private int cycle;
     private int initialTick;
     private int initialPhysics;
@@ -138,6 +140,7 @@ internal sealed class TestObservation
             cameraTarget = next < aliases.Length ? aliases[next] : null;
         }
 
+        DrawChunks(items.Cluster);
         foreach (var pair in fixtures.Characters.All)
         {
             if (!pair.Value) continue;
@@ -154,6 +157,38 @@ internal sealed class TestObservation
             else if (items.Cluster.Actors.Values.FirstOrDefault(actor => actor.Participant == state.Owner)?.NativeBody is { } owner && owner)
                 Label(owner.transform.position + Vector3.up * 2.15f, label);
         }
+    }
+
+    private void DrawChunks(VirtualSessionCluster cluster)
+    {
+        var guests = cluster.Guests.ToArray();
+        if (guests.Length == 0) return;
+        string alias = observedPeer >= 0 && observedPeer < guests.Length ? guests[observedPeer].Name : "";
+        if (GUI.Button(new Rect(12, 138, 180, 22), alias.Length == 0 ? "Show chunks" : $"Chunks: {alias}"))
+            observedPeer = observedPeer + 1 < guests.Length ? observedPeer + 1 : -1;
+        if (alias.Length == 0 || Event.current.type != EventType.Repaint || !Camera.main || !WorldGeneration.world ||
+            cluster.Interest(alias) is not { } interest) return;
+        var camera = Camera.main;
+        var world = WorldGeneration.world;
+        Color before = GUI.color;
+        foreach (WorldChunkKey key in interest.Ordered)
+        {
+            Vector2 at = world.BlockToWorldPos(new Vector2Int(key.StartX, key.StartY)) - Vector2.one * 0.5f;
+            Vector2 size = new(Math.Min(WorldChunkWire.Side, (int)world.width - key.StartX),
+                Math.Min(WorldChunkWire.Side, (int)world.height - key.StartY));
+            Vector3 lo = camera.WorldToScreenPoint(at);
+            Vector3 hi = camera.WorldToScreenPoint(at + size);
+            if (hi.x < 0 || lo.x > Screen.width || hi.y < 0 || lo.y > Screen.height) continue;
+            GUI.color = cluster.ChunkAcknowledged(alias, key) ? new Color(0.2f, 0.9f, 0.65f, 0.65f) :
+                new Color(1f, 0.6f, 0.15f, 0.8f);
+            float width = hi.x - lo.x, height = hi.y - lo.y;
+            float top = Screen.height - hi.y;
+            GUI.DrawTexture(new Rect(lo.x, top, width, 1), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(lo.x, top + height, width, 1), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(lo.x, top, 1, height), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(hi.x, top, 1, height), Texture2D.whiteTexture);
+        }
+        GUI.color = before;
     }
 
     private static void Label(Vector3 at, string value)

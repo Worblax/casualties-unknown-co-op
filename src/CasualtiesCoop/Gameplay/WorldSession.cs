@@ -47,12 +47,15 @@ internal sealed partial class WorldSession : IDisposable
     private readonly CharacterPoseSampler poseSampler = new();
     private readonly LightReplication lights;
     private uint soundSequence;
+    private Vector2 initialSpawn;
 
     internal bool SceneReady { get; private set; }
     internal SharedItemReplication Items { get; }
     internal TerrainFluidReplication Fluids { get; }
     internal ClawEffects Claws { get; }
     internal TerrainDamageReplication Terrain { get; }
+    internal WorldChunkReplication WorldChunks { get; }
+    internal bool WaitingForWorld => WaitingForRecovery || (SceneReady && !WorldChunks.Ready);
 
     internal WorldSession(SessionPeers peers, RoomLaunchPlan plan, TMP_FontAsset font, ManualLogSource log, IMonotonicClock clock)
     {
@@ -66,7 +69,8 @@ internal sealed partial class WorldSession : IDisposable
         Items = new SharedItemReplication(peers, TryGetPosition, clock);
         Fluids = new TerrainFluidReplication(peers, TryGetPosition, clock);
         Claws = new ClawEffects(peers, clock, TryGetPosition);
-        Terrain = new TerrainDamageReplication(peers, clock, TryGetPosition);
+        WorldChunks = new WorldChunkReplication(peers, clock, TryGetPosition);
+        Terrain = new TerrainDamageReplication(peers, clock, TryGetPosition, WorldChunks);
         lights = new LightReplication(peers, TryGetPosition, SendLocal, Broadcast, clock);
         peers.ConnectionChanged += OnRecoveryPeerChanged;
         peers.AttachReceiver(Receive);
@@ -82,12 +86,13 @@ internal sealed partial class WorldSession : IDisposable
             return;
         }
 
-        SceneReady = true;
         Body body = PlayerCamera.main.body;
+        if (!SceneReady) initialSpawn = body.transform.position;
+        SceneReady = true;
         TickRecovery(body);
         Items.Tick(body);
         Fluids.Tick();
-        if (!WaitingForRecovery) Terrain.Tick();
+        WorldChunks.Tick();
     }
 
     internal void TickPresentation()
@@ -143,7 +148,13 @@ internal sealed partial class WorldSession : IDisposable
             return true;
         }
 
-        if (TerrainDamageReplication.Handles(frame)) return Terrain.Receive(sender, bytes);
+        if (WorldChunkReplication.Handles(frame))
+        {
+            if (!SceneReady || (!peers.IsHost && WaitingForRecovery && guestRecovery.Snapshot is null)) return true;
+            return WorldChunks.Receive(sender, bytes, peers.IsHost && hostRecovery.IsReturning(sender)
+                ? hostRecovery.GetOffer(sender)?.Attempt ?? Guid.Empty : Guid.Empty);
+        }
+        if (frame == MessageKind.TerrainHit) return Terrain.Receive(sender, bytes);
 
         return frame switch
         {
@@ -152,8 +163,8 @@ internal sealed partial class WorldSession : IDisposable
             MessageKind.ClawEffect => !SceneReady || Claws.Receive(sender, bytes),
             MessageKind.SandboxAlcohol => !SceneReady || Items.ReceiveAlcohol(sender, bytes),
 
-            MessageKind.FluidChunk or MessageKind.FluidPush or MessageKind.FluidDrinkRequest or MessageKind.FluidDrinkResult =>
-                !SceneReady || (WaitingForRecovery && (frame == MessageKind.FluidPush || guestRecovery.Snapshot is null)) ||
+            MessageKind.FluidPush or MessageKind.FluidDrinkRequest or MessageKind.FluidDrinkResult =>
+                !SceneReady || WaitingForRecovery ||
                 Fluids.Receive(sender, bytes),
             MessageKind.LightSnapshot => lights.Receive(sender, bytes),
             MessageKind.ItemRequest or MessageKind.ItemState or MessageKind.ItemResult or MessageKind.ItemMotion or

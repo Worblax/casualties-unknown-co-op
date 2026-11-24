@@ -1,5 +1,6 @@
 using BepInEx;
 using CasualtiesCoop.Diagnostics;
+using CasualtiesCoop.Gameplay.Terrain;
 using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -23,6 +24,7 @@ internal sealed class CoopPlugin : BaseUnityPlugin
         Application.runInBackground = true;
 
         CoopDiagnostics.Install(Config, Logger);
+        WorldChunkReplication.Configure(Config);
         harmony = new Harmony(PluginId);
         CoopPatches.Install(harmony);
         if (!CoopRuntime.IsTestMode)

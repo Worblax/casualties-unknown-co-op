@@ -83,15 +83,19 @@ internal sealed class ReportWriter : IDisposable
             snapshotId = entry;
             revision = state.Revision;
         }
-        else if (kind is MessageKind.TerrainHit or MessageKind.TerrainState &&
-            SandboxGameplayWire.TryReadTerrain(data, session, kind, out var tile))
+        else if (kind == MessageKind.TerrainHit &&
+            SandboxGameplayWire.TryReadTerrainHit(data, session, out var tile))
         {
             revision = tile.Sequence;
         }
+        uint? chunkSequence = kind == MessageKind.WorldChunkSnapshot && data.Length >= 53
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(33)) : null;
+        int? chunkX = chunkSequence.HasValue ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(37)) : null;
+        int? chunkY = chunkSequence.HasValue ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(39)) : null;
         trace.WriteLine(JsonConvert.SerializeObject(new
         {
             tick, time = record.Time, @event = record.Event, sender = frame.Sender, receiver = frame.Receiver, kind = kind.ToString(),
-            bytes = data.Length, frame.Reliable, sessionId = session, operation, revision, snapshotId
+            bytes = data.Length, frame.Reliable, sessionId = session, operation, revision, snapshotId, chunkSequence, chunkX, chunkY
         }));
     }
 

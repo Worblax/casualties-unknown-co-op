@@ -123,8 +123,9 @@ internal sealed class TestRuntime : IDisposable
         if (Scenario.Level != "UNITY_GUEST") throw new FormatException("Terrain fixture input requires UNITY_GUEST.");
         Items.Cluster.PublishTerrainFixture(Fixtures.Terrain.Cell(ScenarioDocument.String(command, "target")),
             Fixtures.Catalog.Material(ScenarioDocument.Integer(command, "material", 0, ushort.MaxValue)),
-            ScenarioDocument.Integer(command, "damage", 0, 99), ++fixtureTerrainRevision);
-        Fixtures.CoveredPaths.Add("TerrainDamageReplication.Receive/BlockDamage.UpdateSprite");
+            ScenarioDocument.Integer(command, "damage", 0, 99),
+            (byte)ScenarioDocument.OptionalInt(command, "liquid", 0, 7, 0), ++fixtureTerrainRevision);
+        Fixtures.CoveredPaths.Add("GuestWorldChunks.Receive/UnityWorldChunkGrid.Apply");
     }
 
     internal bool WaitUnits(int count, bool physics)
@@ -136,7 +137,7 @@ internal sealed class TestRuntime : IDisposable
 
     internal void Capture(string name) =>
         report.Write($"snapshots/{name}.json", new { tick, physicsTicks, simulation = Items.Cluster.Network.Clock.Now,
-            items = Items.Snapshot(), world = Fixtures.Snapshot(Items.Cluster) });
+            items = Items.Snapshot(), world = Fixtures.Snapshot(Items.Cluster), worldStreaming = Items.Cluster.WorldMetrics() });
 
     internal void CaptureCatalog()
     {
@@ -229,7 +230,7 @@ internal sealed class TestRuntime : IDisposable
             ? new[] { "SandboxScene", "SharedItemHostScene", "HostItemSession", "GuestItemSession",
                 "SharedItemProjection", "SharedItemInventory", "Body.GetItem" }
             : Scenario.StandaloneItems ? new[] { "SandboxScene", "native fixtures" }
-            : new[] { "SandboxScene", "SharedItemHostScene", "HostItemSession", "GuestItemSession", "TerrainDamageReplication.Tick" };
+            : new[] { "SandboxScene", "SharedItemHostScene", "HostItemSession", "GuestItemSession", "WorldChunkReplication.Tick" };
         if (fixtures is not null) covered = covered.Concat(fixtures.CoveredPaths).ToArray();
         if (!hold) DisposeWorld();
         report.Finish(scenario, final, message, wall.ElapsedMilliseconds, simulation, step, assertions, covered);

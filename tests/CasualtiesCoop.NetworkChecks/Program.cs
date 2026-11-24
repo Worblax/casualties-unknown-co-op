@@ -4,6 +4,7 @@ HostItemChecks.Run();
 GuestItemChecks.Run();
 RecoveryChecks.Run();
 FluidChecks.Run();
+WorldChunkChecks.Run();
 Console.WriteLine("Virtual transport, shared item, session recovery and terrain fluid checks passed.");
 
 internal static class Check

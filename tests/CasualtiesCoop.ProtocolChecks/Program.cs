@@ -12,6 +12,7 @@ VerifyCharacterPose();
 VerifyCharacterSound();
 WireCompatibilityChecks.Run();
 VerifySandboxGameplay();
+WorldChunkProtocolChecks.Run();
 Console.WriteLine("Handshake, launch plan, character, item, fluid and rejoin wire checks passed.");
 
 static void VerifyHandshake()
@@ -121,17 +122,12 @@ static void VerifyCharacterSound()
 static void VerifySandboxGameplay()
 {
     Guid run = new("9c4d229c-0901-4e78-9eed-32498ef6f4f0");
-    byte[] hit = SandboxGameplayWire.WriteTerrain(run, MessageKind.TerrainHit, 120, 92, 7, 4, 20, 1);
-    Check(SandboxGameplayWire.TryReadTerrain(hit, run, MessageKind.TerrainHit, out var tile) &&
+    byte[] hit = SandboxGameplayWire.WriteTerrainHit(run, 120, 92, 7, 4, 20, 1);
+    Check(SandboxGameplayWire.TryReadTerrainHit(hit, run, out var tile) &&
         tile.X == 120 && tile.Y == 92 && tile.Block == 7 && tile.Sequence == 4 && tile.Damage == 20, "Terrain hit frame");
-    Check(!SandboxGameplayWire.TryReadTerrain(hit, Guid.Empty, MessageKind.TerrainHit, out _), "Terrain rejects another session");
-    Check(!SandboxGameplayWire.TryReadTerrain(hit, run, MessageKind.TerrainState, out _), "Terrain separates request and state");
-    byte[] cracked = SandboxGameplayWire.WriteTerrain(run, MessageKind.TerrainState, 120, 92, 7, 5, 40);
-    Check(SandboxGameplayWire.TryReadTerrain(cracked, run, MessageKind.TerrainState, out tile) &&
-        tile.Damage == 40 && tile.Sequence == 5, "Absolute host crack progress");
-    byte[] broken = SandboxGameplayWire.WriteTerrain(run, MessageKind.TerrainState, 120, 92, 0, 6, 0);
-    Check(SandboxGameplayWire.TryReadTerrain(broken, run, MessageKind.TerrainState, out tile) &&
-        tile.Block == 0 && tile.Damage == 0, "Host destruction state");
+    Check(!SandboxGameplayWire.TryReadTerrainHit(hit, Guid.Empty, out _), "Terrain rejects another session");
+    hit[31] = 4;
+    Check(!SandboxGameplayWire.TryReadTerrainHit(hit, run, out _), "Reject malformed terrain hit flags");
     byte[] claw = SandboxGameplayWire.WriteClaw(run, 3, 4, -10, 2, 145, false);
     Check(SandboxGameplayWire.TryReadClaw(claw, run, out var effect) &&
         effect.Player == 3 && effect.Angle == 145 && !effect.Right, "Claw visual frame");

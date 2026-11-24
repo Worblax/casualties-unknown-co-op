@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "name": "world.chunk-reservoir-seam",
+  "level": "UNITY_HOST",
+  "seed": 72,
+  "timeoutMs": 65000,
+  "network": {
+    "latencyMs": 35,
+    "jitterMs": 7
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "guest",
+      "role": "guest"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "tank",
+      "position": [
+        10,
+        -4
+      ],
+      "rows": [
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "x....x.........x",
+        "xxxxxxxxxxxxxxxx"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1
+      }
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "gate",
+      "position": [
+        15,
+        -3
+      ],
+      "rows": [
+        "x"
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1
+      }
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "drainCell",
+      "position": [
+        16,
+        -3
+      ],
+      "rows": [
+        "."
+      ],
+      "legend": {
+        ".": 0,
+        "x": 1
+      }
+    },
+    {
+      "op": "fluid.enableFlow"
+    },
+    {
+      "op": "fluid.fill",
+      "id": "source",
+      "position": [
+        11,
+        -3
+      ],
+      "width": 4,
+      "height": 6,
+      "type": 1
+    },
+    {
+      "op": "fluid.probe",
+      "id": "drain",
+      "position": [
+        16,
+        -3
+      ],
+      "width": 8,
+      "height": 1
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.sameChunk",
+      "expected": 0,
+      "target": "gate",
+      "item": "drainCell"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 8000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "expected": 1,
+        "target": "gate"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 8000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "expected": 1,
+        "target": "drainCell"
+      }
+    },
+    {
+      "op": "assert.equal",
+      "query": "fluid.cell",
+      "expected": 0,
+      "target": "drain"
+    },
+    {
+      "op": "terrain.breakNative",
+      "target": "gate",
+      "damage": 200
+    },
+    {
+      "op": "assert.always",
+      "timeoutMs": 1000,
+      "condition": {
+        "op": "terrain.gateBeforeWater",
+        "target": "gate",
+        "item": "drainCell",
+        "expected": 1
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 8000,
+      "condition": {
+        "op": "fluid.cell",
+        "expected": 1,
+        "target": "drain"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 8000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "expected": 1,
+        "target": "gate"
+      }
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 8000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "expected": 1,
+        "target": "drainCell"
+      }
+    },
+    {
+      "op": "snapshot.capture",
+      "id": "after-water"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

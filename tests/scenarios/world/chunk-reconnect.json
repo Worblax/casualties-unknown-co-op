@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "name": "world.chunk-reconnect",
+  "level": "UNITY_HOST",
+  "seed": 73,
+  "timeoutMs": 65000,
+  "network": {
+    "latencyMs": 75,
+    "jitterMs": 10
+  },
+  "setup": [
+    {
+      "op": "world.loadSandbox"
+    },
+    {
+      "op": "peer.add",
+      "id": "host",
+      "role": "host"
+    },
+    {
+      "op": "peer.add",
+      "id": "guest",
+      "role": "guest"
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "pool",
+      "position": [
+        10,
+        0
+      ],
+      "rows": [
+        "xxx",
+        "xxx",
+        "xxx"
+      ],
+      "legend": {
+        "x": 1
+      }
+    },
+    {
+      "op": "world.loadLayout",
+      "id": "center",
+      "position": [
+        11,
+        1
+      ],
+      "rows": [
+        "x"
+      ],
+      "legend": {
+        "x": 1
+      }
+    }
+  ],
+  "steps": [
+    {
+      "op": "wait.ready"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 9000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "target": "center",
+        "expected": 1
+      }
+    },
+    {
+      "op": "peer.disconnect",
+      "peer": "guest"
+    },
+    {
+      "op": "terrain.breakNative",
+      "target": "center",
+      "damage": 200
+    },
+    {
+      "op": "fluid.setNative",
+      "target": "center",
+      "type": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "world.firstBlock",
+      "target": "center",
+      "expected": 0
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.cellLiquid",
+      "target": "center",
+      "expected": 1
+    },
+    {
+      "op": "assert.equal",
+      "query": "terrain.guestsMatch",
+      "target": "center",
+      "expected": 0
+    },
+    {
+      "op": "peer.reconnect",
+      "peer": "guest"
+    },
+    {
+      "op": "assert.eventually",
+      "timeoutMs": 9000,
+      "condition": {
+        "op": "terrain.guestsMatch",
+        "target": "center",
+        "expected": 1
+      }
+    },
+    {
+      "op": "snapshot.capture",
+      "id": "return"
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
+    }
+  ]
+}

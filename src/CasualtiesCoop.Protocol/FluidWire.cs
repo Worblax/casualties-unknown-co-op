@@ -6,58 +6,8 @@ namespace CasualtiesCoop.Gameplay.Fluids;
 
 internal static class FluidWire
 {
-    internal const int ChunkSize = 32;
-    internal const int PackedSize = ChunkSize * ChunkSize * 3 / 8;
-    private const int HeaderSize = 25;
     private const int DrinkSize = 30;
     private const int PushSize = 22;
-
-    internal static byte[] WriteChunk(Guid session, int x, int y, uint version, ReadOnlySpan<byte> cells)
-    {
-        byte[] frame = GameplayWire.NewFrame(MessageKind.FluidChunk, session, HeaderSize + PackedSize);
-        WriteCell(frame.AsSpan(17), x, y);
-        BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(21), version);
-        cells.CopyTo(frame.AsSpan(HeaderSize));
-        return frame;
-    }
-
-    internal static bool TryReadChunk(byte[] frame, Guid session, out int x, out int y, out uint version, out int offset)
-    {
-        x = y = offset = 0;
-        version = 0;
-        if (frame.Length != HeaderSize + PackedSize || !GameplayWire.HasHeader(frame, MessageKind.FluidChunk, session))
-        {
-            return false;
-        }
-
-        ReadCell(frame.AsSpan(17), out x, out y);
-        version = BinaryPrimitives.ReadUInt32LittleEndian(frame.AsSpan(21));
-        offset = HeaderSize;
-        return version != 0;
-    }
-
-    internal static void Pack(Span<byte> packed, int index, byte value)
-    {
-        int bit = index * 3;
-        int shift = bit & 7;
-        packed[bit >> 3] |= (byte)((value & 7) << shift);
-        if (shift > 5)
-        {
-            packed[(bit >> 3) + 1] |= (byte)((value & 7) >> (8 - shift));
-        }
-    }
-
-    internal static byte Unpack(ReadOnlySpan<byte> packed, int index)
-    {
-        int bit = index * 3;
-        int shift = bit & 7;
-        int value = packed[bit >> 3] >> shift;
-        if (shift > 5)
-        {
-            value |= packed[(bit >> 3) + 1] << (8 - shift);
-        }
-        return (byte)(value & 7);
-    }
 
     internal static byte[] WriteDrink(MessageKind frame, Guid session, ulong operation, int x, int y, byte liquid)
     {

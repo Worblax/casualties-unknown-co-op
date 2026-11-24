@@ -18,7 +18,7 @@ internal static class RecoveryInputHooks
 
     private static bool AllowInput(PlayerCamera __instance)
     {
-        if (CoopRuntime.ActiveWorld is not { WaitingForRecovery: true })
+        if (CoopRuntime.ActiveWorld is not { WaitingForWorld: true })
         {
             return true;
         }
@@ -31,7 +31,7 @@ internal static class RecoveryInputHooks
         return false;
     }
 
-    private static bool AllowDragging() => CoopRuntime.ActiveWorld is not { WaitingForRecovery: true };
+    private static bool AllowDragging() => CoopRuntime.ActiveWorld is not { WaitingForWorld: true };
 
     private static bool AllowTimeScale(PlayerCamera.SpeedType __0) => CoopRuntime.ActiveWorld is null ||
         !PauseHandler.paused || __0 != PlayerCamera.SpeedType.Paused;

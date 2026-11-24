@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "name": "control.terrain-history-limit",
+  "name": "world.terrain-history-limit",
   "level": "UNITY_HOST",
-  "seed": 42,
+  "seed": 72,
   "timeoutMs": 75000,
   "network": {
-    "latencyMs": 3
+    "latencyMs": 10
   },
   "setup": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "op": "world.loadLayout",
-      "id": "history-last-tracked",
+      "id": "history-last-covered",
       "position": [
         33,
         64
@@ -32,7 +32,8 @@
         "."
       ],
       "legend": {
-        ".": 0
+        ".": 0,
+        "x": 1
       }
     }
   ],
@@ -45,7 +46,7 @@
       "peer": "guest"
     },
     {
-      "op": "control.terrainHistoryProbe",
+      "op": "terrain.breakArea",
       "position": [
         -30,
         1
@@ -54,8 +55,16 @@
     {
       "op": "assert.equal",
       "query": "world.firstBlock",
-      "target": "history-overflow",
-      "expected": 0
+      "expected": 0,
+      "target": "history-overflow"
+    },
+    {
+      "op": "peer.move",
+      "peer": "guest",
+      "position": [
+        -28,
+        62
+      ]
     },
     {
       "op": "peer.reconnect",
@@ -63,30 +72,35 @@
     },
     {
       "op": "assert.eventually",
-      "timeoutMs": 14000,
+      "timeoutMs": 8000,
       "condition": {
         "op": "terrain.guestsMatch",
-        "target": "history-first",
-        "expected": 1
+        "expected": 1,
+        "target": "history-overflow"
       }
     },
     {
       "op": "assert.eventually",
-      "timeoutMs": 36000,
+      "timeoutMs": 8000,
       "condition": {
         "op": "terrain.guestsMatch",
-        "target": "history-last-tracked",
-        "expected": 1
+        "expected": 1,
+        "target": "history-first"
       }
     },
     {
       "op": "assert.eventually",
-      "timeoutMs": 3500,
+      "timeoutMs": 8000,
       "condition": {
         "op": "terrain.guestsMatch",
-        "target": "history-overflow",
-        "expected": 1
+        "expected": 1,
+        "target": "history-last-covered"
       }
+    },
+    {
+      "op": "assert.equal",
+      "query": "runtime.unhandledExceptions",
+      "expected": 0
     }
   ]
 }

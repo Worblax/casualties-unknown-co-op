@@ -8,7 +8,7 @@ namespace CasualtiesCoop.Core;
 internal sealed class HostRecovery
 {
     private readonly HashSet<ulong> returning = new();
-    private readonly Dictionary<ulong, (SessionRejoinState State, byte[] Frame)> offers = new();
+    private readonly Dictionary<ulong, (SessionRejoinState State, byte[] Frame, float OfferedAt)> offers = new();
 
     internal void MarkReturning(ulong peer)
     {
@@ -19,11 +19,11 @@ internal sealed class HostRecovery
     internal bool IsReturning(ulong peer) => returning.Contains(peer);
 
     internal bool AllowsGameplay(ulong peer, MessageKind kind) =>
-        !IsReturning(peer) || (kind == MessageKind.ItemSyncRequest && offers.ContainsKey(peer));
+        !IsReturning(peer) || ((kind is MessageKind.ItemSyncRequest or MessageKind.WorldChunkControl) && offers.ContainsKey(peer));
 
     internal SessionRejoinState? GetOffer(ulong peer) => offers.TryGetValue(peer, out var offer) ? offer.State : null;
 
-    internal byte[]? Offer(ulong peer, Guid attempt, Func<SessionRejoinState> capture, out bool created)
+    internal byte[]? Offer(ulong peer, Guid attempt, Func<SessionRejoinState> capture, out bool created, float now = 0)
     {
         created = false;
         if (attempt == Guid.Empty || !IsReturning(peer))
@@ -33,7 +33,9 @@ internal sealed class HostRecovery
 
         if (offers.TryGetValue(peer, out var existing))
         {
-            return existing.State.Attempt == attempt ? existing.Frame : null;
+            if (existing.State.Attempt == attempt) return existing.Frame;
+            // An attempt cannot replace a live offer. A timed-out participant can restart recovery.
+            if (now - existing.OfferedAt < GuestRecovery.AttemptTimeout - 3f) return null;
         }
 
         SessionRejoinState state = capture();
@@ -42,7 +44,7 @@ internal sealed class HostRecovery
             return null;
         }
 
-        offers.Add(peer, (state, frame));
+        offers[peer] = (state, frame, now);
         created = true;
         return frame;
     }
