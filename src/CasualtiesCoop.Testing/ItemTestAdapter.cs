@@ -169,6 +169,44 @@ internal sealed class ItemTestAdapter : IDisposable
         }
     }
 
+    internal void Throw(JObject action)
+    {
+        string peer = ScenarioDocument.String(action, "peer");
+        ulong id = IdFor(ScenarioDocument.String(action, "item"));
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.Guest is null ||
+            !actor.Guest.Replicas.TryGet(id, out ItemState replica) || replica.Owner != actor.Peers.LocalParticipant)
+            throw new InvalidOperationException($"Guest {peer} does not own the item.");
+        float vx = ScenarioDocument.Scalar(action, "velocityX", -100, 100);
+        float vy = ScenarioDocument.Scalar(action, "velocityY", -100, 100);
+        float spin = action["spin"] is null ? 0f : ScenarioDocument.Scalar(action, "spin", -2000, 2000);
+        if (!actor.Guest.TrySubmit(id, ItemAction.Throw, replica.Slot,
+            new ItemLocation(actor.Position.x, actor.Position.y, 0, vx, vy, spin)))
+            throw new InvalidOperationException($"Guest {peer} could not submit the throw.");
+    }
+
+    internal void Swap(JObject action)
+    {
+        string peer = ScenarioDocument.String(action, "peer");
+        string alias = ScenarioDocument.String(action, "item");
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.Guest is null ||
+            !actor.Guest.Replicas.TryGet(IdFor(alias), out ItemState replica) ||
+            replica.Owner != actor.Peers.LocalParticipant)
+            throw new InvalidOperationException($"Guest {peer} does not own the item.");
+        Body body = actor.NativeBody ?? throw new TestBlocked("Swap requires a native Body.");
+        int from = replica.Slot;
+        int to = -1;
+        for (int index = 0; index < body.slots.Length; index++)
+        {
+            if (index != from && body.GetItem(index) == null) { to = index; break; }
+        }
+        if (from == ItemWire.NoSlot || to < 0 || to == from)
+            throw new TestBlocked("The native Body has no second empty pickup slot.");
+        Cluster.RunAs(actor, _ => { body.SwapSlots(from, to); return true; });
+        if (body.GetItem(to) != ItemFor(alias))
+            throw new InvalidOperationException($"Guest {peer} could not move the item to slot {to}.");
+        slots[peer + "/" + alias] = (byte)to;
+    }
+
     internal void Place(string alias, JObject command)
     {
         var position = ScenarioDocument.Position(command);
@@ -247,6 +285,7 @@ internal sealed class ItemTestAdapter : IDisposable
         ["items.converged"] = (r, _, id, _) => r.Replicated(id, ownedOnly: true) ? 1 : 0,
         ["items.hostCondition"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var state) ? Mathf.RoundToInt(state.Condition * 100f) : -1,
         ["items.hostPlacement"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var state) ? (int)state.Placement : -1,
+        ["items.hostSlot"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var placed) ? placed.Slot : -1,
         ["items.replicaPayloadMatches"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var authority) &&
             r.Cluster.Guests.All(actor => actor.Guest!.Replicas.TryGet(id, out var replica) && replica.Payload.SequenceEqual(authority.Payload)) ? 1 : 0,
         ["items.hostWet"] = (r, alias, _, item) => item && item.isWet ? 1 : 0,
@@ -369,6 +408,12 @@ internal sealed class ItemTestAdapter : IDisposable
                 if (!SameContent(authority[index], replicas[index])) return false;
             return true;
         });
+    }
+
+    internal bool HostSlotMatchesClient(string actor, string target)
+    {
+        if (!slots.TryGetValue(actor + "/" + target, out byte slot)) return false;
+        return Cluster.Host.Session.TryGet(IdFor(target), out ItemState state) && state.Slot == slot;
     }
 
     internal int CountNativeDefinitionInSlots(string definition)

@@ -1,6 +1,7 @@
 using System;
 using CasualtiesCoop.Gameplay;
 using CasualtiesCoop.Gameplay.Items;
+using CasualtiesCoop.Core.Session;
 using CasualtiesCoop.Networking;
 
 namespace CasualtiesCoop.Core.Items;
@@ -63,20 +64,32 @@ internal sealed class GuestItemSession : IDisposable
         return true;
     }
 
-    internal bool TryReportState(ulong item, uint revision, float condition, byte[] payload)
+    internal bool TryReportState(ulong item, uint revision, float condition, byte[] payload,
+        ItemPlacement placement, ulong parent, byte slot, ItemLocation location)
     {
         if (!Synced || Pending is not null || revision == 0 || !ItemWire.IsPayload(payload) ||
             !Replicas.TryGet(item, out ItemState state) ||
-            state.Removed || state.Owner != peers.LocalParticipant)
+            state.Removed || !EffectiveOwnedBy(item, peers.LocalParticipant))
         {
             return false;
         }
         var report = new SharedItemStateReport
         {
             Operation = ++lastRegistrationOperation, ItemId = item, Revision = revision, Condition = condition,
-            Payload = payload
+            Placement = placement, Parent = parent, Slot = slot, Location = location, Payload = payload
         };
         return peers.Send(peers.Host, ItemWire.WriteReport(peers.SessionId, report));
+    }
+
+    private bool EffectiveOwnedBy(ulong id, ParticipantId player)
+    {
+        for (int depth = 0; depth < 32 && Replicas.TryGet(id, out ItemState state); depth++)
+        {
+            if (state.Owner == player) return true;
+            if (!state.Owner.IsNone || state.Parent == 0) return false;
+            id = state.Parent;
+        }
+        return false;
     }
 
     internal ulong ReserveClientKey() => ++nextClientKey;

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using BepInEx.Logging;
 using CasualtiesCoop.Core;
+using CasualtiesCoop.Core.Session;
 using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Gameplay.Audio;
 using CasualtiesCoop.Gameplay.Characters;
@@ -19,7 +20,7 @@ namespace CasualtiesCoop.Gameplay;
 
 internal delegate bool PlayerPositionLookup(ulong player, out Vector2 position);
 
-internal sealed partial class WorldSession : IDisposable
+internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
 {
     private const float PoseTimeout = 2f;
     private const int SoundsPerSecond = 48;
@@ -66,7 +67,7 @@ internal sealed partial class WorldSession : IDisposable
         this.clock = clock;
         guestRecovery = new GuestRecovery(clock);
         audio = new SpatialCharacterAudio(TryGetPosition);
-        Items = new SharedItemReplication(peers, TryGetPosition, clock);
+        Items = new SharedItemReplication(peers, TryGetPosition, clock, this);
         Fluids = new TerrainFluidReplication(peers, TryGetPosition, clock);
         Claws = new ClawEffects(peers, clock, TryGetPosition);
         WorldChunks = new WorldChunkReplication(peers, clock, TryGetPosition);
@@ -326,6 +327,18 @@ internal sealed partial class WorldSession : IDisposable
                 peers.Send(id, frame, reliable: false);
             }
         }
+    }
+
+    bool IRemoteItemVisuals.AttachHeldItem(ParticipantId owner, byte slot, Item item)
+    {
+        ulong address = peers.AddressOf(owner);
+        return address != 0 && remotes.TryGetValue(address, out RemotePlayer? remote) &&
+            remote.View is not null && remote.View.AttachHeldItem(slot, item);
+    }
+
+    void IRemoteItemVisuals.DetachHeldItem(Item item)
+    {
+        foreach (RemotePlayer remote in remotes.Values) remote.View?.DetachHeldItem(item);
     }
 
     public void Dispose()

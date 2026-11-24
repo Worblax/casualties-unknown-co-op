@@ -80,9 +80,11 @@ internal static class WireCompatibilityChecks
             operation == Operation && key == ItemId && item == Operation + 1 && revision == Revision,
             "Registration acknowledgment maps the local item key");
         var report = new SharedItemStateReport { Operation = Operation, ItemId = ItemId, Revision = Revision,
-            Condition = .4f, Payload = new byte[] { 6 } };
+            Condition = .4f, Placement = ItemPlacement.World, Slot = ItemWire.NoSlot,
+            Location = new ItemLocation(1, 2, 3), Payload = new byte[] { 6 } };
         Require(ItemWire.TryReadReport(ItemWire.WriteReport(Session, report), Session, out SharedItemStateReport read) &&
-            read.Condition == .4f && read.Payload.Length == 1, "Owner state report round trips");
+            read.Condition == .4f && read.Payload.Length == 1 && read.Placement == ItemPlacement.World &&
+            read.Slot == ItemWire.NoSlot, "Owner state report round trips with placement");
 
         var craft = new ItemCraftRequest { Operation = Operation, Recipe = 4, ItemIds = new[] { ItemId, ItemId + 1 },
             Revisions = new[] { Revision, Revision } };

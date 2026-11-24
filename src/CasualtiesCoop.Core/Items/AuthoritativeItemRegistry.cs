@@ -158,6 +158,17 @@ internal sealed class AuthoritativeItemRegistry
         return false;
     }
 
+    internal bool OccupiedExcept(ParticipantId player, byte slot, ulong item)
+    {
+        foreach (Record record in items.Values)
+        {
+            if (record.State.Id != item && record.State.Owner == player && record.State.Slot == slot &&
+                !record.State.Removed)
+                return true;
+        }
+        return false;
+    }
+
     internal ItemLocation? PreviousWorldPosition(ulong id, float now)
     {
         if (!items.TryGetValue(id, out Record? record))

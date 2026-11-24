@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "name": "items.guest-inventory-throw",
+  "level": "UNITY_ACTORS",
+  "seed": 147,
+  "timeoutMs": 90000,
+  "network": { "latencyMs": 45, "jitterMs": 8, "unreliableLoss": 0.04 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "character.spawn", "id": "right", "character": 0, "position": [3, 0] },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "peer.add", "id": "bob", "role": "guest", "mode": "NativeActor", "body": "right" },
+    { "op": "item.spawn", "id": "target", "catalogId": "stick", "position": [0, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.pickup", "peer": "alice", "item": "target", "slot": "$fixture.emptyPickupSlot" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "target", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "target"
+    } },
+    { "op": "item.throw", "peer": "alice", "item": "target", "velocityX": 18, "velocityY": 7, "spin": 500 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "target", "expected": 0
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.unownedConverged", "item": "target"
+    } },
+    { "op": "item.pickup", "peer": "bob", "item": "target", "slot": "$fixture.emptyPickupSlot" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "bob", "target": "target", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "target"
+    } },
+    { "op": "item.throw", "peer": "bob", "item": "target", "velocityX": -16, "velocityY": 9, "spin": -450 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.unownedConverged", "item": "target"
+    } },
+    { "op": "item.pickup", "peer": "alice", "item": "target", "slot": "$fixture.emptyPickupSlot" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "alice", "target": "target", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "target"
+    } },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

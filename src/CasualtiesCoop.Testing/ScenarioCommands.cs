@@ -97,6 +97,14 @@ internal static class ScenarioCommands
             else String(c, "slot");
         }, (r, c) => r.Items.PickUp(c)),
         ["item.drop"] = Apply(Both, "peer item", PeerItem, (r, c) => r.Items.Drop(c)),
+        ["item.throw"] = Apply(Both, "peer item velocityX velocityY spin", c =>
+        {
+            PeerItem(c);
+            Scalar(c, "velocityX", -100, 100);
+            Scalar(c, "velocityY", -100, 100);
+            if (c["spin"] is not null) Scalar(c, "spin", -2000, 2000);
+        }, (r, c) => r.Items.Throw(c)),
+        ["item.swap"] = Apply(Both, "peer item", PeerItem, (r, c) => r.Items.Swap(c)),
         ["item.remove"] = Apply(Both, "item", Item, (r, c) => r.Items.Remove(String(c, "item"))),
         ["item.place"] = Apply(Both, "item position", c => { Item(c); Position(c); }, (r, c) => r.Items.Place(String(c, "item"), c)),
         ["item.condition"] = Apply(Both, "item condition", c => { Item(c); Scalar(c, "condition", 0, 1); },

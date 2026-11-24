@@ -515,10 +515,48 @@ internal sealed class HostItemSession : IDisposable
         {
             return;
         }
-        if (!TryCommitPayload(report.ItemId, report.Revision, report.Condition, report.Payload, out _) &&
-            items.TryGet(report.ItemId, out ItemState current))
+        if (!ReportedPlacementValid(player, report, state) ||
+            !items.TryCommitCraftUpdate(new CraftUpdatedItem
+            {
+                Id = report.ItemId, Revision = report.Revision, Condition = report.Condition,
+                Payload = report.Payload, HasPlacement = true, Placement = report.Placement,
+                Parent = report.Parent, Slot = report.Slot, Location = report.Location
+            }, player, out ItemState committed))
         {
+            if (!items.TryGet(report.ItemId, out ItemState current)) return;
             peers.Send(sender, Encode(current, reliable: true));
+            return;
         }
+        PublishDelta(committed);
+    }
+
+    private bool ReportedPlacementValid(ParticipantId player, SharedItemStateReport report, ItemState state)
+    {
+        if (report.Placement == state.Placement && report.Parent == state.Parent && report.Slot == state.Slot)
+            return true;
+        if (report.Placement == ItemPlacement.Inventory && items.OccupiedExcept(player, report.Slot, report.ItemId))
+            return false;
+        if (report.Parent == report.ItemId) return false;
+        ulong parentId = report.Parent;
+        for (int depth = 0; depth < 32 && parentId != 0 && items.TryGet(parentId, out ItemState ancestor); depth++)
+        {
+            if (parentId == report.ItemId) return false;
+            parentId = ancestor.Parent;
+        }
+        ItemState? parentState = null;
+        if (report.Parent != 0)
+        {
+            if (!items.TryGet(report.Parent, out ItemState parent) || parent.Removed ||
+                (!items.OwnedBy(report.Parent, player) && !parent.Owner.IsNone))
+                return false;
+            parentState = parent;
+        }
+        var registration = new SharedItemRegistration
+        {
+            Operation = report.Operation, ClientKey = 1, Definition = state.Definition,
+            Placement = report.Placement, Parent = report.Parent, Slot = report.Slot,
+            Location = report.Location, Condition = report.Condition, Payload = report.Payload
+        };
+        return world.CheckRegistration(player, registration, parentState) == ItemDecision.Accepted;
     }
 }

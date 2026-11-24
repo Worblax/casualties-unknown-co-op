@@ -96,6 +96,10 @@ internal struct SharedItemStateReport
     internal ulong ItemId;
     internal uint Revision;
     internal float Condition;
+    internal ItemPlacement Placement;
+    internal ulong Parent;
+    internal byte Slot;
+    internal ItemLocation Location;
     internal byte[] Payload;
 }
 
@@ -109,7 +113,7 @@ internal static class ItemWire
     private const int RequestHeaderSize = 65;
     private const int RegistrationHeaderSize = 74;
     private const int RegisteredSize = 45;
-    private const int ReportHeaderSize = 43;
+    private const int ReportHeaderSize = 77;
     private const int ResultSize = 26;
 
     internal static byte[] WriteState(MessageKind frame, Guid session, SharedItemState state)
@@ -316,7 +320,11 @@ internal static class ItemWire
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), report.ItemId);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(33), report.Revision);
         GameplayWire.WriteFloat(message.AsSpan(37), report.Condition);
-        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(41), (ushort)payload.Length);
+        message[41] = (byte)report.Placement;
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(42), report.Parent);
+        message[50] = report.Slot;
+        WriteLocation(message.AsSpan(51), report.Location);
+        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(75), (ushort)payload.Length);
         payload.CopyTo(message, ReportHeaderSize);
         return message;
     }
@@ -328,7 +336,7 @@ internal static class ItemWire
         {
             return false;
         }
-        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(41));
+        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(75));
         if (payloadLength > MaxPayloadLength || message.Length != ReportHeaderSize + payloadLength)
         {
             return false;
@@ -337,8 +345,19 @@ internal static class ItemWire
         report.ItemId = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(25));
         report.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(33));
         report.Condition = GameplayWire.ReadFloat(message.Slice(37));
+        report.Placement = (ItemPlacement)message[41];
+        report.Parent = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(42));
+        report.Slot = message[50];
+        report.Location = ReadLocation(message.Slice(51));
         report.Payload = message.Slice(ReportHeaderSize).ToArray();
-        return report.Operation != 0 && report.ItemId != 0 && report.Revision != 0 && report.Condition is >= 0f and <= 1f;
+        var structure = new SharedItemState
+        {
+            Placement = report.Placement, Parent = report.Parent, Slot = report.Slot,
+            Owner = report.Placement is ItemPlacement.Inventory or ItemPlacement.Worn ? ulong.MaxValue : 0
+        };
+        return report.Operation != 0 && report.ItemId != 0 && report.Revision != 0 &&
+            report.Condition is >= 0f and <= 1f && IsPlacementValid(structure) &&
+            IsLocationValid(report.Location);
     }
 
     internal static byte[] WriteResult(Guid session, ulong operation, ItemDecision decision)

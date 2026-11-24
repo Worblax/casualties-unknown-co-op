@@ -28,6 +28,7 @@ internal sealed class SharedItemProjection : IDisposable
     private readonly SharedItemObjects objects;
     private readonly IMonotonicClock clock;
     private readonly ParticipantId local;
+    private readonly IRemoteItemVisuals? remoteVisuals;
     private readonly Dictionary<ulong, View> views = new();
     private readonly Dictionary<int, ulong> byObject = new();
     private static readonly HashSet<int> ReplicaIds = new();
@@ -35,12 +36,14 @@ internal sealed class SharedItemProjection : IDisposable
     private readonly HashSet<ulong> suppressed = new();
     private bool restoringFreshBody;
 
-    internal SharedItemProjection(SharedItemInventory inventory, SharedItemObjects objects, IMonotonicClock clock, ParticipantId local)
+    internal SharedItemProjection(SharedItemInventory inventory, SharedItemObjects objects, IMonotonicClock clock,
+        ParticipantId local, IRemoteItemVisuals? remoteVisuals = null)
     {
         this.inventory = inventory;
         this.objects = objects;
         this.clock = clock;
         this.local = local;
+        this.remoteVisuals = remoteVisuals;
     }
 
     internal bool TryGetId(Item item, out ulong id) => byObject.TryGetValue(item.GetInstanceID(), out id);
@@ -176,6 +179,24 @@ internal sealed class SharedItemProjection : IDisposable
 
             if (!state.Owner.IsNone && state.Owner != local)
             {
+                if (state.Placement == ItemPlacement.Inventory && remoteVisuals is not null)
+                {
+                    if (!view.Item && !Create(state, view, now)) continue;
+                    if (view.AppliedRevision != state.Revision || view.AppliedPayload is null ||
+                        !view.AppliedPayload.SequenceEqual(state.Payload))
+                    {
+                        if (!objects.Apply(view.Item!, state.Payload, state.Condition, state.Placement)) continue;
+                        view.AppliedRevision = state.Revision;
+                        view.AppliedPayload = state.Payload;
+                    }
+                    if (remoteVisuals.AttachHeldItem(state.Owner, state.Slot, view.Item!))
+                    {
+                        view.Item!.rb.simulated = false;
+                        view.Item.condition = state.Condition;
+                        continue;
+                    }
+                }
+                if (view.Item) remoteVisuals?.DetachHeldItem(view.Item!);
                 Hide(view);
                 view.AppliedRevision = state.Revision;
                 view.AppliedPayload = state.Payload;
@@ -426,6 +447,7 @@ internal sealed class SharedItemProjection : IDisposable
         }
         if (view.Item)
         {
+            remoteVisuals?.DetachHeldItem(view.Item!);
             view.Item!.gameObject.SetActive(false);
             UnityEngine.Object.Destroy(view.Item.gameObject);
         }

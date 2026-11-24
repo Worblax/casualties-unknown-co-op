@@ -51,6 +51,9 @@ internal static class ScenarioQueries
         ["items.replicaDefinitionCount"] = new((r, c) =>
             r.Items.CountReplicaDefinition(String(c, "actor"), String(c, "target")),
             c => { String(c, "target"); String(c, "actor"); }),
+        ["items.hostSlotMatchesClient"] = new((r, c) =>
+            Bool(r.Items.HostSlotMatchesClient(String(c, "actor"), String(c, "target"))),
+            c => { String(c, "actor"); String(c, "target"); }),
         ["items.definitionConverged"] = ForTarget((r, t) => Bool(r.Items.DefinitionConverged(t))),
         ["items.nativeDefinitionCount"] = ForTarget((r, t) => r.Items.CountNativeDefinition(t)),
         ["items.nativeDefinitionInSlots"] = ForTarget((r, t) => r.Items.CountNativeDefinitionInSlots(t)),

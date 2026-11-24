@@ -28,6 +28,7 @@ internal static class P0CraftChecks
         HostCannotMutateReservedItems();
         ReservedNestedItemBlocksParent();
         ForeignContainerRegistrationIsRejected();
+        PlacementReportMovesOwnedItem();
         ExpiredReservationCannotCommit();
         DuplicateCommitReplaysAfterReconnect();
         RegistrationReplayAfterInterleavedRegistrationIsIdempotent();
@@ -158,6 +159,32 @@ internal static class P0CraftChecks
         scenario.AdvanceReady();
         Check.That(scenario.Host.Snapshot().Length == before,
             "A registration inside another participant's container is rejected.");
+    }
+
+    private static void PlacementReportMovesOwnedItem()
+    {
+        using var scenario = new Scenario();
+        ParticipantId owner = scenario.ParticipantOf(First);
+        Check.That(scenario.Host.TryRegister("stick", ItemPlacement.Inventory, owner, 0, 2, default, 1f,
+            new byte[] { 5 }, 0, out ItemState item), "The host registers an owned inventory item.");
+        scenario.AdvanceReady();
+        Check.That(scenario.FirstGuest.Replicas.TryGet(item.Id, out ItemState before) &&
+            scenario.SecondGuest.Replicas.TryGet(item.Id, out _), "Both clients receive the owned item.");
+        Check.That(scenario.FirstGuest.TryReportState(item.Id, before.Revision, before.Condition, before.Payload,
+            ItemPlacement.Inventory, 0, 3, before.Location), "The owner reports a slot move.");
+        scenario.AdvanceReady();
+        Check.That(scenario.Host.TryGet(item.Id, out ItemState moved) && moved.Slot == 3 &&
+            scenario.SecondGuest.Replicas.TryGet(item.Id, out ItemState observed) && observed.Slot == 3,
+            "The authoritative slot and the observer replica follow the placement report.");
+
+        Check.That(scenario.Host.TryRegister("rock", ItemPlacement.Inventory, owner, 0, 4, default, 1f,
+            new byte[] { 6 }, 0, out _), "A second slot is occupied.");
+        scenario.AdvanceReady();
+        Check.That(scenario.FirstGuest.TryReportState(item.Id, moved.Revision, moved.Condition, moved.Payload,
+            ItemPlacement.Inventory, 0, 4, moved.Location), "The owner tries to overwrite an occupied slot.");
+        scenario.AdvanceReady();
+        Check.That(scenario.Host.TryGet(item.Id, out ItemState retained) && retained.Slot == 3 &&
+            retained.Revision == moved.Revision, "An occupied destination cannot corrupt the authoritative placement.");
     }
 
     private static void ExpiredReservationCannotCommit()

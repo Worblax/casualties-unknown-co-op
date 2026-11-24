@@ -20,12 +20,23 @@ internal sealed class SharedItemReplication : IDisposable
         internal SharedItemRegistration Request;
         internal float NextSend;
     }
+    private struct ReportedState
+    {
+        internal uint Revision;
+        internal byte[] Payload;
+        internal float Condition;
+        internal ItemPlacement Placement;
+        internal ulong Parent;
+        internal byte Slot;
+        internal ItemLocation Location;
+        internal float NextSend;
+    }
     private readonly SessionPeers peers;
     private readonly IMonotonicClock clock;
     private readonly Dictionary<ulong, (uint Operation, float At)> alcoholRequests = new();
     private readonly Dictionary<ulong, PendingRegistration> pendingRegistrations = new();
     private readonly HashSet<int> registrationObjects = new();
-    private readonly Dictionary<ulong, (uint Revision, byte[] Payload, float Condition)> reported = new();
+    private readonly Dictionary<ulong, ReportedState> reported = new();
     private uint alcoholOperation;
     private float nextGuestState;
     private float nextRecipeRefresh;
@@ -38,7 +49,8 @@ internal sealed class SharedItemReplication : IDisposable
     private readonly SharedItemProjection? projection;
     private readonly SharedItemCrafting? crafting;
 
-    internal SharedItemReplication(SessionPeers peers, PlayerPositionLookup playerPosition, IMonotonicClock clock)
+    internal SharedItemReplication(SessionPeers peers, PlayerPositionLookup playerPosition, IMonotonicClock clock,
+        IRemoteItemVisuals? remoteVisuals = null)
     {
         this.peers = peers;
         this.clock = clock;
@@ -52,7 +64,7 @@ internal sealed class SharedItemReplication : IDisposable
         else
         {
             guest = new GuestItemSession(peers, clock);
-            projection = new SharedItemProjection(inventory, objects, clock, peers.LocalParticipant);
+            projection = new SharedItemProjection(inventory, objects, clock, peers.LocalParticipant, remoteVisuals);
             guest.StateAccepted += OnStateChanged;
             guest.ResultAccepted += OnResult;
             guest.RegistrationAccepted += OnRegistrationAccepted;
@@ -226,7 +238,13 @@ internal sealed class SharedItemReplication : IDisposable
         if (state.Owner != peers.LocalParticipant) return false;
         return hostScene is not null ? !hostScene.Session.IsCraftReserved(state.Id) : !IsReservedItem(state.Id);
     }
-    internal bool CanChangePlacement(Item? item) => inventory.Applying || !IsTracked(item);
+    internal bool CanChangePlacement(Item? item)
+    {
+        if (inventory.Applying || !item) return true;
+        if (!TryGetState(item, out ItemState state)) return true;
+        return state.Owner == peers.LocalParticipant &&
+            (hostScene is null || !hostScene.Session.IsCraftReserved(state.Id));
+    }
     internal bool ApplyingAuthoritativeChange => inventory.Applying;
     internal Body? LocalBody => inventory.Body;
     internal ParticipantId LocalParticipant => peers.LocalParticipant;
@@ -312,8 +330,9 @@ internal sealed class SharedItemReplication : IDisposable
         {
             return hostScene.HandleWorldUpdate(item);
         }
-        return !TryGetState(item, out ItemState state) || state.Placement != ItemPlacement.World ||
-            !state.Owner.IsNone || inventory.Applying;
+        if (!TryGetState(item, out ItemState state)) return true;
+        if (!state.Owner.IsNone && state.Owner != peers.LocalParticipant) return false;
+        return state.Placement != ItemPlacement.World || !state.Owner.IsNone || inventory.Applying;
     }
 
     internal bool TryGetState(Item item, out ItemState state)
@@ -378,18 +397,31 @@ internal sealed class SharedItemReplication : IDisposable
                 continue;
             }
             if (crafting?.IsReserved(state.Id) == true) continue;
-            if (reported.TryGetValue(state.Id, out var previous) && previous.Revision == state.Revision)
-            {
-                continue;
-            }
             byte[] payload = ItemStateCodec.Capture(item!);
-            if (state.Payload.SequenceEqual(payload) && Mathf.Abs(state.Condition - item!.condition) < 0.001f)
+            (ItemPlacement placement, ulong parent, byte slot) = CurrentPlacement(item!);
+            ItemLocation location = SharedItemObjects.Read(item!);
+            bool authoritative = state.Payload.SequenceEqual(payload) &&
+                Mathf.Abs(state.Condition - item!.condition) < 0.001f && state.Placement == placement &&
+                state.Parent == parent && state.Slot == slot;
+            if (authoritative)
             {
+                if (reported.TryGetValue(state.Id, out ReportedState synced) && synced.Revision != state.Revision)
+                    reported[state.Id] = new ReportedState { Revision = state.Revision, Payload = payload,
+                        Condition = item.condition, Placement = placement, Parent = parent, Slot = slot,
+                        Location = location };
                 continue;
             }
-            if (guest.TryReportState(state.Id, state.Revision, item!.condition, payload))
+            float now = clock.Now;
+            if (reported.TryGetValue(state.Id, out ReportedState previous) && previous.Revision == state.Revision &&
+                previous.Payload.SequenceEqual(payload) && Mathf.Abs(previous.Condition - item!.condition) < 0.001f &&
+                previous.Placement == placement && previous.Parent == parent && previous.Slot == slot &&
+                now < previous.NextSend)
+                continue;
+            if (guest.TryReportState(state.Id, state.Revision, item!.condition, payload, placement, parent, slot, location))
             {
-                reported[state.Id] = (state.Revision, payload, item.condition);
+                reported[state.Id] = new ReportedState { Revision = state.Revision, Payload = payload,
+                    Condition = item.condition, Placement = placement, Parent = parent, Slot = slot,
+                    Location = location, NextSend = now + 1f };
             }
         }
     }
@@ -429,30 +461,8 @@ internal sealed class SharedItemReplication : IDisposable
             return false;
         }
 
-        ulong parent = 0;
-        byte slot = ItemWire.NoSlot;
-        ItemPlacement placement = ItemPlacement.World;
-        if (item.TryGetParentContainer(out Container container) && container.TryGetComponent<Item>(out Item containerItem))
-        {
-            if (!projection!.TryGetId(containerItem, out parent)) return false;
-            placement = ItemPlacement.Container;
-        }
-        else
-        {
-            for (int index = 0; index < body!.slots.Length; index++)
-            {
-                if (body.GetItem(index) == item)
-                {
-                    placement = ItemPlacement.Inventory;
-                    slot = (byte)index;
-                    break;
-                }
-            }
-            if (placement == ItemPlacement.World && body.GetAllWearables().Contains(item))
-            {
-                placement = ItemPlacement.Worn;
-            }
-        }
+        (ItemPlacement placement, ulong parent, byte slot) = CurrentPlacement(item);
+        if (placement == ItemPlacement.Container && parent == 0) return false;
         if (pendingRegistrations.Count >= 256)
         {
             return false;
@@ -507,6 +517,26 @@ internal sealed class SharedItemReplication : IDisposable
                 parent.TryGetParentContainer(out _);
         }
         return body.HoldingItem(item) || body.GetAllWearables().Contains(item);
+    }
+
+    private (ItemPlacement Placement, ulong Parent, byte Slot) CurrentPlacement(Item item)
+    {
+        Body? body = inventory.Body;
+        if (item.TryGetParentContainer(out Container container) &&
+            container.TryGetComponent<Item>(out Item containerItem))
+        {
+            return (ItemPlacement.Container,
+                projection!.TryGetId(containerItem, out ulong parent) ? parent : 0, ItemWire.NoSlot);
+        }
+        if (body)
+        {
+            for (int index = 0; index < body.slots.Length; index++)
+            {
+                if (body.GetItem(index) == item) return (ItemPlacement.Inventory, 0, (byte)index);
+            }
+            if (body.GetAllWearables().Contains(item)) return (ItemPlacement.Worn, 0, ItemWire.NoSlot);
+        }
+        return (ItemPlacement.World, 0, ItemWire.NoSlot);
     }
 
     internal bool RequestCraft(int recipe, ulong[] ids, uint[] revisions, out ulong operation) =>

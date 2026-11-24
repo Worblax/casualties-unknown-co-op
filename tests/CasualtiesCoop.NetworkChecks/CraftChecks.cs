@@ -92,7 +92,8 @@ internal static class CraftChecks
         Check.That(scenario.Host.TryGet(scenario.Stick, out ItemState state) && state.Condition == .5f && state.Revision == 2,
             "Condition and opaque state change atomically on the host.");
 
-        scenario.Guest(First).TryReportState(scenario.Stick, 1, 1f, new byte[] { 9 });
+        scenario.Guest(First).TryReportState(scenario.Stick, 1, 1f, new byte[] { 9 },
+            ItemPlacement.World, 0, ItemWire.NoSlot, default);
         scenario.Advance();
         Check.That(scenario.Host.TryGet(scenario.Stick, out state) && state.Revision == 2 && state.Condition == .5f,
             "A stale owner report cannot overwrite the committed state.");

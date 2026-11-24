@@ -1,6 +1,6 @@
 # Universal item sync handoff
 
-Protocol: 15. Plugin version: 0.1.19.
+Protocol: 16. Plugin version: 0.1.20.
 
 ## Current stopping point
 
@@ -14,8 +14,10 @@ powershell.exe -NoProfile -File ./scripts/Verify.ps1 -DotnetPath 'C:/Program Fil
 ```
 
 Latest result: Release build, ProtocolChecks, ArchitectureChecks, virtual-network
-NetworkChecks and every available Unity game scenario passed. Unity tests must run outside
-the sandbox in this environment because they replace DLLs under the Steam installation.
+NetworkChecks and every available Unity game scenario passed on 2026-11-25, including
+`tests/scenarios/items/guest-inventory-throw.json` (pickup -> long throw -> remote pickup ->
+throw back -> pickup). Unity tests must run outside the sandbox in this environment because
+they replace DLLs under the Steam installation.
 
 ## Landed P0 work
 
@@ -53,8 +55,15 @@ the sandbox in this environment because they replace DLLs under the Steam instal
   guest actions, registration, state reports, sampling and removal all use the same check.
 - Effective-owner (container-chain) reports are used for nested owned-item state. Stale owner
   reports are rejected and answered with current authority.
+- Inventory, hand, equipment and container moves of owned items are replicated by
+  placement-bearing `ItemStateReport`; the host validates effective ownership, slot occupancy,
+  parent access and cycles before committing the new revision.
+- Remote-owned held items remain visible and are attached to the corresponding hand anchor of
+  the remote character view. A long throw (velocity, spin and flight) releases that anchor and
+  becomes an ordinary world/inventory state, so a later pickup cannot leave a stale remote copy.
 - Craft commit wire adds updated-item placement/parent/slot/location and carries result
-  conditions. Protocol bumped 14 -> 15; plugin 0.1.18 -> 0.1.19.
+  conditions. Protocol bumped 14 -> 15 and plugin 0.1.18 -> 0.1.19 in `f4616ea`; the item
+  placement hotfix bumps protocol 15 -> 16 and plugin 0.1.19 -> 0.1.20.
 
 ## P0 regression coverage
 
@@ -62,6 +71,9 @@ the sandbox in this environment because they replace DLLs under the Steam instal
 native rejection, delete/update overlap, duplicate removal IDs, wrong recipe result, missing
 ingredient, local host mutation of a reserved item, reserved nested child blocking its parent,
 foreign-container registration, expiry, commit replay after reconnect and A-B-A registration.
+`PlacementReportMovesOwnedItem` covers a placement-bearing state report. The Unity scenario
+`items.guest-inventory-throw` covers remote inventory visibility, hand attachment, a long throw,
+remote pickup and throwing the same item back without a duplicate or stale projection.
 
 `tests/scenarios/items/concurrent-craft.json` now sets deterministic INT for both test bodies
 before the recipe, because recipe 0 uses `INT` to decide whether `SpawnResult` can produce rope.
@@ -83,11 +95,8 @@ This changes a precondition, not an expected outcome.
 
 ## Remaining P1
 
-- Grouped craft commit application on guests; craft changes still arrive as separate ItemDelta
-  messages.
-- Placement reports for arbitrary local container/equipment moves are intentionally blocked
-  for tracked items instead of being replicated. State-changing use of owned items is allowed
-  and sent through effective-owner reports.
+- Grouped craft commit application on guests is not complete; craft changes still arrive as
+  separate ItemDelta messages.
 - Fluid bandwidth split, unreliable latest-state fluid updates and neighbouring structural
   dependencies are not implemented.
 - World freshness is separated from initial readiness and gates item requests/crafting when
@@ -109,3 +118,5 @@ This changes a precondition, not an expected outcome.
   `Object.Destroy` within the active craft scope.
 - Use the actual vanilla `Recipe`/`RecipeItem`/`RecipeResult` definitions. Do not add a
   hand-maintained recipe table.
+- Placement reports must validate the effective owner through the container chain and must never
+  revive a stale remote copy after a throw or pickup.

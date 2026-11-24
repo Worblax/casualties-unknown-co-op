@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using CasualtiesCoop.Networking;
 using TMPro;
 using UnityEngine;
@@ -14,6 +15,22 @@ internal sealed class RemoteCharacterView : IDisposable
     private SpriteRenderer? head;
     private SpriteRenderer? eyes;
     private SpriteRenderer? nose;
+    private readonly struct HandAnchor
+    {
+        internal readonly Transform Parent;
+        internal readonly Vector3 Position;
+        internal readonly Quaternion Rotation;
+        internal readonly Vector3 Scale;
+
+        internal HandAnchor(Transform parent, Vector3 position, Quaternion rotation, Vector3 scale)
+        {
+            Parent = parent;
+            Position = position;
+            Rotation = rotation;
+            Scale = scale;
+        }
+    }
+    private readonly Dictionary<int, HandAnchor> hands = new();
 
     internal RemoteCharacterView(byte character, string displayName, TMP_FontAsset font)
     {
@@ -58,6 +75,22 @@ internal sealed class RemoteCharacterView : IDisposable
                     if (sprite == face.Eyes) eyes = renderer;
                     if (sprite == face.Nose) nose = renderer;
                 }
+            }
+        }
+        if (template)
+        {
+            for (int index = 0; index < template!.slots.Length; index++)
+            {
+                if (!template.slots[index].isHand) continue;
+                Transform slot = template.slots[index].transform;
+                int limbIndex = Array.FindIndex(template.limbs, limb => slot.IsChildOf(limb.transform));
+                Transform source = limbIndex >= 0 && limbIndex < limbs.Length
+                    ? limbs[limbIndex].transform : root.transform;
+                Vector3 sourceScale = source.lossyScale;
+                Vector3 slotScale = slot.lossyScale;
+                hands[index] = new HandAnchor(source, source.InverseTransformPoint(slot.position),
+                    Quaternion.Inverse(source.rotation) * slot.rotation,
+                    new Vector3(slotScale.x / sourceScale.x, slotScale.y / sourceScale.y, 1f));
             }
         }
 
@@ -143,6 +176,32 @@ internal sealed class RemoteCharacterView : IDisposable
     }
 
     internal void Hide() => root.SetActive(false);
+
+    internal bool AttachHeldItem(byte slot, Item item)
+    {
+        if (!item || !hands.TryGetValue(slot, out HandAnchor anchor)) return false;
+        item.transform.SetParent(anchor.Parent, false);
+        item.transform.localPosition = anchor.Position;
+        item.transform.localRotation = anchor.Rotation;
+        item.transform.localScale = anchor.Scale;
+        item.rb.simulated = false;
+        item.gameObject.SetActive(true);
+        SpriteRenderer? source = anchor.Parent.GetComponentInChildren<SpriteRenderer>(true);
+        SpriteRenderer? sprite = item.GetComponent<SpriteRenderer>();
+        if (sprite)
+        {
+            sprite.enabled = true;
+            if (source) sprite.sortingOrder = source.sortingOrder + 1;
+        }
+        return true;
+    }
+
+    internal void DetachHeldItem(Item item)
+    {
+        if (!item || !item.transform.IsChildOf(root.transform)) return;
+        item.transform.SetParent(null, true);
+        item.gameObject.SetActive(false);
+    }
 
     public void Dispose() => UnityEngine.Object.Destroy(root);
 }

@@ -64,7 +64,7 @@ internal sealed class VirtualSessionCluster : IDisposable
     {
         Body = body;
         origin = body.transform.position;
-        bool guestCraft = scenario.Steps.Any(UsesGuestCraft);
+        bool guestCraft = scenario.Steps.Any(UsesGuestCraft) || scenario.Steps.Any(UsesGuestItemReplication);
         terrainFixture = scenario.Level == "UNITY_GUEST" && scenario.Steps.Any(s => s.Value<string>("op") == "terrain.state");
         standaloneItems = scenario.StandaloneItems;
         Network = new SimulatedNetwork(scenario.Seed, scenario.Profile);
@@ -177,6 +177,11 @@ internal sealed class VirtualSessionCluster : IDisposable
         command.Value<string>("op") == "item.craft" && command["peer"] is not null ||
         command["actions"] is JArray actions &&
         actions.Cast<JObject>().Any(UsesGuestCraft);
+
+    private static bool UsesGuestItemReplication(JObject command) =>
+        command.Value<string>("op") is "item.throw" or "item.swap" ||
+        command["actions"] is JArray actions &&
+        actions.Cast<JObject>().Any(UsesGuestItemReplication);
 
     internal IEnumerable<Actor> Guests => Actors.Values.Where(actor => actor.Guest is not null);
     internal bool Ready => Guests.All(actor => actor.Guest!.Synced);
