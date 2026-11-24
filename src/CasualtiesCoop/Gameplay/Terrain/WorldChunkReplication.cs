@@ -91,6 +91,16 @@ internal sealed class WorldChunkReplication
         return guest.HasNear(cell.x, cell.y, 2);
     }
 
+    // Initial readiness keeps recovery/startup from waiting forever after the first useful
+    // snapshot. Interactive item operations use current chunk freshness instead.
+    internal bool IsCurrentNear(Vector2 at) => peers.IsHost || HasNear(at);
+
+    internal bool IsCurrentAtPlayer()
+    {
+        if (peers.IsHost) return true;
+        return position(peers.LocalPlayer, out Vector2 at) && IsCurrentNear(at);
+    }
+
     internal void MarkChanged(Vector2Int cell)
     {
         if (cell.x >= 0 && cell.y >= 0) host?.MarkDirty(WorldChunkKey.At(cell.x, cell.y));
@@ -134,7 +144,7 @@ internal sealed class WorldChunkReplication
                 ready = false;
                 initialDeadline = clock.Now + GuestRecovery.AttemptTimeout;
             }
-            ready |= guest.HasNear(x, y, 2);
+            if (!ready && guest.HasNear(x, y, 2)) ready = true;
             ReportMetrics(guest.Metrics);
         }
     }

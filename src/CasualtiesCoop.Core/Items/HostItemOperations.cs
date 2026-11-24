@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using CasualtiesCoop.Core.Session;
 using CasualtiesCoop.Gameplay.Items;
 
@@ -8,11 +10,25 @@ internal interface IItemWorld
 {
     ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition);
     bool TryPickUp(ParticipantId player, ulong item, byte slot, out float condition);
-    ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location, out float condition);
+    ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
+        out float condition);
     bool TryApplyState(ulong item, byte[] payload);
-    bool HasRecipe(int recipe);
+    bool TryGetRecipe(int recipe, out CraftRecipePlan? plan);
     ItemDecision CheckCraftIngredient(ParticipantId player, ulong item);
+    ICraftWorldTransaction? BeginCraft(ItemCraftCommit commit, CraftRecipePlan plan,
+        IReadOnlyList<ItemState> ingredients);
+    bool IsKnownDefinition(string definition);
+    ItemDecision CheckRegistration(ParticipantId player, SharedItemRegistration registration, ItemState? parent);
     void RemoveItem(ulong item);
+}
+
+// Native changes for one craft commit. BeginCraft must validate and snapshot without mutating the
+// world. TryApply must apply everything or leave the world unchanged.
+internal interface ICraftWorldTransaction : IDisposable
+{
+    bool TryApply();
+    bool Bind(IReadOnlyList<CraftCreatedResult> results, IReadOnlyList<CraftCreatedItem> specs);
+    void Confirm();
 }
 
 internal sealed class HostItemOperations
@@ -57,8 +73,9 @@ internal sealed class HostItemOperations
     internal ItemDecision Execute(ParticipantId player, SharedItemRequest request, out ItemState? change)
     {
         change = null;
-        if (executing || player.IsNone || request.Slot == ItemWire.NoSlot || !items.TryGet(request.ItemId, out ItemState state) ||
-            state.Removed || state.Revision != request.Revision)
+        if (executing || player.IsNone || request.Slot == ItemWire.NoSlot ||
+            !items.TryGet(request.ItemId, out ItemState state) || state.Removed ||
+            state.Revision != request.Revision)
         {
             return ItemDecision.Unavailable;
         }
@@ -70,12 +87,14 @@ internal sealed class HostItemOperations
             float condition;
             if (request.Action == ItemAction.PickUp && state.Owner.IsNone)
             {
-                decision = world.CheckPickup(player, state.Id, request.Slot, items.PreviousWorldPosition(state.Id, clock.Now));
+                decision = world.CheckPickup(player, state.Id, request.Slot,
+                    items.PreviousWorldPosition(state.Id, clock.Now));
                 if (decision != ItemDecision.Accepted)
                 {
                     return decision;
                 }
-                if (items.Occupied(player, request.Slot) || !world.TryPickUp(player, state.Id, request.Slot, out condition))
+                if (items.Occupied(player, request.Slot) ||
+                    !world.TryPickUp(player, state.Id, request.Slot, out condition))
                 {
                     return ItemDecision.SlotOccupied;
                 }
@@ -84,7 +103,8 @@ internal sealed class HostItemOperations
                 return ItemDecision.Accepted;
             }
 
-            if (request.Action is not (ItemAction.Drop or ItemAction.Throw) || state.Owner != player || state.Slot != request.Slot)
+            if (request.Action is not (ItemAction.Drop or ItemAction.Throw) || state.Owner != player ||
+                state.Slot != request.Slot)
             {
                 return ItemDecision.Unavailable;
             }

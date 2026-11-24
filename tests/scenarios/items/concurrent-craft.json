@@ -11,6 +11,8 @@
     { "op": "peer.add", "id": "host", "role": "host" },
     { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
     { "op": "character.spawn", "id": "right", "character": 0, "position": [3, 0] },
+    { "op": "character.intelligence", "target": "left", "value": 5 },
+    { "op": "character.intelligence", "target": "right", "value": 5 },
     { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
     { "op": "peer.add", "id": "bob", "role": "guest", "mode": "NativeActor", "body": "right" },
     { "op": "item.spawn", "id": "fernA", "catalogId": "foliage", "position": [-0.6, 0.5] },

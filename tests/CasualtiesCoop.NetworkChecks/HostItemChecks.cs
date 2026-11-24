@@ -128,11 +128,15 @@ internal static class HostItemChecks
             return RejectDrop ? ItemDecision.Unavailable : ItemDecision.Accepted;
         }
 
-        public bool HasRecipe(int recipe) => true;
+        public bool TryGetRecipe(int recipe, out CraftRecipePlan? plan) => RecipeCatalog.TryGet(recipe, out plan);
 
         public ItemDecision CheckCraftIngredient(ParticipantId player, ulong item) => ItemDecision.Accepted;
 
         public void RemoveItem(ulong item) { }
+        public ICraftWorldTransaction? BeginCraft(ItemCraftCommit commit, CraftRecipePlan plan,
+            IReadOnlyList<ItemState> ingredients) => new NoOpCraftTransaction();
+        public bool IsKnownDefinition(string definition) => true;
+        public ItemDecision CheckRegistration(ParticipantId player, SharedItemRegistration registration, ItemState? parent) => ItemDecision.Accepted;
 
         public bool TryApplyState(ulong item, byte[] payload)
         {

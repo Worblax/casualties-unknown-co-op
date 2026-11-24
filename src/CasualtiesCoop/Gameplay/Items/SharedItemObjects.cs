@@ -10,6 +10,7 @@ internal sealed class SharedItemObjects
     private readonly Dictionary<string, GameObject?> prefabs = new(StringComparer.Ordinal);
 
     internal bool Supports(Item item) => GetPrefab(item.id);
+    internal bool SupportsDefinition(string definition) => GetPrefab(definition);
 
     private GameObject? GetPrefab(string definition)
     {

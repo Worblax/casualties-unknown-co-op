@@ -88,6 +88,10 @@ internal static class WireCompatibilityChecks
             Revisions = new[] { Revision, Revision } };
         Require(ItemCraftWire.TryReadRequest(ItemCraftWire.WriteRequest(Session, craft), Session, out ItemCraftRequest craftRead) &&
             craftRead.Recipe == 4 && craftRead.ItemIds.Length == 2, "Craft reservation request round trips");
+        var reusable = new ItemCraftRequest { Operation = Operation, Recipe = 4,
+            ItemIds = new[] { ItemId, ItemId }, Revisions = new[] { Revision, Revision } };
+        Require(ItemCraftWire.TryReadRequest(ItemCraftWire.WriteRequest(Session, reusable), Session, out ItemCraftRequest reusableRead) &&
+            reusableRead.ItemIds[0] == reusableRead.ItemIds[1], "Reusable recipe requirements may name one instance twice");
         byte[] craftResult = ItemCraftWire.WriteResult(Session, Operation, 4, ItemDecision.Accepted);
         Require(ItemCraftWire.TryReadResult(craftResult, Session, out _, out int recipe, out ItemDecision result) &&
             recipe == 4 && result == ItemDecision.Accepted, "Craft result round trips");
@@ -96,10 +100,15 @@ internal static class WireCompatibilityChecks
         commit.Updated.Add(new CraftUpdatedItem { Id = ItemId + 1, Revision = Revision, Condition = .5f,
             Payload = new byte[] { 2 } });
         commit.Created.Add(new CraftCreatedItem { ClientKey = ItemId + 2, Definition = "stick",
-            Placement = ItemPlacement.Inventory, Slot = 2, Location = new ItemLocation(1, 2, 3), Payload = new byte[] { 3 } });
+            Placement = ItemPlacement.Inventory, Slot = 2, Condition = .8f, Location = new ItemLocation(1, 2, 3),
+            Payload = new byte[] { 3 } });
         Require(ItemCraftWire.TryReadCommit(ItemCraftWire.WriteCommit(Session, commit), Session, out ItemCraftCommit commitRead) &&
             commitRead.Removed.Count == 1 && commitRead.Updated.Count == 1 && commitRead.Created.Count == 1 &&
-            commitRead.Created[0].Definition == "stick", "Atomic craft commit round trips");
+            commitRead.Created[0].Definition == "stick" && commitRead.Created[0].Condition == .8f &&
+            commitRead.Updated[0].Condition == .5f, "Atomic craft commit round trips with conditions");
+        Require(ItemCraftWire.TryReadCancel(ItemCraftWire.WriteCancel(Session, Operation, 4), Session,
+            out ulong cancelOperation, out int cancelRecipe) && cancelOperation == Operation && cancelRecipe == 4,
+            "Craft cancellation round trips");
     }
     private static void FluidFrames()
     {

@@ -137,6 +137,12 @@ internal sealed class CharacterFixtures : IDisposable
         body.maxSpeed = Scalar(command, "maxSpeed", 0.5f, 20);
     }
 
+    internal void Intelligence(JObject command)
+    {
+        Body body = Get(String(command, "target"));
+        body.skills.INT = Integer(command, "value", -10, 20);
+    }
+
     internal void Place(JObject command)
     {
         Body body = Get(String(command, "target"));

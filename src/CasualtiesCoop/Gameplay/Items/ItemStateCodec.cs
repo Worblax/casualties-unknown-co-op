@@ -13,13 +13,15 @@ namespace CasualtiesCoop.Gameplay.Items;
 
 internal static class ItemStateCodec
 {
-    private const byte Version = 2;
+    private const byte Version = 3;
     private const byte FlagFavourited = 1;
     private const byte FlagLabel = 2;
     private const byte FlagLight = 4;
     private const byte FlagCustom = 8;
     private const float WetDuration = 120f;
-    private const int MaxDepth = 4;
+    private const int MaxDepth = 8;
+    private const int MaxStringBytes = 4096;
+    private const int MaxCollectionItems = 4096;
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
     private static readonly Type[] ComponentTypes = BuildComponentCatalog();
     private static readonly Dictionary<Type, ushort> ComponentIndexes = ComponentTypes
@@ -35,6 +37,8 @@ internal static class ItemStateCodec
         if (!string.IsNullOrEmpty(item.label)) flags |= FlagLabel;
         LightItem? light = item.GetComponent<LightItem>();
         if (light) flags |= FlagLight;
+        CustomItemBehaviour? custom = item.GetComponent<CustomItemBehaviour>();
+        if (custom) flags |= FlagCustom;
         writer.Write(Version);
         writer.Write(flags);
         writer.Write((byte)Mathf.Clamp(item.colorSwatch, 0, byte.MaxValue));
@@ -45,7 +49,10 @@ internal static class ItemStateCodec
 
         Component[] components = item.GetComponents<Component>()
             .Where(component => ComponentIndexes.ContainsKey(component.GetType())).ToArray();
-        writer.Write((byte)Math.Min(components.Length, byte.MaxValue));
+        if (components.Length > byte.MaxValue ||
+            components.Select(component => component.GetType()).Distinct().Count() != components.Length)
+            throw new InvalidDataException();
+        writer.Write((byte)components.Length);
         foreach (Component component in components)
         {
             writer.Write(ComponentIndexes[component.GetType()]);
@@ -55,12 +62,28 @@ internal static class ItemStateCodec
             }
         }
 
-        if (light) writer.Write(light!.shouldEnable);
+        if (custom)
+        {
+            writer.Write(custom.state);
+            WriteCustomData(writer, custom.data);
+        }
+        if (light)
+        {
+            writer.Write(light!.shouldEnable);
+            writer.Write(light.inContainer);
+            writer.Write(light.light && light.light.enabled);
+        }
         writer.Flush();
         return stream.ToArray();
     }
 
-    internal static bool TryApply(Item item, byte[] bytes, float condition, ItemPlacement placement)
+    internal static bool CanApply(Item item, byte[] bytes) =>
+        TryApply(item, bytes, item.condition, ItemPlacement.World, mutate: false);
+
+    internal static bool TryApply(Item item, byte[] bytes, float condition, ItemPlacement placement) =>
+        TryApply(item, bytes, condition, placement, mutate: true);
+
+    private static bool TryApply(Item item, byte[] bytes, float condition, ItemPlacement placement, bool mutate)
     {
         if (bytes is not { Length: > 8 })
         {
@@ -75,33 +98,49 @@ internal static class ItemStateCodec
                 return false;
             }
             byte flags = reader.ReadByte();
+            if ((flags & ~(FlagFavourited | FlagLabel | FlagLight | FlagCustom)) != 0) return false;
             int swatch = reader.ReadByte();
             float wetSeconds = reader.ReadUInt16();
             float decay = reader.ReadSingle();
             string? label = (flags & FlagLabel) != 0 ? ReadString(reader) : null;
             int componentCount = reader.ReadByte();
             var values = new List<(Component Component, FieldInfo Field, object? Value)>();
+            var componentTypes = new HashSet<ushort>();
+            bool missingComponent = false;
             for (int index = 0; index < componentCount; index++)
             {
                 ushort typeIndex = reader.ReadUInt16();
-                if (typeIndex >= ComponentTypes.Length)
+                if (typeIndex >= ComponentTypes.Length || !componentTypes.Add(typeIndex))
                 {
                     return false;
                 }
                 Type type = ComponentTypes[typeIndex];
                 Component? component = item.GetComponent(type);
+                if (!component) missingComponent = true;
                 foreach (FieldInfo field in FieldsFor(type, component: true))
                 {
                     object? value = ReadValue(reader, field.FieldType, depth: 0);
+                    if (!CanAssign(field.FieldType, value)) return false;
                     if (component) values.Add((component!, field, value));
                 }
             }
+            int customState = 0;
+            object?[]? customData = null;
+            if ((flags & FlagCustom) != 0)
+            {
+                customState = reader.ReadInt32();
+                customData = ReadCustomData(reader);
+            }
             bool? lightEnabled = (flags & FlagLight) != 0 ? reader.ReadBoolean() : null;
+            bool? lightInContainer = (flags & FlagLight) != 0 ? reader.ReadBoolean() : null;
+            bool? lightActive = (flags & FlagLight) != 0 ? reader.ReadBoolean() : null;
             if (stream.Position != stream.Length)
             {
                 return false;
             }
+            if (missingComponent) return false;
 
+            if (!mutate) return true;
             item.condition = Mathf.Clamp01(condition);
             item.favourited = (flags & FlagFavourited) != 0;
             item.label = label;
@@ -112,16 +151,24 @@ internal static class ItemStateCodec
             {
                 value.Field.SetValue(value.Component, value.Value);
             }
+            CustomItemBehaviour? custom = item.GetComponent<CustomItemBehaviour>();
+            if ((flags & FlagCustom) != 0)
+            {
+                if (!custom) return false;
+                custom.state = customState;
+                custom.data = customData;
+            }
             LightItem? light = item.GetComponent<LightItem>();
+            if ((flags & FlagLight) != 0 && !light) return false;
             if (light && lightEnabled.HasValue)
             {
                 light!.shouldEnable = lightEnabled.Value;
-                light.inContainer = placement == ItemPlacement.Container;
+                light.inContainer = placement == ItemPlacement.Container || lightInContainer == true;
+                if (light.light) light.light.enabled = lightActive == true;
             }
             return true;
         }
-        catch (Exception exception) when (exception is IOException or DecoderFallbackException or ArgumentException or
-            InvalidCastException or OverflowException)
+        catch (Exception)
         {
             return false;
         }
@@ -164,6 +211,7 @@ internal static class ItemStateCodec
     private static void WriteValue(BinaryWriter writer, Type type, object? value, int depth)
     {
         if (depth > MaxDepth) throw new InvalidDataException("Item state nesting is too deep.");
+        if (type == typeof(object)) { WriteObject(writer, value); return; }
         if (type == typeof(string)) { WriteString(writer, (string?)value); return; }
         if (type == typeof(bool)) { writer.Write((bool)(value ?? false)); return; }
         if (type.IsEnum) { WriteValue(writer, Enum.GetUnderlyingType(type), value, depth); return; }
@@ -181,17 +229,17 @@ internal static class ItemStateCodec
         if (type.IsArray)
         {
             var array = (Array?)value;
-            writer.Write(array is null ? ushort.MaxValue : (ushort)Math.Min(array.Length, ushort.MaxValue));
-            for (int index = 0; array is not null && index < array.Length && index < ushort.MaxValue; index++)
+            WriteCollectionCount(writer, array?.Length);
+            for (int index = 0; array is not null && index < array.Length; index++)
                 WriteValue(writer, type.GetElementType()!, array.GetValue(index), depth + 1);
             return;
         }
         if (typeof(IList).IsAssignableFrom(type))
         {
             var list = (IList?)value;
-            writer.Write(list is null ? ushort.MaxValue : (ushort)Math.Min(list.Count, ushort.MaxValue));
+            WriteCollectionCount(writer, list?.Count);
             Type element = type.IsGenericType ? type.GetGenericArguments()[0] : typeof(object);
-            for (int index = 0; list is not null && index < list.Count && index < ushort.MaxValue; index++)
+            for (int index = 0; list is not null && index < list.Count; index++)
                 WriteValue(writer, element, list[index], depth + 1);
             return;
         }
@@ -208,56 +256,41 @@ internal static class ItemStateCodec
 
     private static void WriteCustomData(BinaryWriter writer, object?[]? data)
     {
-        if (data is null) { writer.Write(ushort.MaxValue); return; }
-        int count = Math.Min(data.Length, ushort.MaxValue - 1);
-        writer.Write((ushort)count);
-        for (int index = 0; index < count; index++)
-        {
-            object? value = data[index];
-            switch (value)
-            {
-                case null: writer.Write((byte)0); break;
-                case int number: writer.Write((byte)1); writer.Write(number); break;
-                case float number: writer.Write((byte)2); writer.Write(number); break;
-                case bool flag: writer.Write((byte)3); writer.Write(flag); break;
-                case string text: writer.Write((byte)4); WriteString(writer, text); break;
-                default: writer.Write((byte)0); break;
-            }
-        }
+        WriteCollectionCount(writer, data?.Length);
+        for (int index = 0; data is not null && index < data.Length; index++) WriteObject(writer, data[index]);
     }
 
     private static object?[]? ReadCustomData(BinaryReader reader)
     {
-        ushort count = reader.ReadUInt16();
-        if (count == ushort.MaxValue) return null;
+        int count = ReadCollectionCount(reader);
+        if (count < 0) return null;
         var data = new object?[count];
         for (int index = 0; index < count; index++)
         {
-            data[index] = reader.ReadByte() switch
-            {
-                1 => reader.ReadInt32(),
-                2 => reader.ReadSingle(),
-                3 => reader.ReadBoolean(),
-                4 => ReadString(reader),
-                _ => null
-            };
+            data[index] = ReadObject(reader, 0);
         }
         return data;
     }
     private static void WriteString(BinaryWriter writer, string? value)
     {
-        if (value is null) { writer.Write(ushort.MaxValue); return; }
+        if (value is null) { writer.Write(-1); return; }
         byte[] bytes = Utf8.GetBytes(value);
-        int length = Math.Min(bytes.Length, ushort.MaxValue);
-        writer.Write((ushort)length);
-        writer.Write(bytes, 0, length);
+        if (bytes.Length > MaxStringBytes) throw new InvalidDataException();
+        writer.Write(bytes.Length);
+        writer.Write(bytes);
     }
     private static object? ReadValue(BinaryReader reader, Type type, int depth)
     {
         if (depth > MaxDepth) throw new InvalidDataException("Item state nesting is too deep.");
         if (type == typeof(string)) return ReadString(reader);
         if (type == typeof(bool)) return reader.ReadBoolean();
-        if (type.IsEnum) return Enum.ToObject(type, ReadValue(reader, Enum.GetUnderlyingType(type), depth)!);
+        if (type.IsEnum)
+        {
+            object raw = ReadValue(reader, Enum.GetUnderlyingType(type), depth)!;
+            object result = Enum.ToObject(type, raw);
+            if (!IsValidEnum(type, result)) throw new InvalidDataException();
+            return result;
+        }
         if (type == typeof(byte)) return reader.ReadByte();
         if (type == typeof(sbyte)) return reader.ReadSByte();
         if (type == typeof(short)) return reader.ReadInt16();
@@ -266,13 +299,13 @@ internal static class ItemStateCodec
         if (type == typeof(uint)) return reader.ReadUInt32();
         if (type == typeof(long)) return reader.ReadInt64();
         if (type == typeof(ulong)) return reader.ReadUInt64();
-        if (type == typeof(float)) return reader.ReadSingle();
-        if (type == typeof(double)) return reader.ReadDouble();
+        if (type == typeof(float)) return ReadFinite(reader.ReadSingle());
+        if (type == typeof(double)) return ReadFinite(reader.ReadDouble());
         if (type == typeof(char)) return reader.ReadChar();
         if (type.IsArray)
         {
-            ushort count = reader.ReadUInt16();
-            if (count == ushort.MaxValue) return null;
+            int count = ReadCollectionCount(reader);
+            if (count < 0) return null;
             Type element = type.GetElementType()!;
             Array array = Array.CreateInstance(element, count);
             for (int index = 0; index < count; index++) array.SetValue(ReadValue(reader, element, depth + 1), index);
@@ -280,13 +313,14 @@ internal static class ItemStateCodec
         }
         if (typeof(IList).IsAssignableFrom(type))
         {
-            ushort count = reader.ReadUInt16();
-            if (count == ushort.MaxValue) return null;
+            int count = ReadCollectionCount(reader);
+            if (count < 0) return null;
             Type element = type.IsGenericType ? type.GetGenericArguments()[0] : typeof(object);
             var list = (IList)Activator.CreateInstance(type)!;
             for (int index = 0; index < count; index++) list.Add(ReadValue(reader, element, depth + 1));
             return list;
         }
+        if (type == typeof(object)) return ReadObject(reader, depth);
         if (!type.IsValueType)
         {
             if (!reader.ReadBoolean()) return null;
@@ -307,9 +341,72 @@ internal static class ItemStateCodec
         throw new InvalidDataException($"Unsupported item state field type {type}.");
     }
 
+    private static void WriteCollectionCount(BinaryWriter writer, int? count)
+    {
+        if (count is null) { writer.Write(-1); return; }
+        if (count < 0 || count > MaxCollectionItems) throw new InvalidDataException();
+        writer.Write(count.Value);
+    }
+
+    private static int ReadCollectionCount(BinaryReader reader)
+    {
+        int count = reader.ReadInt32();
+        if (count == -1) return -1;
+        if (count is < 0 or > MaxCollectionItems) throw new InvalidDataException();
+        return count;
+    }
+
+    private static void WriteObject(BinaryWriter writer, object? value)
+    {
+        switch (value)
+        {
+            case null: writer.Write((byte)0); break;
+            case int number: writer.Write((byte)1); writer.Write(number); break;
+            case float number: writer.Write((byte)2); writer.Write(ReadFinite(number)); break;
+            case bool flag: writer.Write((byte)3); writer.Write(flag); break;
+            case string text: writer.Write((byte)4); WriteString(writer, text); break;
+            default: throw new InvalidDataException();
+        }
+    }
+
+    private static object? ReadObject(BinaryReader reader, int depth) => reader.ReadByte() switch
+    {
+        0 => null,
+        1 => reader.ReadInt32(),
+        2 => ReadFinite(reader.ReadSingle()),
+        3 => reader.ReadBoolean(),
+        4 => ReadString(reader),
+        _ => throw new InvalidDataException()
+    };
+
+    private static float ReadFinite(float value) => float.IsFinite(value)
+        ? value : throw new InvalidDataException();
+
+    private static double ReadFinite(double value) => double.IsFinite(value)
+        ? value : throw new InvalidDataException();
+
+    private static bool IsValidEnum(Type type, object value)
+    {
+        if (Enum.IsDefined(type, value)) return true;
+        if (type.GetCustomAttribute<FlagsAttribute>() is null) return false;
+        ulong bits = Convert.ToUInt64(value);
+        ulong known = 0;
+        foreach (object item in Enum.GetValues(type)) known |= Convert.ToUInt64(item);
+        return (bits & ~known) == 0;
+    }
+
+    private static bool CanAssign(Type type, object? value)
+    {
+        if (value is null) return !type.IsValueType || Nullable.GetUnderlyingType(type) is not null;
+        return type.IsInstanceOfType(value);
+    }
+
     private static string? ReadString(BinaryReader reader)
     {
-        ushort length = reader.ReadUInt16();
-        return length == ushort.MaxValue ? null : Utf8.GetString(reader.ReadBytes(length));
+        int length = reader.ReadInt32();
+        if (length == -1) return null;
+        if (length is < 0 or > MaxStringBytes || reader.BaseStream.Length - reader.BaseStream.Position < length)
+            throw new InvalidDataException();
+        return Utf8.GetString(reader.ReadBytes(length));
     }
 }

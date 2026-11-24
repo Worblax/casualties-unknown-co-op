@@ -97,6 +97,21 @@ internal sealed class GuestItemSession : IDisposable
 
     internal bool TryCommitCraft(ItemCraftCommit commit) =>
         Synced && commit.Operation != 0 && peers.Send(peers.Host, ItemCraftWire.WriteCommit(peers.SessionId, commit));
+
+    internal bool TryResendCraft(ulong operation, int recipe, ulong[] ids, uint[] revisions)
+    {
+        if (!Synced || operation == 0 || operation != lastCraftOperation || recipe < 0 || ids is null ||
+            revisions is null || ids.Length != revisions.Length)
+            return false;
+        return peers.Send(peers.Host, ItemCraftWire.WriteRequest(peers.SessionId, new ItemCraftRequest
+        {
+            Operation = operation, Recipe = recipe, ItemIds = ids, Revisions = revisions
+        }));
+    }
+
+    internal bool TryCancelCraft(ulong operation, int recipe) =>
+        Synced && operation != 0 && recipe >= 0 && peers.IsVerified(peers.Host) &&
+        peers.Send(peers.Host, ItemCraftWire.WriteCancel(peers.SessionId, operation, recipe));
     internal bool TryRegister(SharedItemRegistration registration, out ulong clientKey)
     {
         clientKey = 0;
@@ -107,6 +122,13 @@ internal sealed class GuestItemSession : IDisposable
         }
         registration.Operation = ++lastRegistrationOperation;
         registration.ClientKey = clientKey = ++nextClientKey;
+        return peers.Send(peers.Host, ItemWire.WriteRegistration(peers.SessionId, registration));
+    }
+
+    internal bool TryResendRegistration(SharedItemRegistration registration)
+    {
+        if (!Synced || registration.ClientKey == 0 || lastRegistrationOperation == ulong.MaxValue) return false;
+        registration.Operation = ++lastRegistrationOperation;
         return peers.Send(peers.Host, ItemWire.WriteRegistration(peers.SessionId, registration));
     }
 
@@ -122,6 +144,8 @@ internal sealed class GuestItemSession : IDisposable
             SendRequest(request);
         }
     }
+
+    internal void InvalidateSnapshot() => snapshot.MarkOutOfSync();
 
     internal void SuspendForRecovery()
     {

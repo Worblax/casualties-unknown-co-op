@@ -27,8 +27,8 @@ internal static class CraftChecks
     private static void ConcurrentFloorCraft()
     {
         using var scenario = new Scenario();
-        bool firstSent = scenario.Guest(First).TryRequestCraft(0, new[] { scenario.Stick }, new[] { 1u }, out ulong first);
-        bool secondSent = scenario.Guest(Second).TryRequestCraft(0, new[] { scenario.Stick }, new[] { 1u }, out ulong second);
+        bool firstSent = scenario.Guest(First).TryRequestCraft(11, new[] { scenario.Stick }, new[] { 1u }, out ulong first);
+        bool secondSent = scenario.Guest(Second).TryRequestCraft(11, new[] { scenario.Stick }, new[] { 1u }, out ulong second);
         Check.That(firstSent && secondSent, "Both guests can ask the host about the same floor ingredient.");
         scenario.Advance();
 
@@ -36,19 +36,22 @@ internal static class CraftChecks
             "The host grants one reservation and rejects the competing floor craft.");
         Check.That(scenario.Host.IsCraftReserved(scenario.Stick), "The reserved world item is locked for other mutations.");
 
-        var commit = new ItemCraftCommit { Operation = first, Recipe = 0 };
+        var commit = new ItemCraftCommit { Operation = first, Recipe = 11 };
         commit.Removed.Add(scenario.Stick);
         commit.Created.Add(new CraftCreatedItem
         {
-            ClientKey = 90, Definition = "knife", Placement = ItemPlacement.Inventory, Slot = 0,
+            ClientKey = 90, Definition = "rope", Placement = ItemPlacement.Inventory, Slot = 0, Condition = 1f,
             Location = new ItemLocation(1, 2, 0), Payload = new byte[] { 7, 7 }
         });
         Check.That(scenario.Guest(First).TryCommitCraft(commit), "The winner sends one atomic craft commit.");
         scenario.Advance();
 
-        Check.That(!scenario.Host.TryGet(scenario.Stick, out _) && !scenario.Guest(First).Replicas.TryGet(scenario.Stick, out _) &&
-            !scenario.Guest(Second).Replicas.TryGet(scenario.Stick, out _), "A consumed floor ingredient disappears everywhere.");
-        Check.That(scenario.Host.TryGet(scenario.Created, out ItemState crafted) && crafted.Definition == "knife" &&
+        bool hostHas = scenario.Host.TryGet(scenario.Stick, out _);
+        bool firstHas = scenario.Guest(First).Replicas.TryGet(scenario.Stick, out _);
+        bool secondHas = scenario.Guest(Second).Replicas.TryGet(scenario.Stick, out _);
+        Check.That(!hostHas && !firstHas && !secondHas,
+            $"A consumed floor ingredient disappears everywhere (craft results: {string.Join(" | ", scenario.FirstCraftResults)}).");
+        Check.That(scenario.Host.TryGet(scenario.Created, out ItemState crafted) && crafted.Definition == "rope" &&
             crafted.Owner == scenario.Participant(First) && crafted.Slot == 0, "The crafted result belongs to its creator.");
         Check.That(scenario.Guest(Second).Replicas.TryGet(scenario.Created, out ItemState remote) && remote.Owner == scenario.Participant(First),
             "Other clients receive the result state while it stays in the creator's inventory.");
@@ -71,13 +74,18 @@ internal static class CraftChecks
     private static void StaleReportsAndDuplicateCommit()
     {
         using var scenario = new Scenario();
-        Check.That(scenario.Guest(First).TryRequestCraft(0, new[] { scenario.Stick }, new[] { 1u }, out ulong operation),
+        Check.That(scenario.Guest(First).TryRequestCraft(2, new[] { scenario.Stick }, new[] { 1u }, out ulong operation),
             "A craft reservation starts.");
         scenario.Advance();
-        var commit = new ItemCraftCommit { Operation = operation, Recipe = 0 };
+        var commit = new ItemCraftCommit { Operation = operation, Recipe = 2 };
         commit.Updated.Add(new CraftUpdatedItem
         {
             Id = scenario.Stick, Revision = 1, Condition = .5f, Payload = new byte[] { 2, 3 }
+        });
+        commit.Created.Add(new CraftCreatedItem
+        {
+            ClientKey = 77, Definition = "knife", Placement = ItemPlacement.Inventory, Slot = 1,
+            Condition = 1f, Location = new ItemLocation(2, 3, 0), Payload = new byte[] { 4 }
         });
         Check.That(scenario.Guest(First).TryCommitCraft(commit), "A partial-consumption craft commits an updated ingredient.");
         scenario.Advance();
@@ -128,7 +136,7 @@ internal static class CraftChecks
             hostPeers.AttachReceiver((sender, frame) => Host.Receive(sender, frame, worldReady: true));
             firstPeers.AttachReceiver(FirstGuest.Receive);
             secondPeers.AttachReceiver(SecondGuest.Receive);
-            FirstGuest.CraftResultAccepted += (_, _, decision) => FirstCraft = decision;
+            FirstGuest.CraftResultAccepted += (_, _, decision) => { FirstCraft = decision; FirstCraftResults.Add(decision); };
             SecondGuest.CraftResultAccepted += (_, _, decision) => SecondCraft = decision;
             FirstGuest.RegistrationAccepted += (_, id, _) => Registered = id;
             Host.TryRegister("stick", default, 1, out Stick);
@@ -144,6 +152,7 @@ internal static class CraftChecks
 
         internal GuestItemSession FirstGuest { get; }
         internal GuestItemSession SecondGuest { get; }
+        internal readonly List<ItemDecision> FirstCraftResults = new();
         internal ItemDecision FirstCraft { get; private set; }
         internal ItemDecision SecondCraft { get; private set; }
         internal ulong Created { get; private set; } = 9999;
@@ -165,7 +174,7 @@ internal static class CraftChecks
         {
             foreach (ItemState state in Host.Snapshot())
             {
-                if (state.Definition is "knife" or "flask") return state.Id;
+                if (state.Definition is "knife" or "flask" or "rope") return state.Id;
             }
             return 9999;
         }
@@ -189,9 +198,13 @@ internal static class CraftChecks
         public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location, out float condition)
         { location = request.Location; condition = 1; return ItemDecision.Accepted; }
         public bool TryApplyState(ulong item, byte[] payload) => true;
-        public bool HasRecipe(int recipe) => recipe == 0;
+        public bool TryGetRecipe(int recipe, out CraftRecipePlan? plan) => RecipeCatalog.TryGet(recipe, out plan);
         public ItemDecision CheckCraftIngredient(ParticipantId player, ulong item) =>
             Accessible.Contains(item) ? ItemDecision.Accepted : ItemDecision.Unavailable;
         public void RemoveItem(ulong item) { }
+        public ICraftWorldTransaction? BeginCraft(ItemCraftCommit commit, CraftRecipePlan plan,
+            IReadOnlyList<ItemState> ingredients) => new NoOpCraftTransaction();
+        public bool IsKnownDefinition(string definition) => true;
+        public ItemDecision CheckRegistration(ParticipantId player, SharedItemRegistration registration, ItemState? parent) => ItemDecision.Accepted;
     }
 }

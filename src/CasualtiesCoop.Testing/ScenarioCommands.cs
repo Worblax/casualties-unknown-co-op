@@ -63,6 +63,8 @@ internal static class ScenarioCommands
             (r, c) => { r.Fixtures.Characters.Crouch(c); r.Fixtures.CoveredPaths.Add("Body.Update"); }),
         ["character.speed"] = Apply(Setup | Both, "target maxSpeed", c => { Target(c); Scalar(c, "maxSpeed", 0.5f, 20); },
             (r, c) => r.Fixtures.Characters.Speed(c)),
+        ["character.intelligence"] = Apply(Setup | Both, "target value", c => { Target(c); Integer(c, "value", -10, 20); },
+            (r, c) => r.Fixtures.Characters.Intelligence(c)),
         ["character.jump"] = Apply(Both, "target", Target, (r, c) =>
         {
             r.Fixtures.Characters.Jump(String(c, "target"));

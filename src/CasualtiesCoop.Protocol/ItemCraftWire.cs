@@ -30,6 +30,11 @@ internal struct CraftUpdatedItem
     internal uint Revision;
     internal float Condition;
     internal byte[] Payload;
+    internal bool HasPlacement;
+    internal ItemPlacement Placement;
+    internal ulong Parent;
+    internal byte Slot;
+    internal ItemLocation Location;
 }
 
 internal struct CraftCreatedItem
@@ -40,6 +45,7 @@ internal struct CraftCreatedItem
     internal ulong Parent;
     internal byte Slot;
     internal ItemLocation Location;
+    internal float Condition;
     internal byte[] Payload;
 }
 
@@ -50,6 +56,7 @@ internal static class ItemCraftWire
     private const int CommitHeader = 30;
     private const int RequestHeader = 30;
     private const int ResultSize = 30;
+    private const int CancelSize = 29;
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
 
     internal static byte[] WriteRequest(Guid session, ItemCraftRequest request)
@@ -106,8 +113,10 @@ internal static class ItemCraftWire
         }
         request.ItemIds = ids;
         request.Revisions = revisions;
-        return request.Operation != 0 && request.Recipe >= 0 && ids.All(id => id != 0) && revisions.All(value => value != 0) &&
-            ids.Distinct().Count() == ids.Length;
+        // Vanilla lets a reusable requirement match the same instance more than once. The host
+        // validates whether each duplicate occurrence is legal for the selected recipe.
+        return request.Operation != 0 && request.Recipe >= 0 && ids.All(id => id != 0) &&
+            revisions.All(value => value != 0);
     }
 
     internal static byte[] WriteResult(Guid session, ulong operation, int recipe, ItemDecision decision)
@@ -117,6 +126,25 @@ internal static class ItemCraftWire
         BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(25), recipe);
         frame[29] = (byte)decision;
         return frame;
+    }
+
+    internal static byte[] WriteCancel(Guid session, ulong operation, int recipe)
+    {
+        byte[] frame = GameplayWire.NewFrame(MessageKind.ItemCraftCancel, session, CancelSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(17), operation);
+        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(25), recipe);
+        return frame;
+    }
+
+    internal static bool TryReadCancel(ReadOnlySpan<byte> frame, Guid session, out ulong operation, out int recipe)
+    {
+        operation = 0;
+        recipe = 0;
+        if (frame.Length != CancelSize || !GameplayWire.HasHeader(frame, MessageKind.ItemCraftCancel, session))
+            return false;
+        operation = BinaryPrimitives.ReadUInt64LittleEndian(frame.Slice(17));
+        recipe = BinaryPrimitives.ReadInt32LittleEndian(frame.Slice(25));
+        return operation != 0 && recipe >= 0;
     }
 
     internal static bool TryReadResult(ReadOnlySpan<byte> frame, Guid session, out ulong operation, out int recipe,
@@ -157,6 +185,14 @@ internal static class ItemCraftWire
             writer.Write(item.Id);
             writer.Write(item.Revision);
             writer.Write(item.Condition);
+            writer.Write(item.HasPlacement);
+            if (item.HasPlacement)
+            {
+                writer.Write((byte)item.Placement);
+                writer.Write(item.Parent);
+                writer.Write(item.Slot);
+                WriteLocation(writer, item.Location);
+            }
             WriteBytes(writer, item.Payload);
         }
         foreach (CraftCreatedItem item in commit.Created)
@@ -166,6 +202,7 @@ internal static class ItemCraftWire
             writer.Write((byte)item.Placement);
             writer.Write(item.Parent);
             writer.Write(item.Slot);
+            writer.Write(item.Condition);
             WriteLocation(writer, item.Location);
             WriteBytes(writer, item.Payload);
             WriteString(writer, item.Definition);
@@ -196,10 +233,26 @@ internal static class ItemCraftWire
         for (int index = 0; index < removed; index++) commit.Removed.Add(reader.ReadUInt64());
         for (int index = 0; index < updated; index++)
         {
+            ulong id = reader.ReadUInt64();
+            uint revision = reader.ReadUInt32();
+            float condition = reader.ReadSingle();
+            bool hasPlacement = reader.ReadBoolean();
+            var placement = ItemPlacement.World;
+            ulong parent = 0;
+            byte slot = ItemWire.NoSlot;
+            ItemLocation location = default;
+            if (hasPlacement)
+            {
+                placement = (ItemPlacement)reader.ReadByte();
+                parent = reader.ReadUInt64();
+                slot = reader.ReadByte();
+                location = ReadLocation(reader);
+                if (placement > ItemPlacement.Worn || !ItemWire.IsLocationValid(location)) return false;
+            }
             commit.Updated.Add(new CraftUpdatedItem
             {
-                Id = reader.ReadUInt64(), Revision = reader.ReadUInt32(), Condition = reader.ReadSingle(),
-                Payload = ReadBytes(reader)
+                Id = id, Revision = revision, Condition = condition, HasPlacement = hasPlacement, Placement = placement,
+                Parent = parent, Slot = slot, Location = location, Payload = ReadBytes(reader)
             });
         }
         for (int index = 0; index < created; index++)
@@ -209,6 +262,7 @@ internal static class ItemCraftWire
             var placement = (ItemPlacement)reader.ReadByte();
             ulong parent = reader.ReadUInt64();
             byte slot = reader.ReadByte();
+            float condition = reader.ReadSingle();
             ItemLocation location = ReadLocation(reader);
             byte[] payload = ReadBytes(reader);
             string definition = ReadString(reader, definitionLength);
@@ -220,7 +274,7 @@ internal static class ItemCraftWire
             commit.Created.Add(new CraftCreatedItem
             {
                 ClientKey = clientKey, Definition = definition, Placement = placement, Parent = parent, Slot = slot,
-                Location = location, Payload = payload
+                Location = location, Condition = condition, Payload = payload
             });
         }
         return stream.Position == stream.Length && commit.Operation != 0 && commit.Recipe >= 0 &&

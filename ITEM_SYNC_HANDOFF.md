@@ -1,56 +1,111 @@
 # Universal item sync handoff
 
-Protocol: 13. Plugin version: 0.1.17.
+Protocol: 15. Plugin version: 0.1.19.
 
-## Implemented
+## Current stopping point
 
-- One stable network identity per `Item` across world, inventory, worn and container placements.
-- Compact binary payload (`ItemStateCodec`) for base `Item` fields, every `[Saveable]` component, `CustomItemBehaviour.state/data`, and `LightItem`.
-- Full payload on create/transfer/recovery; unreliable `ItemMotion` carries only physical samples.
-- Registration of guest-created items with `ClientKey`; host-issued IDs.
-- Container children carry `ParentId`; containers are restored before children.
-- State reports from the owning guest are revision-checked; stale reports cannot overwrite newer state.
-- Craft reservations use actual vanilla-selected ingredient IDs/revisions. Only the player's own items or reachable floor items are accepted; another player's inventory is rejected.
-- One atomic craft commit applies removed/updated/created items. Duplicate commits are no-ops; rejected commits restore the local pre-craft snapshot.
-- Open vanilla crafting menu refreshes on network item changes.
-- Host-side vanilla crafting still sees tracked shared items. Ingredient filtering to the host-approved set is now guest-only.
-- Guest crafting includes tracked projection replicas in vanilla recipe selection even though replica colliders are triggers.
-- Consumed ingredients are committed as removed based on the recipe's `destroyItem` flag, not on deferred Unity destruction.
-- Newly created craft results are detected through scene objects before `Item.Start` populates `Item.allItems`.
-- `ItemStateCodec` can restore nested classes without a parameterless constructor, such as `LiquidStack`.
-- Projection replicas not owned by the active test view are excluded from native `Item.Update`; this prevents cross-projection update errors without changing real one-guest behavior.
+P0 craft/registration paths are implemented and exercised. P1/P2 work remains; do not
+describe the codec or every vanilla item as universally covered yet.
 
-## Verification actually run
+Verified with:
 
-- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/Verify.ps1` - PASS: Release build, protocol, architecture and virtual-network suites.
-- Unity scenarios:
-  - `items.concurrent-craft`: [result.json](artifacts/game-tests/8b546a6e75304693bb9b6df39bdcd5c5/result.json)
-  - `items.universal-state-transfer`: [result.json](artifacts/game-tests/a2a16c13c27a45b3a0955c8015c1a887/result.json)
-  - `items.chunk-state-return`: [result.json](artifacts/game-tests/4eb21c5dc628446592898e6ab4e48e4c/result.json)
-  - `items.craft-world-and-belt`: [result.json](artifacts/game-tests/a505a5c31376470091f2c949bba1bb8b/result.json)
-  - `items.guest-projection`: [result.json](artifacts/game-tests/0d042ddf4eee4812a5024814d9ac4bb7/result.json)
-- `CasualtiesCoop.NetworkChecks` covers the virtual-network item scenarios, including concurrent floor craft, duplicate commit rejection, stale reports, guest registration and foreign inventory rejection.
-- The only build warning is NU1900 because the NuGet vulnerability index is unavailable in this environment.
+```powershell
+powershell.exe -NoProfile -File ./scripts/Verify.ps1 -DotnetPath 'C:/Program Files/dotnet/dotnet.exe' -GameTests
+```
 
-## Unity scenarios
+Latest result: Release build, ProtocolChecks, ArchitectureChecks, virtual-network
+NetworkChecks and every available Unity game scenario passed. Unity tests must run outside
+the sandbox in this environment because they replace DLLs under the Steam installation.
 
-- `tests/scenarios/items/concurrent-craft.json`: two native guest bodies request recipe 0 against the same two floor foliage items in the same tick. Exactly one request is accepted, one is rejected, the authority has exactly one rope and zero foliage, both guest replica stores converge to the same result, and the local camera body is restored after each guest-specific craft operation.
-- `tests/scenarios/items/universal-state-transfer.json`: flashlight condition/wet/on-state payload, pistol ammunition/chamber, bottle liquid amount, repeated pickup/drop between two guests.
-- `tests/scenarios/items/chunk-state-return.json`: modified flashlight moved far away and back, then checked for state convergence.
-- `tests/scenarios/items/craft-world-and-belt.json`: vanilla recipe 0, one ingredient in hand, one on the floor, distance guard for the floor ingredient, both consumed, rope produced, inventory-slot removal checked.
+## Landed P0 work
 
-## Test harness changes
+- `AuthoritativeItemRegistry.Transaction` snapshots the full registry for craft rollback.
+- `HostCraftReservations` uses the runtime vanilla `Recipe` as the source of truth:
+  - ordered ingredient plan, revisions and captured states,
+  - states `Requested/Reserved/Executing/Committed/Rejected/Cancelled/Expired`,
+  - bounded terminal history for idempotent replay,
+  - duplicate/overlapping IDs, wrong results, missing consumption, stale revisions and
+    inaccessible result placement are rejected,
+  - a reusable non-destroying requirement may name the same instance more than once,
+  - repeated detached-child updates are accepted only for a destroyed container.
+- `HostItemSession` applies a craft through one native transaction and one registry
+  transaction. Capacity, client keys and result placement are preflighted before mutation.
+- Native craft transactions pre-validate payloads and placements, create staged replicas,
+  defer ingredient destruction until confirmation, and roll back staged updates/results.
+- `CraftExecutionScope` observes the actual vanilla call:
+  - `RecipeItem.UseItem` boundaries,
+  - the exact `UnityEngine.Object.Destroy` call for consumed ingredients,
+  - `Utils.Create` results,
+  - liquid additions to existing containers.
+- The `RecipeResult.SpawnResult(int)` Harmony patch now binds with the correct signature.
+  Missing this parameter previously prevented `Utils.Create` observation and the `Item.Update`
+  guard from being installed.
+- Guest craft commits are retried with the same operation number until a terminal result
+  arrives. The reservation request may also be retried. `ItemCraftCancel` releases a
+  reservation when vanilla crafting fails locally.
+- Guest rejection removes locally created results, restores ingredient payload, condition,
+  container/slot/world placement and captured descendants. `Conflict` requests a fresh
+  authoritative snapshot instead of restoring an already-superseded copy.
+- Registration receipts are per-`ClientKey`, so A -> B -> A is idempotent. Registration checks
+  definition support, parent ownership chain, container weight, slot occupancy, world reach
+  and cycles/parent validity in the registry path.
+- Reservation conflicts include the item, its ancestors and descendants. Local host actions,
+  guest actions, registration, state reports, sampling and removal all use the same check.
+- Effective-owner (container-chain) reports are used for nested owned-item state. Stale owner
+  reports are rejected and answered with current authority.
+- Craft commit wire adds updated-item placement/parent/slot/location and carries result
+  conditions. Protocol bumped 14 -> 15; plugin 0.1.18 -> 0.1.19.
 
-- `item.craft` accepts an optional `peer`; guest crafting runs through production `SharedItemReplication` and `SharedItemCrafting` with the guest Body temporarily selected.
-- `items.unownedConverged` waits for the authoritative item and every guest replica to agree after a drop.
-- `items.craftAcceptedCount`, `items.craftRejectedCount` and `items.craftPeerCount` expose craft decisions observed by the virtual guests.
-- `items.authoritativeDefinitionCount`, `items.replicaDefinitionCount` and `items.definitionConverged` verify no duplicated authority state and replica agreement.
-- `items.nativeDefinitionCount` and `items.nativeDefinitionInSlots` count native items by definition.
-- Final snapshots tolerate a consumed item that no longer has a replica, so a successful scenario cannot lose its result report.
+## P0 regression coverage
 
-## Known limits
+`tests/CasualtiesCoop.NetworkChecks/P0CraftChecks.cs` covers concurrent reservations,
+native rejection, delete/update overlap, duplicate removal IDs, wrong recipe result, missing
+ingredient, local host mutation of a reserved item, reserved nested child blocking its parent,
+foreign-container registration, expiry, commit replay after reconnect and A-B-A registration.
 
-- Steam peer-to-peer was not exercised; Unity runs use virtual transports in one player process.
-- The binary codec covers all `[Saveable]` fields plus explicit runtime adapters; unknown non-`[Saveable]` components with mutable state need an adapter.
-- Craft commit must fit the 16 KiB frame budget.
-- Remote visual simulation remains local; authoritative item state comes from the host.
+`tests/scenarios/items/concurrent-craft.json` now sets deterministic INT for both test bodies
+before the recipe, because recipe 0 uses `INT` to decide whether `SpawnResult` can produce rope.
+This changes a precondition, not an expected outcome.
+
+## Known P0 limitations
+
+1. A dedicated Unity scenario for a failed vanilla `SpawnResult` rollback still needs to be
+   added. The local-rejection path is implemented and logs a warning, but the current Unity
+   suite does not force a failed recipe on a real native body.
+2. Guest-side rollback of nested containers is implemented from captured replica state, but
+   only container unload/placement paths exercised by current scenarios are covered.
+3. Hung guest registrations are retried and capped at 256 per process; there is no protocol
+   acknowledgement that lets the guest prove a failed registration without a host query.
+4. Commit size remains bounded by 64 changed/created entries and the 16 KiB frame limit.
+   Composite operations larger than that are not implemented.
+5. `tests/CasualtiesCoop.NetworkChecks/P0CraftChecks.cs.draft` is the superseded draft kept
+   in the working tree; the compiled `P0CraftChecks.cs` is the active suite.
+
+## Remaining P1
+
+- Grouped craft commit application on guests; craft changes still arrive as separate ItemDelta
+  messages.
+- Placement reports for arbitrary local container/equipment moves are intentionally blocked
+  for tracked items instead of being replicated. State-changing use of owned items is allowed
+  and sent through effective-owner reports.
+- Fluid bandwidth split, unreliable latest-state fluid updates and neighbouring structural
+  dependencies are not implemented.
+- World freshness is separated from initial readiness and gates item requests/crafting when
+  the current chunk is not present, but predictive prefetch and full physics freshness remain.
+
+## Remaining P2
+
+- Event-based registration discovery instead of the periodic item scan.
+- Chunk damage spatial indexing, codec allocation profiling and typed replication budgets.
+- Full generated audit of every item component and every vanilla recipe in co-op.
+
+## Do not regress
+
+- Core and Protocol must stay UnityEngine-free (`ArchitectureChecks` enforces this).
+- `Verify.ps1` and `Verify.ps1 -GameTests` must stay green.
+- Craft commit must remain all-or-nothing across registry and native objects.
+- Duplicate terminal commits must replay the stored result, never re-execute.
+- Do not infer ingredient destruction from `destroyItem` alone; observe the actual vanilla
+  `Object.Destroy` within the active craft scope.
+- Use the actual vanilla `Recipe`/`RecipeItem`/`RecipeResult` definitions. Do not add a
+  hand-maintained recipe table.

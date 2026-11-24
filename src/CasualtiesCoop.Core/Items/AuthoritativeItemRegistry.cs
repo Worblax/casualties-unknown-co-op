@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using CasualtiesCoop.Core.Session;
 using CasualtiesCoop.Gameplay.Items;
@@ -23,9 +23,63 @@ internal sealed class AuthoritativeItemRegistry
     private readonly Dictionary<ulong, Record> items = new();
     private ulong nextId;
 
-    internal bool HasCapacity => items.Count < Limit && nextId != ulong.MaxValue;
+    internal bool HasCapacity => HasCapacityFor(1);
+    internal bool HasCapacityFor(int count) =>
+        count >= 0 && count <= Limit - items.Count && nextId <= ulong.MaxValue - (ulong)count;
     internal int Count => items.Count;
     internal ulong Sequence { get; private set; }
+
+    internal Transaction BeginTransaction() => new(this, Sequence, nextId);
+
+    // Registry-only snapshot. Native Unity objects are staged by the caller and committed after this succeeds.
+    internal sealed class Transaction
+    {
+        private readonly AuthoritativeItemRegistry registry;
+        private readonly Dictionary<ulong, Record> snapshot;
+        private readonly ulong nextId;
+        private readonly ulong sequence;
+        private bool active;
+
+        internal Transaction(AuthoritativeItemRegistry registry, ulong sequence, ulong nextId)
+        {
+            this.registry = registry;
+            this.sequence = sequence;
+            this.nextId = nextId;
+            snapshot = new Dictionary<ulong, Record>(registry.items.Count);
+            foreach (var pair in registry.items)
+            {
+                snapshot.Add(pair.Key, Clone(pair.Value));
+            }
+            active = true;
+        }
+
+        internal void Commit() => active = false;
+
+        internal void Rollback()
+        {
+            if (!active)
+            {
+                return;
+            }
+            active = false;
+            registry.items.Clear();
+            foreach (var pair in snapshot)
+            {
+                registry.items.Add(pair.Key, pair.Value);
+            }
+            registry.nextId = nextId;
+            registry.Sequence = sequence;
+        }
+
+        private static Record Clone(Record source) => new()
+        {
+            State = source.State,
+            WasMoving = source.WasMoving,
+            NextRefresh = source.NextRefresh,
+            Previous = source.Previous,
+            PreviousAt = source.PreviousAt
+        };
+    }
 
     internal bool TryRegister(string definition, ItemLocation location, float condition, out ItemState state) =>
         TryRegister(definition, ItemPlacement.World, default, 0, ItemWire.NoSlot, location, condition,
@@ -177,6 +231,37 @@ internal sealed class AuthoritativeItemRegistry
         }
         record.State.Payload = payload;
         record.State.Condition = condition;
+        state = Advance(record);
+        return true;
+    }
+
+    internal bool TryCommitCraftUpdate(CraftUpdatedItem update, ParticipantId player, out ItemState state)
+    {
+        state = default;
+        if (!items.TryGetValue(update.Id, out Record record) || record.State.Removed ||
+            record.State.Revision != update.Revision || !ItemWire.IsPayload(update.Payload) ||
+            float.IsNaN(update.Condition) || float.IsInfinity(update.Condition))
+            return false;
+        if (update.HasPlacement)
+        {
+            bool valid = update.Placement switch
+            {
+                ItemPlacement.World => update.Parent == 0 && update.Slot == ItemWire.NoSlot,
+                ItemPlacement.Inventory => update.Parent == 0 && update.Slot != ItemWire.NoSlot,
+                ItemPlacement.Worn => update.Parent == 0 && update.Slot == ItemWire.NoSlot,
+                ItemPlacement.Container => update.Parent != 0 && update.Slot == ItemWire.NoSlot,
+                _ => false
+            };
+            if (!valid) return false;
+            record.State.Placement = update.Placement;
+            record.State.Owner = update.Placement is ItemPlacement.Inventory or ItemPlacement.Worn ? player : default;
+            record.State.Parent = update.Parent;
+            record.State.Slot = update.Slot;
+            record.State.Location = update.Location;
+            record.State.ClientKey = 0;
+        }
+        record.State.Condition = update.Condition;
+        record.State.Payload = update.Payload;
         state = Advance(record);
         return true;
     }

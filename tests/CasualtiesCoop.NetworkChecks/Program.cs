@@ -1,8 +1,9 @@
-TransportChecks.Run();
+﻿TransportChecks.Run();
 ItemChecks.Run();
 HostItemChecks.Run();
 GuestItemChecks.Run();
 CraftChecks.Run();
+P0CraftChecks.Run();
 RecoveryChecks.Run();
 FluidChecks.Run();
 WorldChunkChecks.Run();

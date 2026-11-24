@@ -86,6 +86,7 @@ internal struct SharedItemRegistration
     internal ulong Parent;
     internal byte Slot;
     internal ItemLocation Location;
+    internal float Condition;
     internal byte[] Payload;
 }
 
@@ -106,7 +107,7 @@ internal static class ItemWire
 
     private const int StateHeaderSize = 83;
     private const int RequestHeaderSize = 65;
-    private const int RegistrationHeaderSize = 70;
+    private const int RegistrationHeaderSize = 74;
     private const int RegisteredSize = 45;
     private const int ReportHeaderSize = 43;
     private const int ResultSize = 26;
@@ -238,8 +239,9 @@ internal static class ItemWire
         message[34] = (byte)registration.Placement;
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(35), registration.Parent);
         message[43] = registration.Slot;
-        WriteLocation(message.AsSpan(44), registration.Location);
-        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(68), (ushort)payload.Length);
+        GameplayWire.WriteFloat(message.AsSpan(44), registration.Condition);
+        WriteLocation(message.AsSpan(48), registration.Location);
+        BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(72), (ushort)payload.Length);
         definition.CopyTo(message, RegistrationHeaderSize);
         payload.CopyTo(message, RegistrationHeaderSize + definition.Length);
         return message;
@@ -254,7 +256,7 @@ internal static class ItemWire
         }
 
         int definitionLength = message[33];
-        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(68));
+        int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(72));
         if (definitionLength is < 1 or > MaxDefinitionLength || payloadLength > MaxPayloadLength ||
             message.Length != RegistrationHeaderSize + definitionLength + payloadLength)
         {
@@ -267,7 +269,8 @@ internal static class ItemWire
         registration.Placement = (ItemPlacement)message[34];
         registration.Parent = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(35));
         registration.Slot = message[43];
-        registration.Location = ReadLocation(message.Slice(44));
+        registration.Condition = GameplayWire.ReadFloat(message.Slice(44));
+        registration.Location = ReadLocation(message.Slice(48));
         registration.Payload = message.Slice(RegistrationHeaderSize + definitionLength, payloadLength).ToArray();
         var state = new SharedItemState
         {
@@ -277,7 +280,7 @@ internal static class ItemWire
         };
         return registration.Operation != 0 && registration.ClientKey != 0 && IsDefinition(registration.Definition) &&
             registration.Placement is >= ItemPlacement.World and <= ItemPlacement.Worn && IsPlacementValid(state) &&
-            IsLocationValid(registration.Location);
+            IsLocationValid(registration.Location) && registration.Condition is >= 0f and <= 1f;
     }
 
     internal static byte[] WriteRegistered(Guid session, ulong operation, ulong clientKey, ulong item, uint revision)
@@ -376,7 +379,7 @@ internal static class ItemWire
         };
     }
 
-    private static bool IsLocationValid(ItemLocation location) =>
+    internal static bool IsLocationValid(ItemLocation location) =>
         GameplayWire.IsCoordinate(location.X) && GameplayWire.IsCoordinate(location.Y) &&
         GameplayWire.InRange(location.Angle, 720) && GameplayWire.InRange(location.VelocityX, 1000) &&
         GameplayWire.InRange(location.VelocityY, 1000) && GameplayWire.InRange(location.Spin, 20000);

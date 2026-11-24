@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CasualtiesCoop.Session;
+using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -33,18 +34,28 @@ internal static class SharedItemHooks
         Prefix(harmony, typeof(Body), nameof(Body.SwapSlots), nameof(Swap), typeof(int), typeof(int));
         Prefix(harmony, typeof(Body), nameof(Body.UseItemInHand), nameof(UseHand));
         Prefix(harmony, typeof(Body), nameof(Body.UseItem), nameof(Use), typeof(Item));
-        Prefix(harmony, typeof(Body), nameof(Body.WearWearable), nameof(Use), typeof(Item));
+        Prefix(harmony, typeof(Body), nameof(Body.WearWearable), nameof(Placement), typeof(Item));
         Prefix(harmony, typeof(Body), nameof(Body.CombineItems), nameof(Combine), typeof(Item), typeof(Item));
-        Prefix(harmony, typeof(Container), nameof(Container.LoadItem), nameof(Use), typeof(Item));
+        Prefix(harmony, typeof(Container), nameof(Container.LoadItem), nameof(Placement), typeof(Item));
         Prefix(harmony, typeof(TraderScript), nameof(TraderScript.GiveItem), nameof(Use), typeof(Item));
         Prefix(harmony, typeof(PlayerCamera), nameof(PlayerCamera.ApplyWoundItem), nameof(Use), typeof(Item));
         Prefix(harmony, typeof(PlayerCamera), "TryPerformInventoryAction", nameof(InventoryAction),
             typeof(RaycastResult), typeof(List<RaycastResult>));
         Prefix(harmony, typeof(PlayerCamera), "TryPerformWorldActions", nameof(WorldActions));
         Prefix(harmony, typeof(Recipe), nameof(Recipe.TryMake), nameof(Craft));
+        Postfix(harmony, typeof(Recipe), nameof(Recipe.TryMake), nameof(CraftFinished));
         Prefix(harmony, typeof(Recipe), nameof(Recipe.GetItemsForRecipe), nameof(CraftIngredients));
         Prefix(harmony, typeof(RecipeItem), nameof(RecipeItem.GetMatchingItem), nameof(FilterIngredients),
             typeof(List<Item>), typeof(List<Item>));
+        Prefix(harmony, typeof(RecipeItem), nameof(RecipeItem.UseItem), nameof(BeforeUseItem), typeof(Item));
+        Postfix(harmony, typeof(RecipeItem), nameof(RecipeItem.UseItem), nameof(AfterUseItem), typeof(Item));
+        Prefix(harmony, typeof(RecipeResult), nameof(RecipeResult.SpawnResult), nameof(BeforeSpawnResult), typeof(int));
+        Postfix(harmony, typeof(RecipeResult), nameof(RecipeResult.SpawnResult), nameof(AfterSpawnResult), typeof(int));
+        Prefix(harmony, typeof(Utils), nameof(Utils.Create), nameof(BeforeCreate), typeof(string), typeof(Vector2), typeof(float));
+        Postfix(harmony, typeof(Utils), nameof(Utils.Create), nameof(AfterCreate), typeof(string), typeof(Vector2), typeof(float));
+        harmony.Patch(AccessTools.Method(typeof(UnityEngine.Object), nameof(UnityEngine.Object.Destroy),
+                new[] { typeof(UnityEngine.Object) }),
+            prefix: new HarmonyMethod(typeof(SharedItemHooks), nameof(BeforeDestroy)));
         Prefix(harmony, typeof(Item), "Update", nameof(WorldItem));
         harmony.Patch(AccessTools.Method(typeof(Item), "Start"),
             postfix: new HarmonyMethod(typeof(SharedItemHooks), nameof(Started)));
@@ -52,6 +63,8 @@ internal static class SharedItemHooks
         Postfix(harmony, typeof(Body), nameof(Body.UseItemInHand), nameof(MarkHand));
         Postfix(harmony, typeof(Body), nameof(Body.WearWearable), nameof(MarkArgument), typeof(Item));
         Postfix(harmony, typeof(Body), nameof(Body.CombineItems), nameof(MarkPair), typeof(Item), typeof(Item));
+        Postfix(harmony, typeof(LightItem), "Start", nameof(ComponentStarted));
+        Postfix(harmony, typeof(CustomItemBehaviour), "Start", nameof(ComponentStarted));
         Postfix(harmony, typeof(Container), nameof(Container.LoadItem), nameof(MarkContainer), typeof(Item));
         Postfix(harmony, typeof(Container), nameof(Container.UnloadItem), nameof(MarkComponent), typeof(Item), typeof(Body));
         Postfix(harmony, typeof(GunScript), nameof(GunScript.TryRack), nameof(MarkComponent));
@@ -76,7 +89,8 @@ internal static class SharedItemHooks
     private static void Prefix(Harmony harmony, Type type, string method, string patch, params Type[] types) =>
         harmony.Patch(AccessTools.Method(type, method, types), prefix: new HarmonyMethod(typeof(SharedItemHooks), patch));
 
-    private static void Started(Item __instance) => Items?.Observe(__instance);
+    private static void Started(Item __instance) => Items?.ItemStarted(__instance);
+    private static void ComponentStarted(Component __instance) => Items?.ItemStarted(__instance.GetComponent<Item>());
     private static void MarkArgument(Item __0) => Items?.MarkDirty(__0);
     private static void MarkPair(Item it1, Item it2) { Items?.MarkDirty(it1); Items?.MarkDirty(it2); }
     private static void MarkComponent(Component __instance) => Items?.MarkDirty(__instance.GetComponent<Item>());
@@ -112,7 +126,8 @@ internal static class SharedItemHooks
 
     private static bool Swap(Body __instance, int slot1, int slot2) => Items is not { } shared ||
         (!shared.IsReserved(slot1) && !shared.IsReserved(slot2) && shared.CanUse(__instance.GetItem(slot1)) &&
-            shared.CanUse(__instance.GetItem(slot2)));
+            shared.CanUse(__instance.GetItem(slot2)) && shared.CanChangePlacement(__instance.GetItem(slot1)) &&
+            shared.CanChangePlacement(__instance.GetItem(slot2)));
 
     private static bool UseHand(Body __instance)
     {
@@ -121,6 +136,7 @@ internal static class SharedItemHooks
     }
 
     private static bool Use(Item __0) => Items?.CanUse(__0) ?? true;
+    private static bool Placement(Item __0) => Items?.CanChangePlacement(__0) ?? true;
 
     private static bool Combine(Item it1, Item it2) => Items is not { } shared || (shared.CanUse(it1) && shared.CanUse(it2));
 
@@ -165,6 +181,23 @@ internal static class SharedItemHooks
 
     private static bool Craft(Recipe __instance) => Items?.TryCraft(__instance) ?? true;
 
+    private static void CraftFinished(Recipe __instance) => Items?.FinishCraft(__instance);
+
+    private static void BeforeUseItem(Item item) => CraftExecutionScope.Current?.BeginUse(item);
+    private static void AfterUseItem(Item item) => CraftExecutionScope.Current?.EndUse();
+
+    private static void BeforeSpawnResult() =>
+        CoopDiagnostics.Trace("Items", $"Recipe spawn begin, used={CraftExecutionScope.Current?.Used.Count ?? -1}.");
+    private static void AfterSpawnResult() =>
+        CoopDiagnostics.Trace("Items", $"Recipe spawn end, created={CraftExecutionScope.Current?.Created.Count ?? -1}.");
+
+    private static void BeforeCreate() { }
+    private static void AfterCreate(ref GameObject __result) => CraftExecutionScope.Current?.RecordCreated(__result);
+    private static void BeforeDestroy(UnityEngine.Object obj) => CraftExecutionScope.Current?.MarkDestroyed(obj);
+
+    private static void TraceLiquid(WaterContainerItem __instance, float __result) =>
+        CraftExecutionScope.Current?.RecordLiquid(__instance, __result);
+
     private static bool CraftIngredients(Recipe __instance, ref List<Item> __result)
     {
         if (Items?.CraftOverride(__instance, out List<Item>? approved) != true || approved is null) return true;
@@ -190,6 +223,11 @@ internal static class SharedItemHooks
 
     private static bool WorldItem(Item __instance)
     {
+        // Replicas can be activated before Item.Start has added LiquidAffect. Vanilla
+        // Update dereferences it unconditionally.
+        WorldGeneration world = WorldGeneration.world;
+        if (!world || !__instance.affect || !Item.GlobalItems.ContainsKey(__instance.id)) return false;
+        if (!world.GetClosestChunkRenderer(world.WorldToBlockPos(__instance.transform.position))) return false;
         if (SharedItemProjection.IsReplica(__instance) && (Items is null || !Items.IsTracked(__instance)))
             return false;
         return Items?.HandleWorldUpdate(__instance) ?? true;

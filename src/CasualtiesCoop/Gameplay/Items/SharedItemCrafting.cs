@@ -6,8 +6,14 @@ using UnityEngine;
 
 namespace CasualtiesCoop.Gameplay.Items;
 
+// Guest-side craft execution. Vanilla still performs the recipe, but the host reservation gates
+// it. The actual UseItem/SpawnResult outcome is observed and sent as one commit. A commit is
+// retried with the same operation number until the host result arrives, so a lost UDP frame or
+// reconnect cannot execute the recipe twice.
 internal sealed class SharedItemCrafting
 {
+    private const float RetryInterval = 1f;
+
     private sealed class PendingCraft
     {
         internal ulong Operation;
@@ -15,7 +21,14 @@ internal sealed class SharedItemCrafting
         internal List<Item> Ingredients = new();
         internal uint[] Revisions = Array.Empty<uint>();
         internal Original[] Originals = Array.Empty<Original>();
-        internal bool Commit;
+        internal List<Original> Descendants = new();
+        internal CraftExecutionScope Scope = null!;
+        internal bool Executed;
+        internal bool Executing;
+        internal bool HostAccepted;
+        internal ItemCraftCommit? Commit;
+        internal float NextSend;
+        internal List<(ulong ClientKey, Item Item)> Results = new();
     }
 
     private readonly struct Original
@@ -25,16 +38,21 @@ internal sealed class SharedItemCrafting
         internal readonly float Condition;
         internal readonly byte[] Payload;
         internal readonly ItemPlacement Placement;
+        internal readonly ulong Parent;
         internal readonly byte Slot;
+        internal readonly ItemLocation Location;
 
-        internal Original(ulong id, string definition, float condition, byte[] payload, ItemPlacement placement, byte slot)
+        internal Original(ulong id, string definition, float condition, byte[] payload, ItemPlacement placement,
+            ulong parent, byte slot, ItemLocation location)
         {
             Id = id;
             Definition = definition;
             Condition = condition;
             Payload = payload;
             Placement = placement;
+            Parent = parent;
             Slot = slot;
+            Location = location;
         }
     }
 
@@ -54,12 +72,13 @@ internal sealed class SharedItemCrafting
     internal bool TryBegin(Recipe recipe)
     {
         if (executing) return true;
-        if (pending is not null)
+        if (pending is { } current)
         {
-            Alert("Another craft is waiting for the host.");
+            if (!current.Executed && current.HostAccepted && ReferenceEquals(current.Recipe, recipe)) return false;
+            Alert(current.Executed ? "The previous craft is still waiting for the host." :
+                "Another craft is waiting for the host.");
             return false;
         }
-        Body? body = items.LocalBody;
         if (!items.CanCraft)
         {
             Alert("Waiting for the host to confirm shared items.");
@@ -71,6 +90,7 @@ internal sealed class SharedItemCrafting
         var ids = new ulong[ingredients.Count];
         var revisions = new uint[ingredients.Count];
         var originals = new Original[ingredients.Count];
+        var descendants = new List<Original>();
         for (int index = 0; index < ingredients.Count; index++)
         {
             Item item = ingredients[index];
@@ -81,8 +101,17 @@ internal sealed class SharedItemCrafting
                 return false;
             }
             revisions[index] = state.Revision;
-            originals[index] = new Original(state.Id, item.id, item.condition, ItemStateCodec.Capture(item),
-                state.Placement, state.Slot);
+            (ItemPlacement placement, ulong parent, byte slot) = Placement(item);
+            originals[index] = new Original(state.Id, item.id, item.condition, ItemStateCodec.Capture(item), placement,
+                parent, slot, SharedItemObjects.Read(item));
+        }
+        var ingredientIds = new HashSet<ulong>(ids);
+        var seen = new HashSet<ulong>(ids);
+        foreach (ItemState replica in items.ReplicaStates)
+        {
+            if (replica.Removed || !seen.Add(replica.Id) || !HasAncestor(replica, ingredientIds)) continue;
+            descendants.Add(new Original(replica.Id, replica.Definition, replica.Condition, replica.Payload,
+                replica.Placement, replica.Parent, replica.Slot, replica.Location));
         }
 
         if (!items.RequestCraft(recipe.index, ids, revisions, out ulong operation))
@@ -93,159 +122,295 @@ internal sealed class SharedItemCrafting
         pending = new PendingCraft
         {
             Operation = operation, Recipe = recipe, Ingredients = ingredients, Revisions = revisions,
-            Originals = originals
+            Originals = originals, Descendants = descendants, NextSend = Time.unscaledTime + RetryInterval
         };
         return false;
     }
 
     internal bool OverrideIngredients(Recipe recipe, out List<Item>? ingredients)
     {
-        ingredients = pending is { Commit: false } craft && ReferenceEquals(craft.Recipe, recipe)
+        ingredients = pending is { Executing: true } craft && ReferenceEquals(craft.Recipe, recipe)
             ? craft.Ingredients : null;
         return ingredients is not null;
+    }
+
+    internal void Tick()
+    {
+        PendingCraft? craft = pending;
+        if (craft is null || Time.unscaledTime < craft.NextSend) return;
+        if (!craft.Executed)
+        {
+            if (craft.HostAccepted)
+            {
+                Finish(craft.Recipe);
+            }
+            else
+            {
+                items.ResendCraftRequest(craft.Operation, craft.Recipe.index,
+                    craft.Originals.Select(value => value.Id).ToArray(), craft.Revisions);
+                craft.NextSend = Time.unscaledTime + RetryInterval;
+            }
+            return;
+        }
+        if (craft.Commit is null) return;
+        items.CommitCraft(craft.Commit);
+        craft.NextSend = Time.unscaledTime + RetryInterval;
     }
 
     internal void OnResult(ulong operation, int recipe, ItemDecision decision)
     {
         PendingCraft? craft = pending;
         if (craft is null || craft.Operation != operation || craft.Recipe.index != recipe) return;
-        if (decision != ItemDecision.Accepted)
+        if (decision == ItemDecision.Accepted)
         {
-            if (craft.Commit) Rollback(craft);
-            pending = null;
-            Alert(craft.Commit ? "The host rejected the crafting result; ingredients were restored."
-                : "That crafting request is no longer valid.");
-            return;
-        }
-        if (craft.Commit)
-        {
-            pending = null;
+            if (!craft.Executed)
+            {
+                craft.HostAccepted = true;
+                craft.NextSend = 0;
+            }
+            else
+            {
+                pending = null;
+            }
             return;
         }
 
-        craft.Commit = true;
-        ItemCraftCommit commit = Execute(craft);
-        if (!items.CommitCraft(commit))
+        if (craft.Executed)
         {
-            Rollback(craft);
+            Reject(craft, decision, restoreLocal: decision != ItemDecision.Conflict);
+            Alert(decision == ItemDecision.Conflict
+                ? "The host state changed; the local craft was rolled back and will be resynchronized."
+                : "The host rejected the crafting result; the previous state was restored.");
+        }
+        else
+        {
             pending = null;
-            Alert("The host did not acknowledge the crafting result.");
+            Alert("That crafting request is no longer valid.");
         }
     }
 
-    private ItemCraftCommit Execute(PendingCraft craft)
+    internal void Finish(Recipe recipe)
     {
-        var before = new HashSet<int>(ItemsForScan().Select(item => item.GetInstanceID()));
-        executing = true;
+        PendingCraft? craft = pending;
+        if (craft is null || craft.Executed || !ReferenceEquals(craft.Recipe, recipe) || !craft.HostAccepted) return;
+        craft.Executed = true;
+        craft.Executing = true;
         try
         {
+            craft.Scope = CraftExecutionScope.Begin(craft.Ingredients);
+            executing = true;
             craft.Recipe.TryMake();
+        }
+        catch (Exception)
+        {
+            Debug.LogWarning($"Craft {craft.Operation} ({craft.Recipe.index}) failed during local execution.");
+            Reject(craft, ItemDecision.Unavailable, restoreLocal: true);
+            pending = null;
+            items.CancelCraft(craft.Operation, craft.Recipe.index);
+            Alert("Crafting failed locally and its reservation was cancelled.");
+            return;
         }
         finally
         {
             executing = false;
+            craft.Executing = false;
+            craft.Scope?.End();
         }
 
+        ItemCraftCommit commit;
+        try
+        {
+            commit = BuildCommit(craft);
+        }
+        catch (Exception)
+        {
+            Debug.LogWarning($"Craft {craft.Operation} ({craft.Recipe.index}) could not be serialized.");
+            Reject(craft, ItemDecision.Unavailable, restoreLocal: true);
+            pending = null;
+            items.CancelCraft(craft.Operation, craft.Recipe.index);
+            Alert("The crafting state could not be serialized and was restored.");
+            return;
+        }
+        if (!ValidateOutcome(craft, commit))
+        {
+            Debug.LogWarning($"Craft {craft.Operation} ({craft.Recipe.index}) produced no valid outcome: " +
+                $"used={craft.Scope.Used.Count}/{craft.Originals.Length}, created={commit.Created.Count}, " +
+                $"expected={Math.Max(1, craft.Recipe.result.amount)}, liquid={craft.Recipe.result.isLiquid}, " +
+                $"liquidTargets={craft.Scope.LiquidTargets.Count}.");
+            Reject(craft, ItemDecision.Unavailable, restoreLocal: true);
+            pending = null;
+            items.CancelCraft(craft.Operation, craft.Recipe.index);
+            Alert("The recipe did not complete; no commit was sent.");
+            return;
+        }
+
+        craft.Commit = commit;
+        items.CommitCraft(commit);
+        craft.NextSend = Time.unscaledTime + RetryInterval;
+    }
+
+    private ItemCraftCommit BuildCommit(PendingCraft craft)
+    {
         var commit = new ItemCraftCommit { Operation = craft.Operation, Recipe = craft.Recipe.index };
-        var selected = new HashSet<int>(craft.Ingredients.Where(item => item).Select(item => item.GetInstanceID()));
-        for (int index = 0; index < craft.Ingredients.Count; index++)
+        var destroyed = new HashSet<ulong>();
+        foreach (CraftExecutionScope.UsedIngredient used in craft.Scope.Used)
         {
-            Item item = craft.Ingredients[index];
-            RecipeItem requirement = craft.Recipe.items[index];
-            bool consumed = requirement.destroyItem && !requirement.isLiquid;
-            if (!item || consumed)
-            {
-                commit.Removed.Add(craft.Originals[index].Id);
-                items.Suppress(craft.Originals[index].Id, true);
-                continue;
-            }
-            if (items.TryGetId(item, out ulong id))
-            {
-                commit.Updated.Add(new CraftUpdatedItem
-                {
-                    Id = id, Revision = craft.Revisions[index], Condition = item.condition,
-                    Payload = ItemStateCodec.Capture(item)
-                });
-            }
+            if (used.Destroyed) destroyed.Add(craft.Originals[used.Index].Id);
         }
 
-        foreach (Item item in ItemsForScan())
+        var removed = new HashSet<ulong>();
+        var updated = new HashSet<ulong>();
+        for (int index = 0; index < craft.Originals.Length; index++)
         {
-            if (!item || before.Contains(item.GetInstanceID()) || selected.Contains(item.GetInstanceID()) ||
-                items.TryGetId(item, out _))
+            Original original = craft.Originals[index];
+            if (destroyed.Contains(original.Id))
             {
+                if (removed.Add(original.Id))
+                {
+                    commit.Removed.Add(original.Id);
+                    items.Suppress(original.Id, true);
+                }
                 continue;
             }
-            (ItemPlacement placement, byte slot) = Placement(item);
+            if (!updated.Add(original.Id)) continue;
+            Item? item = items.FindReplica(original.Id);
+            if (!item) throw new InvalidOperationException();
+            commit.Updated.Add(UpdateItem(item, original.Id, craft.Revisions[index]));
+        }
+
+        foreach (Original descendant in craft.Descendants)
+        {
+            if (updated.Contains(descendant.Id) || !items.TryGetState(descendant.Id, out ItemState state) ||
+                !HasAncestor(state, destroyed)) continue;
+            Item? item = items.FindReplica(descendant.Id);
+            if (!item) continue;
+            if (updated.Add(descendant.Id)) commit.Updated.Add(UpdateItem(item, descendant.Id, state.Revision));
+        }
+
+        foreach (Item item in craft.Scope.Created)
+        {
+            if (!item) continue;
+            (ItemPlacement placement, ulong parent, byte slot) = Placement(item);
             ulong clientKey = items.ReserveClientKey();
             items.ExpectRegistration(clientKey, item);
+            craft.Results.Add((clientKey, item));
             commit.Created.Add(new CraftCreatedItem
             {
-                ClientKey = clientKey, Definition = item.id, Placement = placement, Parent = 0, Slot = slot,
-                Location = SharedItemObjects.Read(item), Payload = ItemStateCodec.Capture(item)
+                ClientKey = clientKey, Definition = item.id, Placement = placement, Parent = parent, Slot = slot,
+                Condition = item.condition, Location = SharedItemObjects.Read(item), Payload = ItemStateCodec.Capture(item)
             });
         }
-        if (commit.Removed.Count == 0 && commit.Updated.Count == 0 && commit.Created.Count == 0 && craft.Ingredients.Count > 0)
+
+        // A liquid result can be added to an existing container without creating a new item.
+        foreach (WaterContainerItem container in craft.Scope.LiquidTargets)
         {
-            Item first = craft.Ingredients[0];
-            if (items.TryGetId(first, out ulong id))
-            {
-                commit.Updated.Add(new CraftUpdatedItem
-                {
-                    Id = id, Revision = craft.Revisions[0], Condition = first.condition,
-                    Payload = ItemStateCodec.Capture(first)
-                });
-            }
+            Item? target = container.GetComponent<Item>();
+            if (!target || !items.TryGetId(target, out ulong id) || commit.Removed.Contains(id) ||
+                commit.Updated.Any(value => value.Id == id) || !items.TryGetState(id, out ItemState state)) continue;
+            commit.Updated.Add(UpdateItem(target, id, state.Revision));
         }
         return commit;
     }
 
-    private static IEnumerable<Item> ItemsForScan()
+    private CraftUpdatedItem UpdateItem(Item item, ulong id, uint revision)
     {
-        var seen = new HashSet<int>();
-        foreach (Item item in Item.allItems)
+        (ItemPlacement placement, ulong parent, byte slot) = Placement(item);
+        return new CraftUpdatedItem
         {
-            if (item && seen.Add(item.GetInstanceID())) yield return item;
-        }
-        foreach (Item item in UnityEngine.Object.FindObjectsByType<Item>(FindObjectsSortMode.None))
-        {
-            if (item && seen.Add(item.GetInstanceID())) yield return item;
-        }
+            Id = id, Revision = revision, Condition = item.condition, HasPlacement = true,
+            Placement = placement, Parent = parent, Slot = slot, Location = SharedItemObjects.Read(item),
+            Payload = ItemStateCodec.Capture(item)
+        };
     }
 
-    private void Rollback(PendingCraft craft)
+    private static bool ValidateOutcome(PendingCraft craft, ItemCraftCommit commit)
     {
-        Body? body = items.LocalBody;
+        if (craft.Scope.Used.Count != craft.Originals.Length) return false;
+        int expected = Math.Max(1, craft.Recipe.result.amount);
+        if (craft.Recipe.result.isLiquid)
+        {
+            if (commit.Created.Count == 0) return craft.Scope.LiquidTargets.Count > 0;
+            return commit.Created.Count == expected && commit.Created.All(value =>
+                value.Definition == "craftingbottle" && value.Condition >= 0f && value.Condition <= 1f);
+        }
+        return commit.Created.Count == expected && commit.Created.All(value =>
+            value.Definition == craft.Recipe.result.id && value.Condition >= 0f && value.Condition <= 1f);
+    }
+
+    private void Reject(PendingCraft craft, ItemDecision decision, bool restoreLocal)
+    {
+        foreach (var result in craft.Results)
+        {
+            items.ForgetPending(result.ClientKey, result.Item);
+            if (!result.Item) continue;
+            result.Item.gameObject.SetActive(false);
+            UnityEngine.Object.Destroy(result.Item.gameObject);
+        }
+        if (!restoreLocal)
+        {
+            items.InvalidateItemSnapshot();
+            foreach (Original original in craft.Originals) items.Suppress(original.Id, false);
+            return;
+        }
+
         foreach (Original original in craft.Originals)
         {
+            if (original.Id == 0) continue;
             items.Suppress(original.Id, false);
-            Item? existing = items.FindReplica(original.Id);
-            if (existing)
-            {
-                ItemStateCodec.TryApply(existing!, original.Payload, original.Condition, original.Placement);
-                continue;
-            }
-            Vector2 at = body ? body!.transform.position : Vector2.zero;
-            Item? restored = objects.CreateReplica(original.Definition, new ItemLocation(at.x, at.y, 0f));
-            if (!restored || !objects.Apply(restored!, original.Payload, original.Condition, original.Placement)) continue;
-            items.BindRestored(original.Id, restored!);
-            if (original.Placement == ItemPlacement.Inventory && body) items.AttachToSlot(restored!, original.Slot);
-            else objects.PutInWorld(restored!, SharedItemObjects.Read(restored!), authoritative: false);
+            items.RestoreItem(original.Id, original.Definition, original.Payload, original.Condition,
+                original.Placement, original.Parent, original.Slot, original.Location);
+        }
+        foreach (Original descendant in craft.Descendants.OrderBy(value => DescendantDepth(value, craft.Descendants)))
+        {
+            if (descendant.Id == 0) continue;
+            items.Suppress(descendant.Id, false);
+            items.RestoreItem(descendant.Id, descendant.Definition, descendant.Payload, descendant.Condition,
+                descendant.Placement, descendant.Parent, descendant.Slot, descendant.Location);
         }
     }
 
-    private (ItemPlacement Placement, byte Slot) Placement(Item item)
+    private static int DescendantDepth(Original value, List<Original> all)
+    {
+        int depth = 0;
+        ulong parent = value.Parent;
+        var seen = new HashSet<ulong>();
+        while (parent != 0 && seen.Add(parent))
+        {
+            Original match = all.FirstOrDefault(candidate => candidate.Id == parent);
+            if (match.Id == 0) break;
+            depth++;
+            parent = match.Parent;
+        }
+        return depth;
+    }
+
+    private (ItemPlacement Placement, ulong Parent, byte Slot) Placement(Item item)
     {
         Body? body = items.LocalBody;
+        if (item.TryGetParentContainer(out Container container) && container.TryGetComponent<Item>(out Item containerItem) &&
+            items.TryGetId(containerItem, out ulong parent))
+        {
+            return (ItemPlacement.Container, parent, ItemWire.NoSlot);
+        }
         if (body)
         {
             for (int slot = 0; slot < body!.slots.Length; slot++)
             {
-                if (body.GetItem(slot) == item) return (ItemPlacement.Inventory, (byte)slot);
+                if (body.GetItem(slot) == item) return (ItemPlacement.Inventory, 0, (byte)slot);
             }
-            if (body.GetAllWearables().Contains(item)) return (ItemPlacement.Worn, ItemWire.NoSlot);
+            if (body.GetAllWearables().Contains(item)) return (ItemPlacement.Worn, 0, ItemWire.NoSlot);
         }
-        return (ItemPlacement.World, ItemWire.NoSlot);
+        return (ItemPlacement.World, 0, ItemWire.NoSlot);
+    }
+
+    private bool HasAncestor(ItemState state, HashSet<ulong> ancestors)
+    {
+        for (int depth = 0; depth < 32 && state.Parent != 0; depth++)
+        {
+            if (ancestors.Contains(state.Parent)) return true;
+            if (!items.TryGetState(state.Parent, out state)) return false;
+        }
+        return false;
     }
 
     private static void Alert(string message)

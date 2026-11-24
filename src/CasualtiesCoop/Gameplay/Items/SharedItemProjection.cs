@@ -110,6 +110,57 @@ internal sealed class SharedItemProjection : IDisposable
         byObject[view.UnityId] = id;
     }
 
+    internal bool RestoreItem(ulong id, string definition, byte[] payload, float condition,
+        ItemPlacement placement, ulong parent, byte slot, ItemLocation location)
+    {
+        if (!views.TryGetValue(id, out View view))
+        {
+            view = new View();
+            views[id] = view;
+        }
+        if (!view.Item)
+        {
+            view.Item = objects.CreateReplica(definition, location);
+            if (!view.Item) return false;
+            view.UnityId = view.Item.GetInstanceID();
+            view.CreatedFrame = Time.frameCount - 1;
+            byObject[view.UnityId] = id;
+        }
+
+        Item replica = view.Item;
+        if (!objects.Apply(replica, payload, condition, placement)) return false;
+        Detach(replica);
+        switch (placement)
+        {
+            case ItemPlacement.World:
+                objects.PutInWorld(replica, location, authoritative: false);
+                return true;
+            case ItemPlacement.Inventory:
+                if (ApplyInventory(new ItemState { Slot = slot }, replica)) return true;
+                replica.gameObject.SetActive(false);
+                return false;
+            case ItemPlacement.Worn:
+                if (inventory.TryWear(replica)) return true;
+                replica.gameObject.SetActive(false);
+                return false;
+            case ItemPlacement.Container:
+                if (views.TryGetValue(parent, out View parentView) && parentView.Item &&
+                    inventory.TryAttach(parentView.Item, replica)) return true;
+                replica.gameObject.SetActive(false);
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    internal void Reapply(ulong id, ItemState state)
+    {
+        if (!views.TryGetValue(id, out View view) || !view.Item) return;
+        if (!Apply(state, view)) return;
+        view.AppliedRevision = state.Revision;
+        view.AppliedPayload = state.Payload;
+    }
+
     internal void Tick(ItemReplicaStore replicas, bool synced)
     {
         RemoveRetiredViews(replicas);
