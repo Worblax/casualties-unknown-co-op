@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "items.liquid-authority-fallback",
+  "level": "UNITY_ACTORS",
+  "seed": 161,
+  "timeoutMs": 90000,
+  "network": { "latencyMs": 20, "jitterMs": 2, "unreliableLoss": 0 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "algae", "catalogId": "alcohol", "position": [-3.6, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.liquid", "item": "algae", "liquid": "lumalgae", "amount": 300, "clear": true },
+    { "op": "item.condition", "item": "algae", "condition": 1 },
+    { "op": "wait.frames", "count": 30 },
+    { "op": "assert.equal", "query": "items.definitionLiquidPositive", "target": "alcohol", "expected": 1 },
+    { "op": "assert.equal", "query": "items.liquidPayloadRoundTrip", "item": "algae", "expected": 1 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.replicaPayloadMatches", "item": "algae", "expected": 1 } },
+    { "op": "item.remove", "item": "algae" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.definitionLiquidOrphan", "target": "alcohol", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

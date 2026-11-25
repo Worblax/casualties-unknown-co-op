@@ -350,6 +350,9 @@ internal sealed class SharedItemHostScene : IItemWorld
             internal bool ActiveSelf;
             internal bool Simulated;
             internal bool Attempted;
+            internal byte[] TargetPayload = Array.Empty<byte>();
+            internal float TargetCondition;
+            internal ItemPlacement TargetPlacement;
         }
 
         private sealed class ContainerContents
@@ -442,7 +445,11 @@ internal sealed class SharedItemHostScene : IItemWorld
                         scene.NoteCraftPrepareFailure($"updated item {update.Id} payload cannot be applied");
                         return false;
                     }
-                    updates.Add(Capture(item, current));
+                    Snapshot snapshot = Capture(item, current);
+                    snapshot.TargetPayload = update.Payload;
+                    snapshot.TargetCondition = update.Condition;
+                    snapshot.TargetPlacement = update.HasPlacement ? update.Placement : snapshot.Placement;
+                    updates.Add(snapshot);
                 }
 
                 if (!ValidateIngredientChanges(recipe))
@@ -464,13 +471,14 @@ internal sealed class SharedItemHostScene : IItemWorld
                         scene.NoteCraftPrepareFailure("result replica could not be created");
                         return false;
                     }
+                    created.Add((spec, item));
                     item.gameObject.SetActive(false);
+                    if (created.Count == 1) CraftFaultInjection.Hit("prepare-result-apply");
                     if (!scene.objects.Apply(item, spec.Payload, spec.Condition, spec.Placement))
                     {
                         scene.NoteCraftPrepareFailure("result payload cannot be applied");
                         return false;
                     }
-                    created.Add((spec, item));
                     if (created.Count == 1) CraftFaultInjection.Hit("prepare-result");
                 }
                 if (!ValidateResultChanges())
@@ -503,7 +511,8 @@ internal sealed class SharedItemHostScene : IItemWorld
                     // Mark before mutating: Apply can fail after changing some component fields.
                     update.Attempted = true;
                     if (index == 1) CraftFaultInjection.Hit("apply-second-ingredient");
-                    if (!scene.objects.Apply(update.Item, update.Payload, update.Condition, update.Placement))
+                    if (!scene.objects.Apply(update.Item, update.TargetPayload, update.TargetCondition,
+                            update.TargetPlacement))
                     {
                         throw new InvalidOperationException();
                     }

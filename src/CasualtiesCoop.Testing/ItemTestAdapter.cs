@@ -423,6 +423,8 @@ internal sealed class ItemTestAdapter : IDisposable
             (Mathf.Abs(moving.Location.VelocityX) > 0.1f || Mathf.Abs(moving.Location.VelocityY) > 0.1f) ? 1 : 0,
         ["items.converged"] = (r, _, id, _) => r.Replicated(id, ownedOnly: true) ? 1 : 0,
         ["items.hostCondition"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var state) ? Mathf.RoundToInt(state.Condition * 100f) : -1,
+        ["items.hostNativeCondition"] = (_, _, _, item) => item ? Mathf.RoundToInt(item.condition * 100f) : -1,
+        ["items.nativeItemTotal"] = (_, _, _, _) => Item.allItems.Count(value => value),
         ["items.hostPlacement"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var state) ? (int)state.Placement : -1,
         ["items.hostSlot"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var placed) ? placed.Slot : -1,
         ["items.replicaPayloadMatches"] = (r, _, id, _) => r.Cluster.Host.Session.TryGet(id, out var authority) &&
@@ -542,16 +544,26 @@ internal sealed class ItemTestAdapter : IDisposable
             Item? item = Cluster.Host.FindTracked(state.Id);
             if (!item)
             {
-                item = Item.allItems.FirstOrDefault(candidate => candidate && candidate.id == definition &&
-                    candidate.GetComponentInChildren<WaterContainerItem>(true));
+                throw new InvalidOperationException(
+                    $"Authoritative item {state.Id} ({definition}) has no tracked native object.");
             }
-            WaterContainerItem? water = item ? item.GetComponentInChildren<WaterContainerItem>(true) : null;
-            if (!item || !water) continue;
+            WaterContainerItem? water = item.GetComponentInChildren<WaterContainerItem>(true);
+            if (!water) continue;
             if (water.CurrentTotal <= 0f) return 0;
             if (!biochem) return 1;
             return water.stack.Count == 1 && water.stack[0].liquidId == "biochem" ? 1 : 0;
         }
         return -1;
+    }
+    internal int AuthoritativeLiquidOrphan(string definition)
+    {
+        foreach (ItemState state in Cluster.Host.Session.Snapshot())
+        {
+            if (state.Removed || state.Definition != definition) continue;
+            Item? item = Cluster.Host.FindTracked(state.Id);
+            if (!item || !item.GetComponentInChildren<WaterContainerItem>(true)) return 1;
+        }
+        return 0;
     }
     internal int RecipeIngredientsFor(string actor, int recipe)
     {

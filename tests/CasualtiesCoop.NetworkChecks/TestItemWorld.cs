@@ -53,6 +53,10 @@ internal sealed class CraftWorld : IItemWorld, ICraftWorldTransaction
     internal readonly List<CraftCreatedItem> Created = new();
     internal bool RejectApply;
     internal bool Prepared;
+    internal int RejectRemoteState;
+    internal int FailFinalize;
+    internal int FailDispose;
+    internal int RemoteStateCalls;
 
     public ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition) =>
         ItemDecision.Accepted;
@@ -60,7 +64,13 @@ internal sealed class CraftWorld : IItemWorld, ICraftWorldTransaction
     public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
         out float condition) { location = request.Location; condition = 1; return ItemDecision.Accepted; }
     public bool TryApplyState(ulong item, byte[] payload) => true;
-    public void ApplyRemoteState(ItemState state) { }
+    public void ApplyRemoteState(ItemState state)
+    {
+        RemoteStateCalls++;
+        if (RejectRemoteState <= 0) return;
+        RejectRemoteState--;
+        throw new InvalidOperationException("Injected native projection failure.");
+    }
     public bool TryGetRecipe(int recipe, out CraftRecipePlan? plan) => RecipeCatalog.TryGet(recipe, out plan);
     public ItemDecision CheckCraftIngredient(ParticipantId player, ulong item) => ItemDecision.Accepted;
     public bool IsKnownDefinition(string definition) => definition is "stick" or "rock" or "knife" or "rope" or "flask";
@@ -90,6 +100,17 @@ internal sealed class CraftWorld : IItemWorld, ICraftWorldTransaction
     public bool TryApply() => !RejectApply;
     public bool Bind(IReadOnlyList<CraftCreatedResult> results, IReadOnlyList<CraftCreatedItem> specs) => true;
     public bool Confirm() => true;
-    public void FinalizeCommit() { }
-    public void Dispose() { }
+    public void FinalizeCommit()
+    {
+        if (FailFinalize <= 0) return;
+        FailFinalize--;
+        throw new InvalidOperationException("Injected finalize failure.");
+    }
+
+    public void Dispose()
+    {
+        if (FailDispose <= 0) return;
+        FailDispose--;
+        throw new InvalidOperationException("Injected dispose failure.");
+    }
 }

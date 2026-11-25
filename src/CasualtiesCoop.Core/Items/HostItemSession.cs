@@ -339,7 +339,7 @@ internal sealed class HostItemSession : IDisposable
             return;
         }
 
-        if (!items.HasCapacityFor(commit.Created.Count) || commit.Created.Any(value => IsClientKeyUsed(player, value.ClientKey)))
+        if (!items.HasCapacityFor(commit.Created.Count) || !ClientKeysAvailable(player, commit.Created))
         {
             CraftFailed($"capacity or client key failed for operation {commit.Operation}.");
             crafts.Complete(player, commit.Operation, ItemDecision.Unavailable);
@@ -420,9 +420,12 @@ internal sealed class HostItemSession : IDisposable
             return;
         }
 
-        // Ingredient destruction is irreversible, so it happens only after the authoritative
-        // registry accepts the commit. FinalizeCommit reconciles a failed Unity destroy and never
-        // turns an accepted registry commit back into a rejected one.
+        FinishAcceptedCraft(sender, player, commit, native, changes, created);
+    }
+
+    private void FinishAcceptedCraft(ulong sender, ParticipantId player, ItemCraftCommit commit,
+        ICraftWorldTransaction native, List<ItemState> changes, List<CraftCreatedResult> created)
+    {
         try
         {
             native.FinalizeCommit();
@@ -431,22 +434,107 @@ internal sealed class HostItemSession : IDisposable
         {
             CraftFailed($"Irreversible craft finalization failed for operation {commit.Operation}: {exception}");
         }
-        native.Dispose();
+        try
+        {
+            native.Dispose();
+        }
+        catch (Exception exception)
+        {
+            CraftFailed($"Craft transaction disposal failed for operation {commit.Operation}: {exception}");
+        }
+
+        var projectionFailures = new List<ItemState>();
         foreach (ItemState state in changes)
         {
-            if (!state.Removed) world.ApplyRemoteState(state);
+            if (state.Removed) continue;
+            if (!TryApplyRemoteState(state)) projectionFailures.Add(state);
         }
-        foreach (CraftCreatedResult result in created) RecordRegistration(player, result.ClientKey, result.Item, result.Revision);
-        foreach (ItemState state in changes) PublishDelta(state);
+        foreach (ItemState state in projectionFailures)
+        {
+            if (!TryApplyRemoteState(state))
+            {
+                CraftFailed($"Native projection could not be restored for item {state.Id} " +
+                    $"in operation {commit.Operation}.");
+            }
+        }
+
+        foreach (CraftCreatedResult result in created)
+        {
+            try
+            {
+                RecordRegistration(player, result.ClientKey, result.Item, result.Revision);
+            }
+            catch (Exception exception)
+            {
+                CraftFailed($"Craft registration receipt failed for {result.Item} in operation " +
+                    $"{commit.Operation}: {exception}");
+            }
+        }
+
+        try
+        {
+            crafts.Complete(player, commit.Operation, ItemDecision.Accepted, created);
+        }
+        catch (Exception exception)
+        {
+            CraftFailed($"Accepted craft receipt failed for operation {commit.Operation}: {exception}");
+        }
+        try
+        {
+            CraftStateChanged?.Invoke();
+        }
+        catch (Exception exception)
+        {
+            CraftFailed($"Craft state notification failed for operation {commit.Operation}: {exception}");
+        }
+        foreach (ItemState state in changes)
+        {
+            try
+            {
+                PublishDelta(state);
+            }
+            catch (Exception exception)
+            {
+                CraftFailed($"Craft delta publication failed for {state.Id} in operation " +
+                    $"{commit.Operation}: {exception}");
+            }
+        }
         foreach (CraftCreatedResult item in created)
         {
-            peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, commit.Operation, item.ClientKey, item.Item,
-                item.Revision));
+            try
+            {
+                peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, commit.Operation, item.ClientKey,
+                    item.Item, item.Revision));
+            }
+            catch (Exception exception)
+            {
+                CraftFailed($"Craft registration publication failed for {item.Item} in operation " +
+                    $"{commit.Operation}: {exception}");
+            }
         }
-        crafts.Complete(player, commit.Operation, ItemDecision.Accepted, created);
-        CraftStateChanged?.Invoke();
-        peers.Send(sender, ItemCraftWire.WriteResult(peers.SessionId, commit.Operation, commit.Recipe,
-            ItemDecision.Accepted));
+        try
+        {
+            peers.Send(sender, ItemCraftWire.WriteResult(peers.SessionId, commit.Operation, commit.Recipe,
+                ItemDecision.Accepted));
+        }
+        catch (Exception exception)
+        {
+            CraftFailed($"Craft result publication failed for operation {commit.Operation}: {exception}");
+        }
+    }
+
+    private bool TryApplyRemoteState(ItemState state)
+    {
+        try
+        {
+            world.ApplyRemoteState(state);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            CraftFailed($"Native projection failed for item {state.Id}: {exception}");
+            return false;
+        }
     }
 
     private void ReceiveCraftCancel(ParticipantId player, byte[] frame)
@@ -478,8 +566,21 @@ internal sealed class HostItemSession : IDisposable
         return true;
     }
 
+    private bool ClientKeysAvailable(ParticipantId player, List<CraftCreatedItem> created)
+    {
+        var unique = new HashSet<ulong>();
+        foreach (CraftCreatedItem value in created)
+        {
+            if (!unique.Add(value.ClientKey) || IsClientKeyUsed(player, value.ClientKey)) return false;
+        }
+        return true;
+    }
+
     private bool IsClientKeyUsed(ParticipantId player, ulong clientKey) =>
-        registrations.TryGetValue(player, out Dictionary<ulong, RegistrationReceipt>? known) && known.ContainsKey(clientKey);
+        clientKey == 0 ||
+        (registrations.TryGetValue(player, out Dictionary<ulong, RegistrationReceipt>? known) &&
+            known.ContainsKey(clientKey)) ||
+        (lastClientKey.TryGetValue(player, out ulong previous) && clientKey <= previous);
 
     private void CraftFailed(string message)
     {
@@ -520,7 +621,6 @@ internal sealed class HostItemSession : IDisposable
         {
             return;
         }
-        AdvanceClientKey(player, registration.ClientKey);
         if (registrations.TryGetValue(player, out Dictionary<ulong, RegistrationReceipt>? known) &&
             known.TryGetValue(registration.ClientKey, out RegistrationReceipt previous))
         {
@@ -529,6 +629,7 @@ internal sealed class HostItemSession : IDisposable
                 previous.Item, previous.Revision));
             return;
         }
+        if (IsClientKeyUsed(player, registration.ClientKey)) return;
         if (!AdvanceRegistrationOperation(player, registration.Operation))
         {
             return;

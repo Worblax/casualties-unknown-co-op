@@ -104,6 +104,50 @@ Additional Unity coverage added with the P0 interaction fix:
 before the recipe, because recipe 0 uses `INT` to decide whether `SpawnResult` can produce rope.
 This changes a precondition, not an expected outcome.
 
+## P0 audit fixes (post-456482d)
+
+- `CraftSceneTransaction` keeps the pre-commit snapshot and the commit target state separate.
+  `TryApply` now applies `commit.Updated` payload, condition and placement, while rollback still
+  restores the captured before-state.
+- A created result replica is registered in the transaction before the first fallible apply.
+  Any prepare failure or exception destroys it through the normal cleanup path.
+- Accepted commits run through a guarded completion pipeline: native finalize/dispose, projection
+  apply with one retry, registration receipts, deltas, registration messages and the craft result.
+  Native or projection failures no longer skip the accepted decision or its receipt publication.
+- Client keys use a per-participant high-water mark. An evicted key cannot be reused with a new
+  operation, duplicate keys in one commit are rejected, and reconnect resumes above the confirmed
+  key instead of relying on the bounded 32-entry receipt history.
+- `AuthoritativeLiquidState` throws when an authoritative liquid state has no tracked native
+  object. The test helper no longer searches `Item.allItems` for another participant's object.
+
+Targeted coverage:
+
+- `items.craft-ingredient-state` fails a craft after the first native ingredient update, verifies
+  the knife condition returns to 100, then repeats the craft and verifies both authoritative and
+  native condition become 88.
+- `items.craft-fault-injection` adds `prepare-result-apply` and checks that no result replica
+  survives a failed prepare.
+- `items.liquid-authority-fallback` removes the host-native alcohol object and verifies
+  `items.definitionLiquidOrphan` detects the missing projection.
+- `P0CraftChecks.AcceptedCommitCompletesAfterNativeFailures` injects finalize, dispose and remote
+  projection failures while requiring an accepted result and registration receipt.
+- `P0CraftChecks.EvictedClientKeyCannotBeReusedAfterReconnect` registers more than the receipt
+  window, rejects an old key with a new operation, then proves a fresh key works after reconnect.
+
+## Multi-process feasibility (investigation only)
+
+Two full copies of the packaged player can run at the same time on this machine. Each copy was
+launched with `--coop-test <manifest> -batchmode -nographics -logFile <unique>`, its own test DLLs
+and its own report directory; both smoke scenarios passed with distinct PIDs (127744 and 133684).
+This confirms process isolation for independent virtual-transport worlds.
+
+Launching two players directly from the same install did not work reliably: one process passed and
+the second exited with code 1 before writing `started.json`, consistent with shared BepInEx/Unity
+install and log resources. The current virtual transport is an in-process `SimulatedNetwork`; there
+is no cross-process transport. `Application.persistentDataPath` and PlayerPrefs are still shared
+between copies, so a future multi-client orchestrator needs per-instance install/log directories
+and data-directory or OS-account isolation. No orchestrator or cross-process transport was added.
+
 ## Known P0 limitations
 
 1. Guest-side rollback of nested containers is implemented from captured replica state, but

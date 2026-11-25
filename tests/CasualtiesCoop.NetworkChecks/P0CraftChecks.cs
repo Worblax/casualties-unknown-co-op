@@ -32,6 +32,8 @@ internal static class P0CraftChecks
         ExpiredReservationCannotCommit();
         DuplicateCommitReplaysAfterReconnect();
         RegistrationReplayAfterInterleavedRegistrationIsIdempotent();
+        AcceptedCommitCompletesAfterNativeFailures();
+        EvictedClientKeyCannotBeReusedAfterReconnect();
     }
 
     private static void ConcurrentReservationHasSingleWinner()
@@ -272,6 +274,78 @@ internal static class P0CraftChecks
             accepted[1].ClientKey == keyB && accepted[1].Item != accepted[0].Item &&
             scenario.Host.Snapshot().Length == 4,
             "The A-B-A sequence replays A's receipt without allocating another item.");
+    }
+
+    private static void AcceptedCommitCompletesAfterNativeFailures()
+    {
+        using var scenario = new Scenario();
+        var accepted = new List<ulong>();
+        scenario.FirstGuest.RegistrationAccepted += (key, _, _) => accepted.Add(key);
+        ulong operation = scenario.ReserveFirst();
+        scenario.World.RejectRemoteState = 1;
+        scenario.World.FailFinalize = 1;
+        scenario.World.FailDispose = 1;
+        Check.That(scenario.FirstGuest.TryCommitCraft(Commit(operation, 11, new[] { scenario.Item0 }, Result(85))),
+            "The participant sends a valid commit before native reconciliation fails.");
+        scenario.AdvanceReady();
+        bool created = scenario.Host.Snapshot().Any(value => value.Definition == "rope");
+        Check.That(scenario.FirstCraftResults.Last() == ItemDecision.Accepted && created &&
+            !scenario.Host.TryGet(scenario.Item0, out _) && accepted.Count == 1 &&
+            scenario.World.RemoteStateCalls >= 2 && scenario.World.FailFinalize == 0 &&
+            scenario.World.FailDispose == 0 && scenario.World.RejectRemoteState == 0,
+            $"Accepted operation completion: result={scenario.FirstCraftResults.Last()}, created={created}, " +
+            $"acks={accepted.Count}, projections={scenario.World.RemoteStateCalls}.");
+    }
+
+    private static void EvictedClientKeyCannotBeReusedAfterReconnect()
+    {
+        using var scenario = new Scenario();
+        var accepted = new List<(ulong ClientKey, ulong Item)>();
+        scenario.FirstGuest.RegistrationAccepted += (key, item, _) => accepted.Add((key, item));
+        var first = Registration(scenario.Item0);
+        Check.That(scenario.FirstGuest.TryRegister(first, out ulong firstKey), "The participant registers the first item.");
+        for (int index = 1; index < 40; index++)
+        {
+            Check.That(scenario.FirstGuest.TryRegister(Registration(scenario.Item0), out _),
+                $"The participant registers item {index + 1}.");
+        }
+        scenario.AdvanceReady();
+        int before = scenario.Host.Snapshot().Length;
+        int acknowledged = accepted.Count;
+        ulong lastOperation = scenario.Host.LastRegistrationOperation(First);
+        ulong lastKey = scenario.Host.LastClientKey(First);
+        Check.That(before == 42 && acknowledged == 40 && lastKey == 40,
+            $"Forty registrations settle: items={before}, acks={acknowledged}, lastKey={lastKey}.");
+
+        var stale = Registration(scenario.Item0);
+        stale.Operation = lastOperation + 1;
+        stale.ClientKey = firstKey;
+        Check.That(scenario.FirstPeers.Send(HostAddress, ItemWire.WriteRegistration(Session, stale)),
+            "A stale evicted client key is replayed with a fresh operation.");
+        scenario.AdvanceReady();
+        Check.That(scenario.Host.Snapshot().Length == before && accepted.Count == acknowledged &&
+            scenario.Host.LastClientKey(First) == lastKey &&
+            scenario.Host.LastRegistrationOperation(First) == lastOperation,
+            "The stale key is rejected without allocating an item or advancing receipts.");
+
+        scenario.Network.SetConnected(HostAddress, First, false);
+        scenario.Network.SetConnected(HostAddress, First, true);
+        scenario.FirstGuest.ResumeAfterOffer(0, 0, lastOperation, lastKey);
+        for (int frame = 0; frame < 32 && !scenario.FirstGuest.Synced; frame++)
+        {
+            scenario.FirstGuest.Tick();
+            scenario.Network.Advance(0);
+            scenario.Host.TickSnapshots();
+            scenario.Network.Advance(0);
+        }
+        Check.That(scenario.FirstGuest.Synced, "The participant resynchronizes after reconnecting.");
+
+        Check.That(scenario.FirstGuest.TryRegister(Registration(scenario.Item0), out ulong nextKey) &&
+            nextKey > lastKey, "A fresh registration resumes above the confirmed high-water mark.");
+        scenario.AdvanceReady();
+        Check.That(accepted.Count == acknowledged + 1 && scenario.Host.Snapshot().Length == before + 1 &&
+            scenario.Host.LastClientKey(First) == nextKey,
+            "Reconnect keeps client keys unique across the evicted history window.");
     }
 
     private static ItemCraftCommit Commit(ulong operation, int recipe, IReadOnlyList<ulong> removed, CraftCreatedItem created)

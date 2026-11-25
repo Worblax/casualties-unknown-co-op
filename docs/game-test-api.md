@@ -33,4 +33,6 @@
 
 `items.definitionConverged` сравнивает authoritative-состояния с репликами каждого гостя по идентичности, владельцу, слоту, ревизии, condition и payload. Для пустого набора состояний проверка проходит только при отсутствии предметов у всех участников.
 
+`items.hostNativeCondition` читает condition именно у нативного объекта, связанного с authoritative ID. `items.nativeItemTotal` считает живые `Item.allItems`, а `items.definitionLiquidOrphan` сообщает, что authoritative-состояние потеряло нативный объект. `items.definitionLiquidPositive`/`Biochem` в этом случае выбрасывают ошибку вместо поиска похожего предмета другого участника. Fault point `prepare-result-apply` проверяет очистку уже созданной реплики результата до применения payload.
+
 Уровень `UNITY_HOST` включает настоящий авторитетный мир и независимые гостевые хранилища. В `UNITY_GUEST` только один назначенный гость применяет отдельные production-проекции к Unity. В `UNITY_ACTORS` доступна локальная физика нескольких Body. Поддержка нативного подбора дополнительным Body ограничена локальным сценарием, сетевой подбор отправляет операции через Core. Источник позиции виртуального участника с Body — его живой Unity transform. См. [проверенные bindings](game-test-bindings.md).

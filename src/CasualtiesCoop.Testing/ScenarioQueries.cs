@@ -118,6 +118,7 @@ internal static class ScenarioQueries
             c => { String(c, "actor"); String(c, "item"); }));
         Registry.Add("items.definitionLiquidPositive", ForTarget((r, t) => r.Items.AuthoritativeLiquidState(t, false)));
         Registry.Add("items.definitionLiquidBiochem", ForTarget((r, t) => r.Items.AuthoritativeLiquidState(t, true)));
+        Registry.Add("items.definitionLiquidOrphan", ForTarget((r, t) => r.Items.AuthoritativeLiquidOrphan(t)));
         Registry.Add("items.recipeIngredients", new((r, c) =>
             r.Items.RecipeIngredientsFor(String(c, "actor"), int.Parse(String(c, "target"))),
             c => { String(c, "actor"); String(c, "target"); }));

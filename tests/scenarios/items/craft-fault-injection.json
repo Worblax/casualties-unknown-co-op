@@ -31,6 +31,13 @@
     { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "foliage", "expected": 2 },
     { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "rope", "expected": 0 },
 
+    { "op": "craft.fault", "point": "prepare-result-apply" },
+    { "op": "item.craft", "peer": "alice", "recipe": 0 },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": { "op": "items.craftPending", "target": "alice", "expected": 0 } },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "foliage", "expected": 2 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "rope", "expected": 0 },
+    { "op": "assert.equal", "query": "items.nativeDefinitionCount", "target": "rope", "expected": 0 },
+
     { "op": "craft.fault", "point": "apply-first-ingredient" },
     { "op": "item.craft", "peer": "alice", "recipe": 0 },
     { "op": "assert.eventually", "timeoutMs": 15000, "condition": { "op": "items.craftPending", "target": "alice", "expected": 0 } },
