@@ -344,7 +344,7 @@ internal static class ItemWire
         clientKey = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(25));
         item = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(33));
         revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(41));
-        return operation != 0 && clientKey != 0 && item != 0 && revision != 0;
+        return operation != 0 && clientKey != 0 && (item == 0) == (revision == 0);
     }
 
     internal static byte[] WriteReport(Guid session, SharedItemStateReport report)

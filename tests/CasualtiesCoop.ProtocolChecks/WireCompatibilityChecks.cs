@@ -126,6 +126,11 @@ internal static class WireCompatibilityChecks
         Require(ItemWire.TryReadRegistered(frame, Session, out ulong operation, out ulong key, out ulong item, out uint revision) &&
             operation == Operation && key == ItemId && item == Operation + 1 && revision == Revision,
             "Registration acknowledgment maps the local item key");
+        frame = ItemWire.WriteRegistered(Session, Operation, ItemId, 0, 0);
+        Require(ItemWire.TryReadRegistered(frame, Session, out _, out key, out item, out revision) &&
+            key == ItemId && item == 0 && revision == 0, "Registration rejection has no item ID or revision");
+        Require(!ItemWire.TryReadRegistered(ItemWire.WriteRegistered(Session, Operation, ItemId, 0, Revision),
+            Session, out _, out _, out _, out _), "A half-empty registration receipt is rejected");
         var report = new SharedItemStateReport { Operation = Operation, ItemId = ItemId, Revision = Revision,
             Condition = .4f, Placement = ItemPlacement.World, Slot = ItemWire.NoSlot,
             Location = new ItemLocation(1, 2, 3), Payload = new byte[] { 6 } };

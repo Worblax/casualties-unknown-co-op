@@ -14,7 +14,7 @@ internal interface IItemWorld
     bool TrySwapSlots(ParticipantId player, ItemState first, byte destination, ItemState? second);
     ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
         out float condition);
-    bool TryApplyState(ulong item, byte[] payload);
+    bool CanApplyState(ulong item, byte[] payload);
     void ApplyRemoteState(ItemState state);
     bool TryGetRecipe(int recipe, out CraftRecipePlan? plan);
     ItemDecision CheckCraftIngredient(ParticipantId player, ulong item);

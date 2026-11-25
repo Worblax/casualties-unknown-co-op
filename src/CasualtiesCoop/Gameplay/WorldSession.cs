@@ -201,10 +201,7 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
                 !SceneReady || WaitingForRecovery ||
                 Fluids.Receive(sender, bytes),
             MessageKind.LightSnapshot => lights.Receive(sender, bytes),
-            MessageKind.ItemRequest or MessageKind.ItemState or MessageKind.ItemResult or MessageKind.ItemMotion or
-                MessageKind.ItemSyncRequest or MessageKind.ItemSyncDone or MessageKind.ItemDelta or MessageKind.ItemSnapshotEntry =>
-                Items.Receive(sender, bytes),
-            _ => false
+            _ => Items.Receive(sender, bytes)
         };
     }
 

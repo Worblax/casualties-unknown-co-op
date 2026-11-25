@@ -266,6 +266,7 @@ internal sealed class SteamRoomLink : IDisposable
                 {
                     if (HandleFrame?.Invoke(peer.Id, message) != true)
                     {
+                        log.LogWarning($"Rejected {(MessageKind)message[0]} from a verified room peer.");
                         Drop(peer, InvalidFrame, "Unexpected room message.");
                         return;
                     }

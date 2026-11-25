@@ -33,6 +33,7 @@ internal static class SharedItemHooks
         Prefix(harmony, typeof(Body), nameof(Body.DropItem), nameof(Drop), typeof(Item));
         Prefix(harmony, typeof(Body), nameof(Body.ThrowItem), nameof(Throw), typeof(float));
         Prefix(harmony, typeof(Body), nameof(Body.SwapSlots), nameof(Swap), typeof(int), typeof(int));
+        Prefix(harmony, typeof(Body), nameof(Body.SwitchHands), nameof(SwitchHands));
         Prefix(harmony, typeof(Body), nameof(Body.UseItemInHand), nameof(UseHand));
         Prefix(harmony, typeof(Body), nameof(Body.UseItem), nameof(Use), typeof(Item));
         Prefix(harmony, typeof(Body), nameof(Body.WearWearable), nameof(Placement), typeof(Item));
@@ -131,6 +132,9 @@ internal static class SharedItemHooks
         return shared.TryNativeSwap(__instance, slot1, slot2);
     }
 
+    private static bool SwitchHands(Body __instance) =>
+        !__instance.slots[0].canPickUp || !__instance.slots[1].canPickUp || Swap(__instance, 0, 1);
+
     private static bool UseHand(Body __instance)
     {
         Item item = __instance.GetItem(__instance.handSlot);
@@ -208,7 +212,11 @@ internal static class SharedItemHooks
     }
 
     private static void BeforeCreate() { }
-    private static void AfterCreate(ref GameObject __result) => CraftExecutionScope.Current?.RecordCreated(__result);
+    private static void AfterCreate(ref GameObject __result)
+    {
+        CraftExecutionScope.Current?.RecordCreated(__result);
+        if (__result && __result.TryGetComponent(out Item item)) Items?.ObserveCreated(item);
+    }
     private static void BeforeDestroy(UnityEngine.Object obj) => CraftExecutionScope.Current?.MarkDestroyed(obj);
 
     private static void TraceLiquid(WaterContainerItem __instance, float __result) =>

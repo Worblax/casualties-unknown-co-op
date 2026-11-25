@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using CasualtiesCoop.Core;
+using CasualtiesCoop.Networking;
 
 namespace CasualtiesCoop.Testing;
 
@@ -203,7 +204,10 @@ internal sealed class MultiProcessTransport : ISessionTransport, IDisposable
             {
                 if (link != current) break;
             }
-            ReceiveFrame?.Invoke(peer, frame);
+            if (ReceiveFrame?.Invoke(peer, frame) != true)
+            {
+                throw new InvalidOperationException($"The verified peer's {(MessageKind)frame[0]} frame was rejected.");
+            }
         }
         delivery.Clear();
     }

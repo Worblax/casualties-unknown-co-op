@@ -22,7 +22,7 @@
     { "op": "held.power", "role": "guest" },
     { "op": "assert.localHeldBeam", "role": "guest" },
     { "op": "held.angle", "role": "guest", "angle": 335 },
-    { "op": "assert.remoteHeld", "role": "host", "definition": "flashlight", "angle": 335, "tolerance": 3, "beam": true },
+    { "op": "assert.remoteHeld", "role": "host", "definition": "flashlight", "angle": 335, "tolerance": 3, "beam": true, "powerState": true },
     { "op": "wait.peerStep" },
     { "op": "held.angle", "role": "guest", "angle": 20 },
     { "op": "assert.remoteHeld", "role": "host", "definition": "flashlight", "angle": 20, "tolerance": 3, "wrapFrom": 335, "beam": true },

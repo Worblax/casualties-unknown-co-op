@@ -64,7 +64,7 @@ internal sealed class CraftWorld : IItemWorld, ICraftWorldTransaction
     public bool TrySwapSlots(ParticipantId player, ItemState first, byte destination, ItemState? second) => false;
     public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
         out float condition) { location = request.Location; condition = 1; return ItemDecision.Accepted; }
-    public bool TryApplyState(ulong item, byte[] payload) => true;
+    public bool CanApplyState(ulong item, byte[] payload) => true;
     public void ApplyRemoteState(ItemState state)
     {
         RemoteStateCalls++;

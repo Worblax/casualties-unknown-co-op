@@ -622,7 +622,11 @@ internal sealed class HostItemSession : IDisposable
                 previous.Item, previous.Revision));
             return;
         }
-        if (IsClientKeyUsed(player, registration.ClientKey)) return;
+        if (IsClientKeyUsed(player, registration.ClientKey))
+        {
+            peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, registration.Operation, registration.ClientKey, 0, 0));
+            return;
+        }
         if (!AdvanceRegistrationOperation(player, registration.Operation))
         {
             return;
@@ -634,6 +638,7 @@ internal sealed class HostItemSession : IDisposable
             if (!items.TryGet(registration.Parent, out ItemState foundParent) || foundParent.Removed ||
                 IsItemConflict(registration.Parent))
             {
+                RejectRegistration(sender, player, registration);
                 return;
             }
             parent = foundParent;
@@ -641,6 +646,7 @@ internal sealed class HostItemSession : IDisposable
         if (!world.IsKnownDefinition(registration.Definition) ||
             world.CheckRegistration(player, registration, parent) != ItemDecision.Accepted)
         {
+            RejectRegistration(sender, player, registration);
             return;
         }
 
@@ -649,6 +655,7 @@ internal sealed class HostItemSession : IDisposable
                 registration.Slot, registration.Location, registration.Condition, registration.Payload,
                 registration.ClientKey, out ItemState state))
         {
+            RejectRegistration(sender, player, registration);
             return;
         }
         RecordRegistration(player, registration.ClientKey, state.Id, state.Revision);
@@ -656,6 +663,12 @@ internal sealed class HostItemSession : IDisposable
         peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, registration.Operation, registration.ClientKey,
             state.Id, state.Revision));
         PublishDelta(state);
+    }
+
+    private void RejectRegistration(ulong sender, ParticipantId player, SharedItemRegistration registration)
+    {
+        RecordRegistration(player, registration.ClientKey, 0, 0);
+        peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, registration.Operation, registration.ClientKey, 0, 0));
     }
 
     private void ReceiveStateReport(ulong sender, ParticipantId player, byte[] frame)
@@ -670,7 +683,7 @@ internal sealed class HostItemSession : IDisposable
         {
             return;
         }
-        if (!ReportedPlacementValid(player, report, state) ||
+        if (!ReportedPlacementValid(player, report, state) || !world.CanApplyState(report.ItemId, report.Payload) ||
             !items.TryCommitCraftUpdate(new CraftUpdatedItem
             {
                 Id = report.ItemId, Revision = report.Revision, Condition = report.Condition,

@@ -14,10 +14,15 @@ internal sealed class SharedItemReplication : IDisposable
 {
     private const float GuestStateInterval = 0.35f;
     private const float RegistrationScanInterval = 0.5f;
+    private const float RegistrationRetrySeconds = 1f;
+    private const int RegistrationBudget = 8;
+    private const int MaxPendingRegistrations = 256;
     private sealed class PendingRegistration
     {
         internal Item Item = null!;
-        internal SharedItemRegistration Request;
+        internal int InstanceId;
+        internal SharedItemRegistration? Request;
+        internal ulong AcknowledgedId;
         internal float NextSend;
     }
     private struct ReportedState
@@ -36,6 +41,10 @@ internal sealed class SharedItemReplication : IDisposable
     private readonly Dictionary<ulong, (uint Operation, float At)> alcoholRequests = new();
     private readonly Dictionary<ulong, PendingRegistration> pendingRegistrations = new();
     private readonly HashSet<int> registrationObjects = new();
+    private readonly GuestItemDiscovery discovery = new();
+    private readonly List<ulong> expiredRegistrations = new();
+    private readonly Dictionary<int, (Item Item, ItemPlacement Placement, ulong Parent, byte Slot)> rejectedRegistrations = new();
+    private readonly List<int> expiredRejections = new();
     private readonly Dictionary<ulong, ReportedState> reported = new();
     private uint alcoholOperation;
     private float nextGuestState;
@@ -74,6 +83,7 @@ internal sealed class SharedItemReplication : IDisposable
             guest.StateAccepted += OnStateChanged;
             guest.ResultAccepted += OnResult;
             guest.RegistrationAccepted += OnRegistrationAccepted;
+            guest.RegistrationRejected += OnRegistrationRejected;
             guest.CraftResultAccepted += OnCraftResult;
             crafting = new SharedItemCrafting(this, objects);
         }
@@ -135,6 +145,7 @@ internal sealed class SharedItemReplication : IDisposable
 
         guest.Tick();
         crafting?.Tick();
+        BindAcknowledgedRegistrations();
         if (guest.Synced)
         {
             if (clock.Now >= nextRegistrationScan)
@@ -142,6 +153,7 @@ internal sealed class SharedItemReplication : IDisposable
                 nextRegistrationScan = clock.Now + RegistrationScanInterval;
                 TickLocalRegistrations(localBody);
             }
+            RegisterDiscoveredItems();
             if (clock.Now >= nextGuestState)
             {
                 nextGuestState = clock.Now + GuestStateInterval;
@@ -200,10 +212,33 @@ internal sealed class SharedItemReplication : IDisposable
         {
             hostScene.Observe(item);
         }
-        else if (!projection!.TryGetId(item!, out _) && !registrationObjects.Contains(item!.GetInstanceID()))
+        else
         {
-            TryRegisterLocal(item!);
+            ObserveCreated(item!);
         }
+    }
+
+    internal void ObserveCreated(Item item)
+    {
+        if (guest is null || !item || !item.rb || SharedItemProjection.IsReplica(item) ||
+            (WorldGeneration.world && WorldGeneration.world.generatingWorld) ||
+            projection!.TryGetId(item, out _) || registrationObjects.Contains(item.GetInstanceID()) ||
+            (CraftExecutionScope.Current is { } scope && scope.Created.Contains(item)) || !objects.Supports(item))
+        {
+            return;
+        }
+
+        int instanceId = item.GetInstanceID();
+        if (rejectedRegistrations.TryGetValue(instanceId, out var rejection))
+        {
+            if (rejection.Item == item && CurrentPlacement(item) == (rejection.Placement, rejection.Parent, rejection.Slot))
+            {
+                return;
+            }
+            rejectedRegistrations.Remove(instanceId);
+        }
+
+        discovery.Enqueue(item);
     }
 
     internal void ItemStarted(Item? item)
@@ -219,7 +254,7 @@ internal sealed class SharedItemReplication : IDisposable
             projection.Reapply(id, state, guest.Replicas);
             return;
         }
-        if (!registrationObjects.Contains(item!.GetInstanceID())) TryRegisterLocal(item!);
+        ObserveCreated(item!);
     }
 
     internal void MarkDirty(Item? item)
@@ -237,9 +272,9 @@ internal sealed class SharedItemReplication : IDisposable
         {
             nextGuestState = 0;
         }
-        else if (!registrationObjects.Contains(item!.GetInstanceID()))
+        else
         {
-            TryRegisterLocal(item!);
+            ObserveCreated(item!);
         }
     }
 
@@ -284,8 +319,6 @@ internal sealed class SharedItemReplication : IDisposable
     internal void ResetPeer(ulong player)
     {
         alcoholRequests.Remove(player);
-        pendingRegistrations.Clear();
-        registrationObjects.Clear();
     }
 
     internal bool IsTracked(Item? item) => item &&
@@ -565,6 +598,12 @@ internal sealed class SharedItemReplication : IDisposable
     private void TickLocalRegistrations(Body body)
     {
         TickPendingRegistrations();
+        foreach (var pair in rejectedRegistrations)
+        {
+            if (!pair.Value.Item) expiredRejections.Add(pair.Key);
+        }
+        foreach (int id in expiredRejections) rejectedRegistrations.Remove(id);
+        expiredRejections.Clear();
         foreach (Item item in Item.allItems)
         {
             if (!item || projection!.TryGetId(item, out _) || registrationObjects.Contains(item.GetInstanceID()))
@@ -573,7 +612,25 @@ internal sealed class SharedItemReplication : IDisposable
             }
             if (HasLocalPlacement(body, item))
             {
-                TryRegisterLocal(item);
+                ObserveCreated(item);
+            }
+        }
+    }
+
+    private void RegisterDiscoveredItems()
+    {
+        int count = Math.Min(discovery.Count, RegistrationBudget);
+        while (count-- > 0 && pendingRegistrations.Count < MaxPendingRegistrations)
+        {
+            Item item = discovery.Dequeue();
+            if (!item || SharedItemProjection.IsReplica(item) || projection!.TryGetId(item, out _) ||
+                registrationObjects.Contains(item.GetInstanceID()))
+            {
+                continue;
+            }
+            if (!TryRegisterLocal(item))
+            {
+                discovery.Enqueue(item);
             }
         }
     }
@@ -594,50 +651,50 @@ internal sealed class SharedItemReplication : IDisposable
 
         (ItemPlacement placement, ulong parent, byte slot) = CurrentPlacement(item);
         if (placement == ItemPlacement.Container && parent == 0) return false;
-        if (pendingRegistrations.Count >= 256)
-        {
-            return false;
-        }
-
         var registration = new SharedItemRegistration
         {
             Definition = item.id, Placement = placement, Parent = parent, Slot = slot,
-            Location = SharedItemObjects.Read(item), Payload = ItemStateCodec.Capture(item)
+            Location = SharedItemObjects.Read(item), Condition = Mathf.Clamp01(item.condition), Payload = ItemStateCodec.Capture(item)
         };
         if (!guest.TryRegister(registration, out ulong clientKey))
         {
             return false;
         }
+        registration.ClientKey = clientKey;
+        int instanceId = item.GetInstanceID();
         pendingRegistrations[clientKey] = new PendingRegistration
         {
-            Item = item, Request = registration, NextSend = Time.unscaledTime + 1f
+            Item = item, InstanceId = instanceId, Request = registration, NextSend = clock.Now + RegistrationRetrySeconds
         };
-        registrationObjects.Add(item.GetInstanceID());
+        registrationObjects.Add(instanceId);
         return true;
     }
 
     private void TickPendingRegistrations()
     {
         if (pendingRegistrations.Count == 0) return;
-        var expired = new List<ulong>();
+        int sends = 0;
         foreach (var pair in pendingRegistrations)
         {
             PendingRegistration pending = pair.Value;
             if (!pending.Item)
             {
-                expired.Add(pair.Key);
+                expiredRegistrations.Add(pair.Key);
                 continue;
             }
-            if (pending.Request.Operation == 0 || Time.unscaledTime < pending.NextSend) continue;
-            guest!.TryResendRegistration(pending.Request);
-            pending.NextSend = Time.unscaledTime + 1f;
+            if (sends >= RegistrationBudget || pending.AcknowledgedId != 0 || pending.Request is not { } request ||
+                clock.Now < pending.NextSend) continue;
+            guest!.TryResendRegistration(request);
+            sends++;
+            pending.NextSend = clock.Now + RegistrationRetrySeconds;
         }
-        foreach (ulong key in expired)
+        foreach (ulong key in expiredRegistrations)
         {
             if (!pendingRegistrations.TryGetValue(key, out PendingRegistration pending)) continue;
-            registrationObjects.Remove(pending.Item.GetInstanceID());
+            registrationObjects.Remove(pending.InstanceId);
             pendingRegistrations.Remove(key);
         }
+        expiredRegistrations.Clear();
     }
 
     private static bool HasLocalPlacement(Body body, Item item)
@@ -703,8 +760,9 @@ internal sealed class SharedItemReplication : IDisposable
 
     internal void ExpectRegistration(ulong clientKey, Item item)
     {
-        pendingRegistrations[clientKey] = new PendingRegistration { Item = item };
-        registrationObjects.Add(item.GetInstanceID());
+        int instanceId = item.GetInstanceID();
+        pendingRegistrations[clientKey] = new PendingRegistration { Item = item, InstanceId = instanceId };
+        registrationObjects.Add(instanceId);
     }
 
     internal void Suppress(ulong id, bool value) => projection?.Suppress(id, value);
@@ -748,14 +806,49 @@ internal sealed class SharedItemReplication : IDisposable
     private void OnCraftResult(ulong operation, int recipe, ItemDecision decision) => crafting?.OnResult(operation, recipe, decision);
     private void OnRegistrationAccepted(ulong clientKey, ulong itemId, uint revision)
     {
-        if (!pendingRegistrations.TryGetValue(clientKey, out PendingRegistration pending) || !pending.Item)
+        if (pendingRegistrations.TryGetValue(clientKey, out PendingRegistration pending))
+        {
+            pending.AcknowledgedId = itemId;
+        }
+    }
+
+    private void OnRegistrationRejected(ulong clientKey)
+    {
+        if (!pendingRegistrations.TryGetValue(clientKey, out PendingRegistration pending) ||
+            pending.AcknowledgedId != 0 || pending.Request is not { } request)
         {
             return;
         }
         pendingRegistrations.Remove(clientKey);
-        registrationObjects.Remove(pending.Item.GetInstanceID());
-        projection!.BindCreated(itemId, pending.Item);
-        RegistrationBinds++;
+        registrationObjects.Remove(pending.InstanceId);
+        if (!pending.Item) return;
+        if (rejectedRegistrations.Count >= MaxPendingRegistrations)
+        {
+            rejectedRegistrations.Remove(rejectedRegistrations.First().Key);
+        }
+        rejectedRegistrations[pending.InstanceId] = (pending.Item, request.Placement, request.Parent, request.Slot);
+    }
+
+    private void BindAcknowledgedRegistrations()
+    {
+        // A receipt can reach the guest while its matching delta is still buffered for snapshot repair.
+        foreach (var pair in pendingRegistrations)
+        {
+            PendingRegistration pending = pair.Value;
+            if (pending.AcknowledgedId == 0 || !pending.Item || !guest!.Replicas.TryGet(pending.AcknowledgedId, out _))
+            {
+                continue;
+            }
+            projection!.BindCreated(pending.AcknowledgedId, pending.Item);
+            RegistrationBinds++;
+            expiredRegistrations.Add(pair.Key);
+        }
+        foreach (ulong key in expiredRegistrations)
+        {
+            registrationObjects.Remove(pendingRegistrations[key].InstanceId);
+            pendingRegistrations.Remove(key);
+        }
+        expiredRegistrations.Clear();
     }
 
     private void OnResult(SharedItemRequest request, ItemDecision decision)
@@ -802,6 +895,7 @@ internal sealed class SharedItemReplication : IDisposable
             guest.StateAccepted -= OnStateChanged;
             guest.ResultAccepted -= OnResult;
             guest.RegistrationAccepted -= OnRegistrationAccepted;
+            guest.RegistrationRejected -= OnRegistrationRejected;
             guest.CraftResultAccepted -= OnCraftResult;
             guest.Dispose();
             projection!.Dispose();

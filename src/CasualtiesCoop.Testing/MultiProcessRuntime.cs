@@ -7,6 +7,7 @@ using CasualtiesCoop.Core;
 using CasualtiesCoop.Gameplay;
 using CasualtiesCoop.Gameplay.Characters;
 using CasualtiesCoop.Gameplay.Items;
+using CasualtiesCoop.Gameplay.Terrain;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Runtime;
 using CasualtiesCoop.Session;
@@ -111,6 +112,8 @@ internal sealed class MultiProcessRuntime : IDisposable
     private readonly ManualLogSource log;
     private readonly ReportWriter report;
     private readonly TestWorldController scene;
+    private readonly TerrainImpactFixture terrainImpact = new();
+    private readonly ConsoleSpawnFixture consoleSpawn = new();
     private readonly Stopwatch watch = Stopwatch.StartNew();
     private readonly List<object> assertions = new();
     private MultiProcessTransport? transport;
@@ -202,6 +205,7 @@ internal sealed class MultiProcessRuntime : IDisposable
         world = new WorldSession(peers, plan, scene.Font, log, new UnityMonotonicClock());
         SharedItemHooks.BindTestItems(world.Items);
         CharacterSpeechHooks.BindTestCapture(world.CaptureSpeech);
+        TerrainDamageReplication.BindTestTerrain(world.Terrain);
         if (world.Items.TestGuest is { } guest) guest.ResultAccepted += ObserveHeldPickup;
         log.LogInfo($"Multiprocess {manifest.RunId} ready as {(manifest.IsHost ? "host" : "guest")} " +
             $"{manifest.LocalId}; tcp={manifest.TcpPort} udp={manifest.LocalUdpPort}.");
@@ -254,6 +258,29 @@ internal sealed class MultiProcessRuntime : IDisposable
                 RemoteCharacterView? view = world!.RemoteViewFor(manifest.RemoteId);
                 return WaitOrFail(view is { Visible: true }, command, "remote.visible", 1,
                     view is { Visible: true } ? 1 : 0);
+            case "terrain.rememberAudio":
+                terrainImpact.RememberExisting();
+                return true;
+            case "terrain.nativeImpact":
+                if (world!.WaitingForWorld) return TimedOut(command);
+                bool localImpact = terrainImpact.TryNativeGuestImpact(scene.Body, out object localAudio);
+                Check(localImpact, "terrain.guestLocalAudio", true, localImpact, localAudio);
+                return true;
+            case "assert.terrainImpact":
+                if (!world!.TryGetRemotePose(manifest.RemoteId, out CharacterPose actor)) return TimedOut(command);
+                bool remoteImpact = terrainImpact.TryObserveHostImpact(new Vector2(actor.X, actor.Y), out object remoteAudio);
+                return WaitOrFail(remoteImpact, command, "terrain.hostAudioAndDamage", true, remoteImpact, remoteAudio);
+            case "assert.terrainImpactNoEcho":
+                bool singleImpact = terrainImpact.ConfirmSingleGuestImpact(out object singleAudio);
+                Check(singleImpact, "terrain.guestImpactExactlyOnce", true, singleImpact, singleAudio);
+                return true;
+            case "item.consoleSpawn":
+                if (world!.WaitingForWorld || world.Items.TestGuest is not { Synced: true }) return TimedOut(command);
+                consoleSpawn.Spawn(scene.Body);
+                return true;
+            case "assert.consoleSpawn":
+                bool spawnObserved = consoleSpawn.Observe(world!.Items, manifest.IsHost, out object spawnEvidence);
+                return WaitOrFail(spawnObserved, command, "item.consoleSpawnIdentityAndCondition", true, spawnObserved, spawnEvidence);
             case "assert.remotePoseNear":
                 return AssertRemotePoseNear(command);
             case "assert.isolation":
@@ -315,6 +342,10 @@ internal sealed class MultiProcessRuntime : IDisposable
                 return PickUpSlotFixture(command);
             case "slots.swap":
                 return SwapNativeSlots(command);
+            case "slots.switchHands":
+                if (world!.Items.TestGuest is { CanSubmit: false }) return TimedOut(command);
+                scene.Body.SwitchHands();
+                return true;
             case "assert.slots":
                 return AssertNativeOrRemoteSlots(command);
             case "release.prepare":
@@ -771,10 +802,18 @@ internal sealed class MultiProcessRuntime : IDisposable
             {
                 return WaitOrFail(false, command, "held.worldAngle", expectedAngle, angle, evidence);
             }
+            bool checkPower = command.Value<bool?>("powerState") == true;
+            int power = checkPower ? item.GetComponent<CustomItemBehaviour>()?.state ?? -1 : 0;
+            if (checkPower && power != 1)
+            {
+                return WaitOrFail(false, command, "held.authoritativePowerState", 1, power,
+                    new { itemId = sample.ItemId, state.Revision });
+            }
             if (assertBeam && !AssertRemoteHeldBeam(command, sample.ItemId, item))
             {
                 return false;
             }
+            if (checkPower) Check(true, "held.authoritativePowerState", 1, power, new { itemId = sample.ItemId, state.Revision });
             Check(true, "held.worldAngle", expectedAngle, angle, evidence);
             if (wrapFrom is float start)
             {
@@ -1030,8 +1069,10 @@ internal sealed class MultiProcessRuntime : IDisposable
         {
             SharedItemHooks.BindTestItems(null);
             CharacterSpeechHooks.BindTestCapture(null);
+            TerrainDamageReplication.BindTestTerrain(null);
         }
         world?.Dispose();
+        terrainImpact.Dispose();
         peers?.Dispose();
         transport?.Dispose();
         scene.Dispose();

@@ -36,6 +36,7 @@ internal sealed class GuestItemSession : IDisposable
     internal event Action<ItemState?, ItemState>? StateAccepted;
     internal event Action<SharedItemRequest, ItemDecision>? ResultAccepted;
     internal event Action<ulong, ulong, uint>? RegistrationAccepted;
+    internal event Action<ulong>? RegistrationRejected;
     internal event Action<ulong, int, ItemDecision>? CraftResultAccepted;
 
     internal bool IsReserved(int slot) => Pending is { } request && request.Action switch
@@ -178,7 +179,9 @@ internal sealed class GuestItemSession : IDisposable
     {
         clientKey = 0;
         if (!Synced || registration.ClientKey != 0 || !ItemWire.IsDefinition(registration.Definition) ||
-            !ItemWire.IsPayload(registration.Payload) || nextClientKey == ulong.MaxValue)
+            !ItemWire.IsPayload(registration.Payload) || !ItemWire.IsLocationValid(registration.Location) ||
+            !(registration.Condition is >= 0f and <= 1f) || nextClientKey == ulong.MaxValue ||
+            lastRegistrationOperation == ulong.MaxValue)
         {
             return false;
         }
@@ -282,7 +285,14 @@ internal sealed class GuestItemSession : IDisposable
                 if (ItemWire.TryReadRegistered(frame, peers.SessionId, out _, out ulong clientKey, out ulong item,
                     out uint revision))
                 {
-                    RegistrationAccepted?.Invoke(clientKey, item, revision);
+                    if (item == 0)
+                    {
+                        RegistrationRejected?.Invoke(clientKey);
+                    }
+                    else
+                    {
+                        RegistrationAccepted?.Invoke(clientKey, item, revision);
+                    }
                 }
                 return true;
             case MessageKind.ItemSyncDone:

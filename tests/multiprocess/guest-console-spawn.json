@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "multiprocess.guest-console-spawn",
+  "seed": 71,
+  "timeoutMs": 120000,
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "wait.peerStep" },
+    { "op": "item.consoleSpawn", "role": "guest" },
+    { "op": "assert.consoleSpawn", "timeoutMs": 4000 },
+    { "op": "wait.peerStep" },
+    { "op": "wait.ms", "ms": 9500 },
+    { "op": "assert.consoleSpawn", "timeoutMs": 3000 },
+    { "op": "wait.peerStep" },
+    { "op": "assert.isolation" }
+  ]
+}

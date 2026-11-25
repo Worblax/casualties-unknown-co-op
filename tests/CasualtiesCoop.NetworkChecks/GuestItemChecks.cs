@@ -19,9 +19,95 @@ internal static class GuestItemChecks
         SnapshotDeadlineAndStaleCompletion();
         IncompleteManifestRetries();
         GapRecoversFromSnapshot();
+        PeriodicSnapshotRepairsFinalMissedDelta();
+        RegistrationReceiptsReplayWithoutCreatingCopies();
+        InvalidOwnerPayloadDoesNotCommit();
         OnePendingOperation();
         SwapSlotsCommitAndReplay();
         MissingSwapDeltaRepairsWithSnapshot();
+    }
+
+    private static void PeriodicSnapshotRepairsFinalMissedDelta()
+    {
+        using var scenario = new Scenario();
+        scenario.Sync();
+        scenario.Refuse = frame => frame[0] == (byte)MessageKind.ItemDelta;
+        Check.That(scenario.Host.TryRegister("flask", default, .64f, out ulong spawned), "The host registers a new item.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Guest.Synced && !scenario.Guest.Replicas.TryGet(spawned, out _),
+            "A missing final delta leaves no later event to announce the sequence gap.");
+
+        scenario.Refuse = null;
+        scenario.Network.Advance(9);
+        scenario.Sync();
+        Check.That(scenario.SnapshotRequests == 2 && scenario.Guest.Synced &&
+            scenario.Guest.Replicas.TryGet(spawned, out ItemState recovered) && recovered.Condition == .64f,
+            "Periodic reconciliation restores the missed registration and its condition.");
+    }
+
+    private static void RegistrationReceiptsReplayWithoutCreatingCopies()
+    {
+        using var scenario = new Scenario();
+        scenario.Sync();
+        var accepted = new List<(ulong Key, ulong Id)>();
+        var rejected = new List<ulong>();
+        scenario.Guest.RegistrationAccepted += (key, id, _) => accepted.Add((key, id));
+        scenario.Guest.RegistrationRejected += rejected.Add;
+        var registration = new SharedItemRegistration
+        {
+            Definition = "flask", Placement = ItemPlacement.World, Slot = ItemWire.NoSlot,
+            Condition = .62f, Payload = Array.Empty<byte>()
+        };
+
+        var registrationPublication = new List<MessageKind>();
+        scenario.Refuse = frame =>
+        {
+            MessageKind kind = (MessageKind)frame[0];
+            if (kind is MessageKind.ItemRegistered or MessageKind.ItemDelta) registrationPublication.Add(kind);
+            return kind == MessageKind.ItemRegistered;
+        };
+        Check.That(scenario.Guest.TryRegister(registration, out ulong key), "A verified guest registers a world item.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Host.Snapshot().Length == 3 && accepted.Count == 0, "The host commits despite a missed receipt.");
+        Check.That(registrationPublication.SequenceEqual(new[] { MessageKind.ItemRegistered, MessageKind.ItemDelta }),
+            "The host sends the receipt ahead of its delta so the native item can claim that identity on arrival.");
+        registration.ClientKey = key;
+        scenario.Refuse = null;
+        Check.That(scenario.Guest.TryResendRegistration(registration), "The guest resends its original client key.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Host.Snapshot().Length == 3 && accepted.Count == 1 && accepted[0].Key == key &&
+            scenario.Guest.Replicas.TryGet(accepted[0].Id, out ItemState replica) && replica.Condition == .62f,
+            "Receipt replay keeps one authoritative identity and the original condition.");
+
+        registration.ClientKey = 0;
+        registration.Placement = ItemPlacement.Container;
+        registration.Parent = ulong.MaxValue;
+        Check.That(scenario.Guest.TryRegister(registration, out ulong invalidKey), "The request reaches world validation.");
+        scenario.Network.Advance(0);
+        registration.ClientKey = invalidKey;
+        Check.That(scenario.Guest.TryResendRegistration(registration), "The rejected request can repeat its client key.");
+        scenario.Network.Advance(0);
+        Check.That(rejected.SequenceEqual(new[] { invalidKey, invalidKey }) && accepted.Count == 1 &&
+            scenario.Host.Snapshot().Length == 3, $"The negative receipt is idempotent and never creates an item. " +
+            $"Expected two rejections for {invalidKey}, saw [{string.Join(",", rejected)}], accepted {accepted.Count}, " +
+            $"host items {scenario.Host.Snapshot().Length}.");
+    }
+
+    private static void InvalidOwnerPayloadDoesNotCommit()
+    {
+        using var scenario = new Scenario();
+        scenario.Sync();
+        Check.That(scenario.Guest.TrySubmit(scenario.First, ItemAction.PickUp, 0, default), "Guest requests ownership.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Guest.Replicas.TryGet(scenario.First, out ItemState current) &&
+            current.Placement == ItemPlacement.Inventory, "Guest owns an item it may report.");
+
+        scenario.World.RejectState = true;
+        Check.That(scenario.Guest.TryReportState(current.Id, current.Revision, .5f, new byte[] { 1 },
+            current.Placement, current.Parent, current.Slot, default), "An invalid native payload still reaches the host.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Host.TryGet(current.Id, out ItemState authoritative) && authoritative.Revision == current.Revision &&
+            authoritative.Condition == current.Condition, "Validation failure preserves the current authoritative revision.");
     }
 
     private static void SnapshotWaitsAndResumes()

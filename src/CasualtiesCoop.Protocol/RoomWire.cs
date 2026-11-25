@@ -54,7 +54,7 @@ internal enum MessageKind : byte
 
 internal static class RoomWire
 {
-    internal const string LobbyProtocolVersion = "18";
+    internal const string LobbyProtocolVersion = "19";
     internal const int MaxFrameSize = 16384;
     private const int HandshakeSize = 41;
     private const int PlanHeaderSize = 36;

@@ -16,6 +16,7 @@
     <Reference Include="Newtonsoft.Json" HintPath="$(GameManagedDir)/Newtonsoft.Json.dll" Private="false" />
     <Reference Include="UnityEngine" HintPath="$(GameManagedDir)/UnityEngine.dll" Private="false" />
     <Reference Include="UnityEngine.CoreModule" HintPath="$(GameManagedDir)/UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AudioModule" HintPath="$(GameManagedDir)/UnityEngine.AudioModule.dll" Private="false" />
     <Reference Include="UnityEngine.IMGUIModule" HintPath="$(GameManagedDir)/UnityEngine.IMGUIModule.dll" Private="false" />
     <Reference Include="UnityEngine.Physics2DModule" HintPath="$(GameManagedDir)/UnityEngine.Physics2DModule.dll" Private="false" />
     <Reference Include="Unity.RenderPipelines.Universal.Runtime" HintPath="$(GameManagedDir)/Unity.RenderPipelines.Universal.Runtime.dll" Private="false" />

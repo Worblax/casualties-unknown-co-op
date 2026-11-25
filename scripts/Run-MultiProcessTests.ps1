@@ -128,9 +128,14 @@ try {
 }
 finally {
     foreach ($process in $started) {
-        if (!$process.HasExited) {
+        if ($process.WaitForExit(1000)) { continue }
+        try {
             $null = $process.CloseMainWindow()
-            if (!$process.WaitForExit(3000)) { Stop-Process -Id $process.Id -Force }
+            if ($process.WaitForExit(3000)) { continue }
+            $process.Kill()
+            if (!$process.WaitForExit(3000)) { throw "Test process $($process.Id) did not exit." }
+        } catch {
+            if (!$process.HasExited) { throw }
         }
     }
     if (!$KeepInstalls) {

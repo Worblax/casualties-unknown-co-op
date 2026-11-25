@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "multiprocess.terrain-impact-audio",
+  "seed": 71,
+  "timeoutMs": 120000,
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "terrain.rememberAudio" },
+    { "op": "wait.peerStep" },
+    { "op": "terrain.nativeImpact", "role": "guest" },
+    { "op": "assert.terrainImpact", "role": "host" },
+    { "op": "wait.peerStep" },
+    { "op": "wait.ms", "ms": 400 },
+    { "op": "assert.terrainImpactNoEcho", "role": "guest" },
+    { "op": "assert.connected" }
+  ]
+}

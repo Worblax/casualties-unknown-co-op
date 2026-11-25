@@ -170,14 +170,18 @@ internal sealed class SharedItemHostScene : IItemWorld
         return CanReach(position, target, 10f, LayerMask.GetMask("Ground"))
             ? ItemDecision.Accepted : ItemDecision.OutOfReach;
     }
-    public bool TryApplyState(ulong id, byte[] payload)
+    public bool CanApplyState(ulong id, byte[] payload)
     {
         if (!Session.TryGet(id, out ItemState state))
         {
             return false;
         }
-        Item? item = EnsureItem(id, state);
-        return item && objects.Apply(item!, payload, state.Condition, state.Placement);
+        if (byId.TryGetValue(id, out var tracked) && tracked.Item)
+        {
+            return ItemStateCodec.CanApply(tracked.Item, payload);
+        }
+        GameObject prefab = Resources.Load<GameObject>(state.Definition);
+        return prefab && prefab.TryGetComponent(out Item item) && ItemStateCodec.CanApply(item, payload);
     }
 
     public void ApplyRemoteState(ItemState state)
@@ -187,8 +191,15 @@ internal sealed class SharedItemHostScene : IItemWorld
             RemoveItemSafe(state.Id);
             return;
         }
+        bool alreadyTracked = byId.TryGetValue(state.Id, out var tracked) && tracked.Item;
         Item? item = EnsureItem(state.Id, state);
         if (!item) return;
+        if (alreadyTracked && !objects.Apply(item!, state.Payload, state.Condition, state.Placement))
+        {
+            CoopDiagnostics.Count("Items", "Host remote payload rejected");
+            return;
+        }
+        payloads[state.Id] = state.Payload;
         if (state.Placement == ItemPlacement.World && state.Owner.IsNone)
         {
             remoteVisuals?.DetachHeldItem(item);

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Reflection;
 using CasualtiesCoop.Core;
+using CasualtiesCoop.Gameplay.Audio;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Runtime;
 using HarmonyLib;
@@ -10,6 +11,8 @@ namespace CasualtiesCoop.Gameplay.Terrain;
 
 internal sealed class TerrainDamageReplication
 {
+    private const float ImpactHearDistance = 30f;
+    private static TerrainDamageReplication? testTerrain;
     private readonly SessionPeers peers;
     private readonly IMonotonicClock clock;
     private readonly PlayerPositionLookup position;
@@ -41,9 +44,15 @@ internal sealed class TerrainDamageReplication
 
     private static HarmonyMethod Hook(string method) => new(typeof(TerrainDamageReplication), method);
 
+    internal static void BindTestTerrain(TerrainDamageReplication? terrain)
+    {
+        if (!CoopRuntime.IsTestMode) return;
+        testTerrain = terrain;
+    }
+
     private static bool BeforeDamage(WorldGeneration __instance, Vector2Int pos, float dmg, bool hitSound, bool bonusMetal,
-        bool ignoreLoot) => CoopRuntime.ActiveWorld is not { SceneReady: true } session ||
-        session.Terrain.BeforeNativeDamage(__instance, pos, dmg, hitSound, bonusMetal, ignoreLoot);
+        bool ignoreLoot) => (testTerrain ?? CoopRuntime.ActiveWorld?.Terrain)?.
+            BeforeNativeDamage(__instance, pos, dmg, hitSound, bonusMetal, ignoreLoot) ?? true;
 
     private static bool AllowWrite(WorldGeneration __instance) =>
         CoopRuntime.ActiveWorld is not { SceneReady: true } session ||
@@ -68,30 +77,64 @@ internal sealed class TerrainDamageReplication
     private bool BeforeNativeDamage(WorldGeneration world, Vector2Int cell, float damage, bool sound, bool metal, bool ignoreLoot)
     {
         if (applying || !Live(world)) return true;
-        if (!InBounds(world, cell) || !float.IsFinite(damage) || damage <= 0 || world.GetBlock(cell) == 0)
+        if (!InBounds(world, cell) || !float.IsFinite(damage) || damage <= 0)
             return peers.IsHost;
+        ushort block = world.GetBlock(cell);
+        if (block == 0) return peers.IsHost;
         if (peers.IsHost)
             ApplyHit(world, cell, damage, sound, metal, ignoreLoot);
         else if (chunks.Ready && damage <= 100000)
         {
             byte flags = (byte)((sound ? 1 : 0) | (metal ? 2 : 0));
+            if (sound) PlayImpact(world, cell, block);
             peers.Send(peers.Host, SandboxGameplayWire.WriteTerrainHit(peers.SessionId,
-                cell.x, cell.y, world.GetBlock(cell), ++nextHit, damage, flags));
+                cell.x, cell.y, block, ++nextHit, damage, flags));
         }
         return false;
     }
 
     internal bool Receive(ulong sender, byte[] frame)
     {
-        if (!peers.IsHost || sender == peers.LocalPlayer || !peers.TryGetPlayer(sender, out _)) return false;
+        if (peers.IsHost ? sender == peers.LocalPlayer || !peers.TryGetPlayer(sender, out _) : sender != peers.Host)
+        {
+            return false;
+        }
         var world = WorldGeneration.world;
         if (!Live(world) || !SandboxGameplayWire.TryReadTerrainHit(frame, peers.SessionId, out var tile)) return true;
 
         var cell = new Vector2Int(tile.X, tile.Y);
-        if (InBounds(world, cell) && world.GetBlock(cell) == tile.Block && position(sender, out Vector2 actor) &&
-            (actor - world.BlockToWorldPos(cell)).sqrMagnitude <= 16 * 16 && AllowHit(sender, tile.Sequence))
-            ApplyHit(world, cell, tile.Damage, (tile.Flags & 1) != 0, (tile.Flags & 2) != 0, ignoreLoot: false);
+        if (!InBounds(world, cell)) return true;
+        bool sound = (tile.Flags & 1) != 0;
+        Vector2 origin = world.BlockToWorldPos(cell);
+        if (!peers.IsHost)
+        {
+            if (sound && position(peers.LocalPlayer, out Vector2 listener) &&
+                (listener - origin).sqrMagnitude < ImpactHearDistance * ImpactHearDistance)
+            {
+                PlayImpact(world, cell, tile.Block);
+            }
+            return true;
+        }
+
+        if (world.GetBlock(cell) == tile.Block && position(sender, out Vector2 actor) &&
+            (actor - origin).sqrMagnitude <= 16 * 16 && AllowHit(sender, tile.Sequence))
+        {
+            // The reliable terrain event already carries the sound. Generic character audio would echo to its author.
+            using var suppression = CharacterAudioHooks.SuppressCapture();
+            ApplyHit(world, cell, tile.Damage, sound, (tile.Flags & 2) != 0, ignoreLoot: false);
+            if (sound) peers.Broadcast(frame, reliable: true, except: sender);
+        }
         return true;
+    }
+
+    private static void PlayImpact(WorldGeneration world, Vector2Int cell, ushort block)
+    {
+        string? clip = world.GetBlockInfo(block)?.hitsound;
+        if (!string.IsNullOrEmpty(clip))
+        {
+            using var suppression = CharacterAudioHooks.SuppressCapture();
+            Sound.Play(clip!, world.BlockToWorldPos(cell));
+        }
     }
 
     private bool AllowHit(ulong player, uint operation)

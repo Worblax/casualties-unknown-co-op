@@ -110,7 +110,7 @@ internal static class HostItemChecks
         internal bool RejectPickup;
         internal bool RejectDrop;
         internal bool RejectSwap;
-        internal byte[] Applied = System.Array.Empty<byte>();
+        internal bool RejectState;
 
         public ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition) =>
             ItemDecision.Accepted;
@@ -146,11 +146,7 @@ internal static class HostItemChecks
         public bool IsKnownDefinition(string definition) => true;
         public ItemDecision CheckRegistration(ParticipantId player, SharedItemRegistration registration, ItemState? parent) => ItemDecision.Accepted;
 
-        public bool TryApplyState(ulong item, byte[] payload)
-        {
-            Applied = payload;
-            return true;
-        }
+        public bool CanApplyState(ulong item, byte[] payload) => !RejectState;
 
         public void ApplyRemoteState(ItemState state) { }
     }

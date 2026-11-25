@@ -10,6 +10,12 @@ internal static class CharacterAudioHooks
 {
     private static int emitterDepth;
     private static int resourceDepth;
+    private static int suppressedCaptureDepth;
+
+    internal readonly struct CaptureSuppression : IDisposable
+    {
+        public void Dispose() => suppressedCaptureDepth--;
+    }
 
     internal static void Install(Harmony harmony)
     {
@@ -75,6 +81,12 @@ internal static class CharacterAudioHooks
 
     private static void LeaveResource(int __state) => resourceDepth = __state;
 
+    internal static CaptureSuppression SuppressCapture()
+    {
+        suppressedCaptureDepth++;
+        return default;
+    }
+
     private static void ResourcePlayed(string clip, Vector2 pos, Transform? follow, AudioSource? __result) =>
         Capture(clip, pos, follow, __result);
 
@@ -88,7 +100,7 @@ internal static class CharacterAudioHooks
 
     private static void Capture(string? key, Vector2 position, Transform? follow, AudioSource? playback)
     {
-        if (CoopRuntime.ActiveWorld is not { } world || !playback || !playback!.clip ||
+        if (suppressedCaptureDepth != 0 || CoopRuntime.ActiveWorld is not { } world || !playback || !playback!.clip ||
             !PlayerCamera.main || !PlayerCamera.main.body)
         {
             return;
