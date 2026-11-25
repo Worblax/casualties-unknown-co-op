@@ -10,6 +10,8 @@ internal interface IItemWorld
 {
     ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition);
     bool TryPickUp(ParticipantId player, ulong item, byte slot, out float condition);
+    // Failure leaves both native slots unchanged.
+    bool TrySwapSlots(ParticipantId player, ItemState first, byte destination, ItemState? second);
     ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
         out float condition);
     bool TryApplyState(ulong item, byte[] payload);
@@ -42,22 +44,26 @@ internal sealed class HostItemOperations
     private readonly AuthoritativeItemRegistry items;
     private readonly IItemWorld world;
     private readonly IMonotonicClock clock;
+    private readonly Func<ulong, bool> isConflict;
     private readonly ItemOperationReceipts receipts = new();
     private bool executing;
 
-    internal HostItemOperations(AuthoritativeItemRegistry items, IItemWorld world, IMonotonicClock clock)
+    internal HostItemOperations(AuthoritativeItemRegistry items, IItemWorld world, IMonotonicClock clock,
+        Func<ulong, bool> isConflict)
     {
         this.items = items;
         this.world = world;
         this.clock = clock;
+        this.isConflict = isConflict;
     }
 
     internal ulong LastOperation(ParticipantId player) => receipts.TryGet(player, out var receipt) ? receipt.Operation : 0;
 
     internal bool TryHandle(ParticipantId player, SharedItemRequest request, out ItemOperationReceipts.Receipt receipt,
-        out ItemState? change, out bool replay)
+        out ItemState? change, out ItemState? secondChange, out bool replay)
     {
         change = null;
+        secondChange = null;
         receipt = default;
         replay = false;
         if (player.IsNone || executing || request.Operation == 0)
@@ -70,15 +76,22 @@ internal sealed class HostItemOperations
             return replay;
         }
 
-        var decision = Execute(player, request, out change);
+        var decision = Execute(player, request, out change, out secondChange);
         receipt = new ItemOperationReceipts.Receipt(request, decision);
         receipts.Record(player, receipt);
         return true;
     }
 
-    internal ItemDecision Execute(ParticipantId player, SharedItemRequest request, out ItemState? change)
+    internal ItemDecision Execute(ParticipantId player, SharedItemRequest request, out ItemState? change,
+        out ItemState? secondChange)
     {
         change = null;
+        secondChange = null;
+        if (isConflict(request.ItemId) || (request.Action == ItemAction.SwapSlots && request.OtherItemId != 0 &&
+            isConflict(request.OtherItemId)))
+        {
+            return ItemDecision.Conflict;
+        }
         if (executing || player.IsNone || request.Slot == ItemWire.NoSlot ||
             !items.TryGet(request.ItemId, out ItemState state) || state.Removed ||
             state.Revision != request.Revision)
@@ -89,6 +102,10 @@ internal sealed class HostItemOperations
         executing = true;
         try
         {
+            if (request.Action == ItemAction.SwapSlots)
+            {
+                return Swap(player, request, state, out change, out secondChange);
+            }
             ItemDecision decision;
             float condition;
             if (request.Action == ItemAction.PickUp && state.Owner.IsNone)
@@ -120,11 +137,6 @@ internal sealed class HostItemOperations
             {
                 return ItemDecision.Unavailable;
             }
-            if (payload.Length > 0 && !world.TryApplyState(state.Id, payload))
-            {
-                return ItemDecision.Unavailable;
-            }
-
             decision = world.Drop(player, state.Id, request, out ItemLocation location, out condition);
             if (decision == ItemDecision.Accepted)
             {
@@ -136,5 +148,47 @@ internal sealed class HostItemOperations
         {
             executing = false;
         }
+    }
+
+    private ItemDecision Swap(ParticipantId player, SharedItemRequest request, ItemState first, out ItemState? firstChange,
+        out ItemState? secondChange)
+    {
+        firstChange = null;
+        secondChange = null;
+        if (!ItemWire.IsValidSwap(request) || first.Placement != ItemPlacement.Inventory || first.Owner != player ||
+            first.Slot != request.Slot || first.Revision == uint.MaxValue)
+        {
+            return ItemDecision.Unavailable;
+        }
+
+        ItemState? second = null;
+        if (request.OtherItemId != 0)
+        {
+            if (!items.TryGet(request.OtherItemId, out ItemState occupant) || occupant.Removed ||
+                occupant.Placement != ItemPlacement.Inventory || occupant.Owner != player ||
+                occupant.Slot != request.OtherSlot || occupant.Revision != request.OtherRevision ||
+                occupant.Revision == uint.MaxValue)
+            {
+                return ItemDecision.Unavailable;
+            }
+            second = occupant;
+        }
+        if (items.OccupiedExcept(player, request.Slot, first.Id) ||
+            items.OccupiedExcept(player, request.OtherSlot, request.OtherItemId))
+        {
+            return ItemDecision.SlotOccupied;
+        }
+        if (items.Sequence > ulong.MaxValue - (second is null ? 1UL : 2UL) ||
+            !world.TrySwapSlots(player, first, request.OtherSlot, second))
+        {
+            return ItemDecision.Unavailable;
+        }
+
+        firstChange = items.CommitSlot(first.Id, request.OtherSlot);
+        if (second is { } moved)
+        {
+            secondChange = items.CommitSlot(moved.Id, request.Slot);
+        }
+        return ItemDecision.Accepted;
     }
 }

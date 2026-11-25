@@ -10,6 +10,7 @@ internal struct ItemState
     internal ulong Id;
     internal uint Revision;
     internal uint Sample;
+    internal float SampleTime;
     internal ulong Sequence;
     internal string Definition;
     internal ParticipantId Owner;
@@ -24,8 +25,8 @@ internal struct ItemState
 
     internal SharedItemState ToWire(SessionPeers peers) => new()
     {
-        Id = Id, Revision = Revision, Sample = Sample, Definition = Definition, Owner = peers.AddressOf(Owner),
-        Parent = Parent, Slot = Slot, ClientKey = ClientKey, Placement = Placement, Removed = Removed,
+        Id = Id, Revision = Revision, Sample = Sample, SampleTime = SampleTime, Definition = Definition,
+        Owner = peers.AddressOf(Owner), Parent = Parent, Slot = Slot, ClientKey = ClientKey, Placement = Placement, Removed = Removed,
         Condition = Condition, Location = Location, Payload = Payload ?? Array.Empty<byte>()
     };
 
@@ -42,7 +43,8 @@ internal struct ItemState
             ? peers.Identify(wire.Owner) : default;
         state = new ItemState
         {
-            Id = wire.Id, Revision = wire.Revision, Sample = wire.Sample, Definition = wire.Definition, Owner = owner,
+            Id = wire.Id, Revision = wire.Revision, Sample = wire.Sample, SampleTime = wire.SampleTime,
+            Definition = wire.Definition, Owner = owner,
             Parent = wire.Parent, Slot = wire.Slot, ClientKey = wire.ClientKey, Placement = wire.Placement,
             Removed = wire.Removed, Condition = wire.Condition, Location = wire.Location,
             Payload = wire.Payload ?? Array.Empty<byte>()

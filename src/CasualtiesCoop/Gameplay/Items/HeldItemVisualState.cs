@@ -1,4 +1,6 @@
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
+using CasualtiesCoop.Gameplay.Lighting;
 
 namespace CasualtiesCoop.Gameplay.Items;
 
@@ -6,40 +8,73 @@ namespace CasualtiesCoop.Gameplay.Items;
 // restored when the item leaves the remote character and becomes a world/inventory object again.
 internal sealed class HeldItemVisualState : MonoBehaviour
 {
-    private bool[] colliderState = System.Array.Empty<bool>();
+    private (Collider2D Component, bool Enabled)[]? colliders;
+    private (Light2D Component, bool Enabled)[]? lights;
 
-    internal static void Disable(Item item)
+    internal static void Disable(Item item, bool suppressNetworkLights = false)
     {
         if (!item) return;
         HeldItemVisualState state = item.GetComponent<HeldItemVisualState>() ??
             item.gameObject.AddComponent<HeldItemVisualState>();
-        state.Capture();
+        state.DisableComponents(suppressNetworkLights && LightPrefabCatalog.DefinitionOf(item) != 0);
     }
 
     internal static void Restore(Item item)
     {
         if (!item) return;
-        if (item.TryGetComponent<HeldItemVisualState>(out HeldItemVisualState state)) state.RestoreAndRemove();
+        if (item.TryGetComponent<HeldItemVisualState>(out HeldItemVisualState state)) state.RestoreComponents();
     }
 
-    private void Capture()
+    private void DisableComponents(bool suppressLights)
     {
-        Collider2D[] colliders = GetComponentsInChildren<Collider2D>(true);
-        if (colliderState.Length != colliders.Length) colliderState = new bool[colliders.Length];
-        for (int index = 0; index < colliders.Length; index++)
+        if (colliders is null)
         {
-            colliderState[index] = colliders[index].enabled;
-            colliders[index].enabled = false;
+            Collider2D[] components = GetComponentsInChildren<Collider2D>(true);
+            colliders = new (Collider2D, bool)[components.Length];
+            for (int index = 0; index < components.Length; index++)
+            {
+                colliders[index] = (components[index], components[index].enabled);
+            }
+        }
+        foreach (var collider in colliders)
+        {
+            if (collider.Component) collider.Component.enabled = false;
+        }
+
+        if (!suppressLights) return;
+        if (lights is null)
+        {
+            Light2D[] components = GetComponentsInChildren<Light2D>(true);
+            lights = new (Light2D, bool)[System.Math.Min(components.Length, LightPrefabCatalog.MaxComponents)];
+            for (int index = 0; index < lights.Length; index++)
+            {
+                Light2D light = components[index];
+                if (light.lightType != Light2D.LightType.Global) lights[index] = (light, light.enabled);
+            }
+        }
+        foreach (var light in lights)
+        {
+            if (light.Component) light.Component.enabled = false;
         }
     }
 
-    private void RestoreAndRemove()
+    private void RestoreComponents()
     {
-        Collider2D[] colliders = GetComponentsInChildren<Collider2D>(true);
-        for (int index = 0; index < colliders.Length && index < colliderState.Length; index++)
+        if (colliders is not null)
         {
-            colliders[index].enabled = colliderState[index];
+            foreach (var collider in colliders)
+            {
+                if (collider.Component) collider.Component.enabled = collider.Enabled;
+            }
+            colliders = null;
         }
-        Destroy(this);
+        if (lights is not null)
+        {
+            foreach (var light in lights)
+            {
+                if (light.Component) light.Component.enabled = light.Enabled;
+            }
+            lights = null;
+        }
     }
 }

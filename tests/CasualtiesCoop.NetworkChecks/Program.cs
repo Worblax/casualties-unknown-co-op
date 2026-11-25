@@ -2,6 +2,7 @@
 ItemChecks.Run();
 HostItemChecks.Run();
 GuestItemChecks.Run();
+ItemMotionChecks.Run();
 CraftChecks.Run();
 P0CraftChecks.Run();
 RecoveryChecks.Run();

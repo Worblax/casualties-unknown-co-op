@@ -12,6 +12,7 @@ internal sealed class TestingPlugin : BaseUnityPlugin
 {
     private static TestingPlugin? active;
     private TestRuntime? test;
+    private MultiProcessRuntime? multi;
     private Harmony? harmony;
 
     private void Awake()
@@ -25,15 +26,27 @@ internal sealed class TestingPlugin : BaseUnityPlugin
         try
         {
             string[] args = Environment.GetCommandLineArgs();
-            int index = Array.IndexOf(args, "--coop-test");
-            string manifest = args[index + 1];
             harmony = new Harmony("casualtiesunknown.coop.testing");
             CharacterFixtures.Install(harmony);
             MobFixtures.Install(harmony);
             FluidItemProbe.Install(harmony);
             harmony.Patch(AccessTools.Method(typeof(PlayerCamera), "HandleCameraPosition"),
                 postfix: new HarmonyMethod(typeof(TestingPlugin), nameof(AfterNativeCamera)));
-            test = new TestRuntime(manifest);
+            int multiIndex = Array.IndexOf(args, "--coop-mp");
+            if (multiIndex >= 0)
+            {
+                string manifest = args[multiIndex + 1];
+                MultiProcessManifest config = MultiProcessManifest.Load(manifest);
+                MultiProcessDataIsolation.Initialize(config.DataRoot);
+                MultiProcessDataIsolation.Patch(harmony);
+                multi = new MultiProcessRuntime(manifest, Logger);
+            }
+            else
+            {
+                int index = Array.IndexOf(args, "--coop-test");
+                if (index < 0) throw new FormatException("Missing test manifest argument.");
+                test = new TestRuntime(args[index + 1]);
+            }
             active = this;
             Logger.LogInfo($"Game test started in process {Process.GetCurrentProcess().Id}.");
         }
@@ -44,13 +57,21 @@ internal sealed class TestingPlugin : BaseUnityPlugin
         }
     }
 
-    private void Update() => test?.Tick();
+    private void Update()
+    {
+        test?.Tick();
+        multi?.Tick();
+    }
 
     private void OnGUI() => test?.Draw();
 
     private void FixedUpdate() => test?.PhysicsTick();
 
-    private void LateUpdate() => test?.ApplyPhysicsScale();
+    private void LateUpdate()
+    {
+        test?.ApplyPhysicsScale();
+        multi?.TickPresentation();
+    }
 
     private static void AfterNativeCamera(PlayerCamera __instance) => active?.test?.ApplyCamera(__instance);
 
@@ -58,6 +79,7 @@ internal sealed class TestingPlugin : BaseUnityPlugin
     {
         active = null;
         test?.Dispose();
+        multi?.Dispose();
         harmony?.UnpatchSelf();
     }
 }

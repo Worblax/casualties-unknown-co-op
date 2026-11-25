@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "name": "multiprocess.pose-bidirectional",
+  "seed": 71,
+  "timeoutMs": 120000,
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "assert.connected" },
+    { "op": "assert.remoteVisible" },
+    { "op": "assert.remoteVisualsMatchSource" },
+    { "op": "character.place", "role": "host", "position": [2, 0] },
+    { "op": "assert.remotePoseNear", "role": "guest", "position": [2, 0], "tolerance": 1.0, "timeoutMs": 10000 },
+    { "op": "character.place", "role": "guest", "position": [-2, 0] },
+    { "op": "assert.remotePoseNear", "role": "host", "position": [-2, 0], "tolerance": 1.0, "timeoutMs": 10000 },
+    { "op": "assert.isolation" },
+    { "op": "wait.ms", "ms": 1500 }
+  ]
+}

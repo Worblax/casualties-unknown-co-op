@@ -60,7 +60,7 @@ internal sealed class ItemReplicaStore
         foreach (ItemState current in replicas.Values)
         {
             if (candidate.States.TryGetValue(current.Id, out ItemState saved) && SameStructure(saved, current) &&
-                current.Sample > saved.Sample)
+                (current.Sample > saved.Sample || (current.Sample == saved.Sample && current.SampleTime > saved.SampleTime)))
             {
                 candidate.States[current.Id] = current;
             }
@@ -112,7 +112,7 @@ internal sealed class ItemReplicaStore
     {
         previous = null;
         if (!replicas.TryGetValue(incoming.Id, out ItemState current) || !SameStructure(current, incoming) ||
-            incoming.Sample < current.Sample || (motion && !incoming.Owner.IsNone))
+            incoming.Sample < current.Sample || incoming.SampleTime < current.SampleTime || (motion && !incoming.Owner.IsNone))
         {
             return false;
         }

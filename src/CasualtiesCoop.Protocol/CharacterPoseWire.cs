@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using CasualtiesCoop.Gameplay.Items;
 using CasualtiesCoop.Networking;
 using static CasualtiesCoop.Networking.GameplayWire;
 
@@ -19,10 +20,12 @@ internal readonly struct CharacterPose
     internal readonly AnimatorLayerPose[] BodyLayers;
     internal readonly AnimatorLayerPose[] ArmLayers;
     internal readonly FacePose Face;
+    internal readonly HeldItemPose[] HeldItems;
 
     internal CharacterPose(ulong player, uint sequence, float x, float y, float velocityX = 0, float velocityY = 0,
         bool facingRight = true, bool standing = true, LimbPose[]? limbs = null,
-        AnimatorLayerPose[]? bodyLayers = null, AnimatorLayerPose[]? armLayers = null, FacePose face = default)
+        AnimatorLayerPose[]? bodyLayers = null, AnimatorLayerPose[]? armLayers = null, FacePose face = default,
+        HeldItemPose[]? heldItems = null)
     {
         Player = player;
         Sequence = sequence;
@@ -36,6 +39,23 @@ internal readonly struct CharacterPose
         BodyLayers = bodyLayers ?? Array.Empty<AnimatorLayerPose>();
         ArmLayers = armLayers ?? Array.Empty<AnimatorLayerPose>();
         Face = face;
+        HeldItems = heldItems ?? Array.Empty<HeldItemPose>();
+    }
+}
+
+internal readonly struct HeldItemPose
+{
+    internal readonly ulong ItemId;
+    internal readonly byte Slot;
+    internal readonly float Angle;
+    internal readonly bool Mirrored;
+
+    internal HeldItemPose(ulong itemId, byte slot, float angle, bool mirrored)
+    {
+        ItemId = itemId;
+        Slot = slot;
+        Angle = angle;
+        Mirrored = mirrored;
     }
 }
 
@@ -103,18 +123,22 @@ internal static class CharacterPoseWire
 {
     internal const int MaxLimbs = 24;
     internal const int MaxLayers = 5;
+    internal const int MaxHeldItems = 16;
     internal const float MaxPhase = 1_000_000f;
-    private const int PositionSize = 57;
+    private const int PositionSize = 58;
     private const int LimbSize = 20;
     private const int LayerSize = 20;
+    private const int HeldItemSize = 14;
 
     internal static byte[] Write(Guid session, CharacterPose position)
     {
         int count = Math.Min(position.Limbs.Length, MaxLimbs);
         int bodyCount = Math.Min(position.BodyLayers.Length, MaxLayers);
         int armCount = Math.Min(position.ArmLayers.Length, MaxLayers);
+        int heldCount = Math.Min(position.HeldItems.Length, MaxHeldItems);
         int layerOffset = PositionSize + count * LimbSize;
-        byte[] message = NewFrame(MessageKind.CharacterPose, session, layerOffset + (bodyCount + armCount) * LayerSize);
+        int heldOffset = layerOffset + (bodyCount + armCount) * LayerSize;
+        byte[] message = NewFrame(MessageKind.CharacterPose, session, heldOffset + heldCount * HeldItemSize);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), position.Player);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(25), position.Sequence);
         WriteFloat(message.AsSpan(29), position.X);
@@ -129,6 +153,7 @@ internal static class CharacterPoseWire
         message[54] = position.Face.Head;
         message[55] = position.Face.Eyes;
         message[56] = position.Face.NoseAlpha;
+        message[57] = (byte)heldCount;
         uint visible = 0;
         for (int index = 0; index < count; index++)
         {
@@ -147,6 +172,7 @@ internal static class CharacterPoseWire
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(47), visible);
         WriteLayers(message.AsSpan(layerOffset), position.BodyLayers.AsSpan(0, bodyCount));
         WriteLayers(message.AsSpan(layerOffset + bodyCount * LayerSize), position.ArmLayers.AsSpan(0, armCount));
+        WriteHeldItems(message.AsSpan(heldOffset), position.HeldItems.AsSpan(0, heldCount));
         return message;
     }
 
@@ -167,10 +193,12 @@ internal static class CharacterPoseWire
         int count = message[46];
         int bodyCount = message[51];
         int armCount = message[52];
+        int heldCount = message[57];
         int layerOffset = PositionSize + count * LimbSize;
+        int heldOffset = layerOffset + (bodyCount + armCount) * LayerSize;
         if (player == 0 || !IsCoordinate(x) || !IsCoordinate(y) || !InRange(vx, 1000) || !InRange(vy, 1000) ||
             message[45] > 3 || message[53] > 1 || count > MaxLimbs || bodyCount > MaxLayers || armCount > MaxLayers ||
-            message.Length != layerOffset + (bodyCount + armCount) * LayerSize)
+            heldCount > MaxHeldItems || message.Length != heldOffset + heldCount * HeldItemSize)
         {
             return false;
         }
@@ -194,13 +222,54 @@ internal static class CharacterPoseWire
         }
 
         if (!TryReadLayers(message.Slice(layerOffset), bodyCount, out AnimatorLayerPose[] bodyLayers) ||
-            !TryReadLayers(message.Slice(layerOffset + bodyCount * LayerSize), armCount, out AnimatorLayerPose[] armLayers))
+            !TryReadLayers(message.Slice(layerOffset + bodyCount * LayerSize), armCount, out AnimatorLayerPose[] armLayers) ||
+            !TryReadHeldItems(message.Slice(heldOffset), heldCount, out HeldItemPose[] heldItems))
         {
             return false;
         }
 
         position = new CharacterPose(player, sequence, x, y, vx, vy, (message[45] & 1) != 0, (message[45] & 2) != 0,
-            limbs, bodyLayers, armLayers, new FacePose(message[54], message[55], message[56], message[53] != 0));
+            limbs, bodyLayers, armLayers, new FacePose(message[54], message[55], message[56], message[53] != 0), heldItems);
+        return true;
+    }
+
+    private static void WriteHeldItems(Span<byte> bytes, ReadOnlySpan<HeldItemPose> heldItems)
+    {
+        foreach (HeldItemPose held in heldItems)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes, held.ItemId);
+            bytes[8] = held.Slot;
+            WriteFloat(bytes.Slice(9), held.Angle);
+            bytes[13] = held.Mirrored ? (byte)1 : (byte)0;
+            bytes = bytes.Slice(HeldItemSize);
+        }
+    }
+
+    private static bool TryReadHeldItems(ReadOnlySpan<byte> bytes, int count, out HeldItemPose[] heldItems)
+    {
+        heldItems = count == 0 ? Array.Empty<HeldItemPose>() : new HeldItemPose[count];
+        for (int index = 0; index < heldItems.Length; index++)
+        {
+            ulong id = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+            byte slot = bytes[8];
+            float angle = ReadFloat(bytes.Slice(9));
+            byte mirrored = bytes[13];
+            if (id == 0 || slot == ItemWire.NoSlot || angle < 0f || !InRange(angle, 360f) || mirrored > 1)
+            {
+                return false;
+            }
+
+            for (int previous = 0; previous < index; previous++)
+            {
+                if (heldItems[previous].ItemId == id || heldItems[previous].Slot == slot)
+                {
+                    return false;
+                }
+            }
+
+            heldItems[index] = new HeldItemPose(id, slot, angle, mirrored == 1);
+            bytes = bytes.Slice(HeldItemSize);
+        }
         return true;
     }
 

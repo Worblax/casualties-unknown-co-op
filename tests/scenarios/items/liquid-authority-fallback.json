@@ -20,9 +20,9 @@
     { "op": "assert.equal", "query": "items.definitionLiquidPositive", "target": "alcohol", "expected": 1 },
     { "op": "assert.equal", "query": "items.liquidPayloadRoundTrip", "item": "algae", "expected": 1 },
     { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.replicaPayloadMatches", "item": "algae", "expected": 1 } },
-    { "op": "item.remove", "item": "algae" },
+    { "op": "item.removeAndAssertLiquidOrphan", "item": "algae" },
     { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
-      "op": "items.definitionLiquidOrphan", "target": "alcohol", "expected": 1
+      "op": "items.removed", "item": "algae", "expected": 1
     } },
     { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
   ]

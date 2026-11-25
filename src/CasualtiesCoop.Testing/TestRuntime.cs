@@ -208,6 +208,16 @@ internal sealed class TestRuntime : IDisposable
 
     internal void AuditNatives() => report.Write("natives.json", Items.NativeDetails());
 
+    internal void RemoveAndAssertLiquidOrphan(string alias)
+    {
+        string definition = Items.RemoveTrackedLiquidNativeImmediately(alias);
+        Assert(new JObject
+        {
+            ["query"] = "items.definitionLiquidOrphan",
+            ["target"] = definition
+        }, "query");
+    }
+
     private bool catalogCaptured;
 
     internal bool PauseCycle()

@@ -6,7 +6,7 @@ namespace CasualtiesCoop.Networking;
 internal static class GameplayWire
 {
     internal static bool IsWorldMessage(MessageKind kind) =>
-        kind is >= MessageKind.CharacterPose and <= MessageKind.WorldChunkSnapshot;
+        kind is >= MessageKind.CharacterPose and <= MessageKind.CharacterSpeech;
 
     internal static byte[] NewFrame(MessageKind kind, Guid session, int size)
     {

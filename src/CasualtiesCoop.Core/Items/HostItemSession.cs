@@ -41,9 +41,9 @@ internal sealed class HostItemSession : IDisposable
         this.peers = peers;
         this.clock = clock;
         this.world = world;
-        operations = new HostItemOperations(items, world, clock);
         snapshots = new HostItemSnapshots(items, peers);
         crafts = new HostCraftReservations(items, clock);
+        operations = new HostItemOperations(items, world, clock, IsItemConflict);
         peers.ConnectionChanged += OnPeerChanged;
     }
 
@@ -145,12 +145,9 @@ internal sealed class HostItemSession : IDisposable
 
     internal ItemDecision ExecuteForParticipant(ParticipantId player, SharedItemRequest request)
     {
-        if (IsItemConflict(request.ItemId))
-        {
-            return ItemDecision.Conflict;
-        }
-        ItemDecision decision = operations.Execute(player, request, out ItemState? change);
+        ItemDecision decision = operations.Execute(player, request, out ItemState? change, out ItemState? secondChange);
         PublishChange(change);
+        PublishChange(secondChange);
         return decision;
     }
 
@@ -168,16 +165,12 @@ internal sealed class HostItemSession : IDisposable
             case MessageKind.ItemRequest:
                 if (worldReady && ItemWire.TryReadRequest(frame, peers.SessionId, out SharedItemRequest request))
                 {
-                    if (IsItemConflict(request.ItemId))
-                    {
-                        peers.Send(sender, ItemWire.WriteResult(peers.SessionId, request.Operation,
-                            ItemDecision.Conflict));
-                        return true;
-                    }
-                    if (operations.TryHandle(player, request, out var receipt, out var change, out bool replay))
+                    if (operations.TryHandle(player, request, out var receipt, out var change, out var secondChange,
+                            out bool replay))
                     {
                         PublishChange(change);
-                        if (items.TryGet(receipt.ItemId, out ItemState state))
+                        PublishChange(secondChange);
+                        if (receipt.Action != ItemAction.SwapSlots && items.TryGet(receipt.ItemId, out ItemState state))
                         {
                             peers.Send(sender, Encode(state, reliable: true));
                         }

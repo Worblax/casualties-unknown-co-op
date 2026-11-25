@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "multiprocess.native-speech",
+  "seed": 71,
+  "timeoutMs": 120000,
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "assert.remoteVisible" },
+    { "op": "wait.peerStep" },
+    { "op": "speech.talk", "role": "host", "text": "Host says hello." },
+    { "op": "speech.talk", "role": "guest", "text": "Guest says hello." },
+    { "op": "assert.remoteSpeech", "role": "guest", "text": "Host says hello." },
+    { "op": "assert.remoteSpeech", "role": "host", "text": "Guest says hello." },
+    { "op": "wait.peerStep" },
+    { "op": "speech.talk", "role": "host", "text": "*Вторая реплика.*" },
+    { "op": "assert.remoteSpeech", "role": "guest", "text": "*Вторая реплика.*" },
+    { "op": "wait.peerStep" },
+    { "op": "speech.talk", "role": "guest", "text": "Before reconnect." },
+    { "op": "assert.remoteSpeech", "role": "host", "text": "Before reconnect." },
+    { "op": "wait.peerStep" },
+    { "op": "transport.disconnect", "role": "guest", "seconds": 1 },
+    { "op": "wait.rejoined", "role": "guest", "timeoutMs": 30000 },
+    { "op": "wait.peerStep", "timeoutMs": 35000 },
+    { "op": "assert.remoteSpeechCleared" },
+    { "op": "wait.peerStep" },
+    { "op": "speech.talk", "role": "guest", "text": "After reconnect." },
+    { "op": "assert.remoteSpeech", "role": "host", "text": "After reconnect." },
+    { "op": "wait.peerStep" },
+    { "op": "assert.isolation" }
+  ]
+}

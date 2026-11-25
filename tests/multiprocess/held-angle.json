@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "multiprocess.held-angle",
+  "seed": 71,
+  "timeoutMs": 120000,
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "assert.remoteVisible" },
+    { "op": "held.spawn", "role": "host", "definition": "flashlight" },
+    { "op": "held.pickup", "role": "host" },
+    { "op": "held.angle", "role": "host", "angle": 350 },
+    { "op": "assert.remoteHeld", "role": "guest", "definition": "flashlight", "angle": 350, "tolerance": 3 },
+    { "op": "wait.ms", "role": "host", "ms": 2500 },
+    { "op": "held.sweep", "role": "host", "from": 350, "angle": 10, "ms": 550 },
+    { "op": "assert.remoteHeld", "role": "guest", "definition": "flashlight", "angle": 10, "tolerance": 3, "wrapFrom": 350 },
+    { "op": "wait.ms", "role": "host", "ms": 1800 },
+    { "op": "held.angle", "role": "host", "angle": 350 },
+    { "op": "assert.remoteHeld", "role": "guest", "definition": "flashlight", "angle": 350, "tolerance": 3, "wrapFrom": 10 },
+    { "op": "wait.ms", "role": "host", "ms": 1800 },
+    { "op": "held.angle", "role": "host", "angle": 160 },
+    { "op": "assert.remoteHeld", "role": "guest", "definition": "flashlight", "angle": 160, "tolerance": 3 },
+    { "op": "wait.peerStep" },
+    { "op": "held.face", "role": "host", "right": false },
+    { "op": "assert.remoteHeldBasis", "role": "guest", "right": false, "standing": true },
+    { "op": "wait.peerStep" },
+    { "op": "held.ragdoll", "role": "host" },
+    { "op": "assert.remoteHeldBasis", "role": "guest", "right": false, "standing": false },
+    { "op": "wait.peerStep" },
+    { "op": "assert.isolation" }
+  ]
+}

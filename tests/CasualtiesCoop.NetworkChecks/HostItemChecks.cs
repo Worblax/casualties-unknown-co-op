@@ -106,8 +106,10 @@ internal static class HostItemChecks
     {
         internal int Pickups;
         internal int Drops;
+        internal int Swaps;
         internal bool RejectPickup;
         internal bool RejectDrop;
+        internal bool RejectSwap;
         internal byte[] Applied = System.Array.Empty<byte>();
 
         public ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition) =>
@@ -118,6 +120,12 @@ internal static class HostItemChecks
             Pickups++;
             condition = 1;
             return !RejectPickup;
+        }
+
+        public bool TrySwapSlots(ParticipantId player, ItemState first, byte destination, ItemState? second)
+        {
+            Swaps++;
+            return !RejectSwap;
         }
 
         public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location, out float condition)

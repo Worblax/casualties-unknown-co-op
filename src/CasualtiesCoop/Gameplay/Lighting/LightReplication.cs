@@ -10,6 +10,8 @@ using UnityEngine.Rendering.Universal;
 
 namespace CasualtiesCoop.Gameplay.Lighting;
 
+internal delegate bool TryResolveItemId(Item item, out ulong id);
+
 internal sealed class LightReplication : IDisposable
 {
     private const float SendInterval = 0.10f;
@@ -27,6 +29,9 @@ internal sealed class LightReplication : IDisposable
     private readonly PlayerPositionLookup playerPosition;
     private readonly Action<byte[]> sendLocal;
     private readonly Action<byte[], ulong> relay;
+    private readonly TryResolveItemId itemId;
+    private readonly Func<ulong, ulong, Item?> heldItem;
+    private readonly Func<ulong, ulong, bool> heldSourceCurrent;
     private readonly LightPrefabCatalog catalog = new();
     private readonly TerrainShadowCasters shadows = new();
     private readonly LocalLightVisibility visibility = new();
@@ -43,16 +48,41 @@ internal sealed class LightReplication : IDisposable
     private float emptyUntil;
 
     internal LightReplication(SessionPeers peers, PlayerPositionLookup playerPosition,
-        Action<byte[]> sendLocal, Action<byte[], ulong> relay, IMonotonicClock clock)
+        Action<byte[]> sendLocal, Action<byte[], ulong> relay, IMonotonicClock clock,
+        TryResolveItemId itemId, Func<ulong, ulong, Item?> heldItem, Func<ulong, ulong, bool> heldSourceCurrent)
     {
         this.peers = peers;
         this.clock = clock;
         this.playerPosition = playerPosition;
         this.sendLocal = sendLocal;
         this.relay = relay;
+        this.itemId = itemId;
+        this.heldItem = heldItem;
+        this.heldSourceCurrent = heldSourceCurrent;
     }
 
     internal uint LastSequence(ulong player) => remote.TryGetValue(player, out OwnerLights owner) ? owner.Sequence : 0;
+
+    internal bool TryGetHeldBeam(ulong owner, ulong itemId, byte component, out Light2D? beam, out bool markerVisible)
+    {
+        beam = null;
+        markerVisible = false;
+        if (itemId == 0 || !remote.TryGetValue(owner, out OwnerLights lights))
+        {
+            return false;
+        }
+
+        foreach (RemoteLight source in lights.Sources.Values)
+        {
+            if (source.HeldItemId == itemId && source.Component == component)
+            {
+                beam = source.Light;
+                markerVisible = source.MarkerVisible;
+                return true;
+            }
+        }
+        return false;
+    }
 
     internal void AdvanceLocalSequence(uint confirmed)
     {
@@ -79,8 +109,9 @@ internal sealed class LightReplication : IDisposable
         }
 
         projected.Clear();
-        foreach (OwnerLights owner in remote.Values)
+        foreach (KeyValuePair<ulong, OwnerLights> entry in remote)
         {
+            OwnerLights owner = entry.Value;
             if (now - owner.LastSeen > SourceTimeout)
             {
                 Clear(owner);
@@ -89,7 +120,15 @@ internal sealed class LightReplication : IDisposable
 
             foreach (RemoteLight source in owner.Sources.Values)
             {
-                source.Tick(observer, world);
+                ulong itemId = source.HeldItemId;
+                if (itemId != 0 && !heldSourceCurrent(entry.Key, itemId))
+                {
+                    source.Hide();
+                    continue;
+                }
+
+                Item? item = itemId != 0 ? heldItem(entry.Key, itemId) : null;
+                source.Tick(observer, world, now, item);
                 if (source.Light.isActiveAndEnabled)
                 {
                     projected.Add(source.Light);
@@ -129,11 +168,11 @@ internal sealed class LightReplication : IDisposable
         present.Clear();
         foreach (Item item in body.GetAllItems())
         {
-            Capture(item, false, ref count);
+            Capture(item, world: false, held: true, ref count);
         }
         foreach (Item item in body.GetAllWearables())
         {
-            Capture(item, false, ref count);
+            Capture(item, world: false, held: false, ref count);
         }
 
         if (peers.IsHost && count < outbound.Length)
@@ -143,7 +182,7 @@ internal sealed class LightReplication : IDisposable
                 if (item && !item.transform.parent && LightPrefabCatalog.DefinitionOf(item) != 0 &&
                     NearParticipant(item.transform.position))
                 {
-                    Capture(item, true, ref count);
+                    Capture(item, world: true, held: false, ref count);
                     if (count == outbound.Length)
                     {
                         break;
@@ -174,7 +213,7 @@ internal sealed class LightReplication : IDisposable
         return false;
     }
 
-    private void Capture(Item item, bool world, ref int count)
+    private void Capture(Item item, bool world, bool held, ref int count)
     {
         if (!item || count >= outbound.Length)
         {
@@ -187,8 +226,9 @@ internal sealed class LightReplication : IDisposable
             return;
         }
         item.GetComponentsInChildren(true, captured);
+        ulong heldItemId = held && itemId(item, out ulong registered) ? registered : 0;
         bool blink = item.id == "flashlight" && item.TryGetComponent(out CustomItemBehaviour behaviour) && behaviour.state == 3;
-        for (int index = 0; index < captured.Count && index < 16 && count < outbound.Length; index++)
+        for (int index = 0; index < captured.Count && index < LightPrefabCatalog.MaxComponents && count < outbound.Length; index++)
         {
             Light2D light = captured[index];
             if (!light || !light.isActiveAndEnabled || (!blink && light.intensity <= 0.01f) ||
@@ -208,6 +248,7 @@ internal sealed class LightReplication : IDisposable
             outbound[count++] = new LightSample
             {
                 Id = id,
+                HeldItemId = heldItemId,
                 Definition = definition,
                 Component = (byte)index,
                 World = world,

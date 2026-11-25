@@ -26,6 +26,7 @@ internal static class P0CraftChecks
         DuplicateCommitIdsAreRejected();
         WrongResultAndMissingIngredientsAreRejected();
         HostCannotMutateReservedItems();
+        SwapCannotMoveReservedDestination();
         ReservedNestedItemBlocksParent();
         ForeignContainerRegistrationIsRejected();
         PlacementReportMovesOwnedItem();
@@ -148,6 +149,31 @@ internal static class P0CraftChecks
         {
             ItemId = box.Id, Revision = box.Revision, Operation = 901, Action = ItemAction.PickUp, Slot = 0
         }) == ItemDecision.Conflict, "Moving the parent cannot bypass a reserved child.");
+    }
+
+    private static void SwapCannotMoveReservedDestination()
+    {
+        using var scenario = new Scenario();
+        ParticipantId owner = scenario.ParticipantOf(First);
+        Check.That(scenario.Host.TryRegister("rock", ItemPlacement.Inventory, owner, 0, 1,
+            default, 1f, Array.Empty<byte>(), 0, out ItemState first), "The guest owns a swap source.");
+        Check.That(scenario.Host.TryRegister("stick", ItemPlacement.Inventory, owner, 0, 2,
+            default, 1f, Array.Empty<byte>(), 0, out ItemState second), "The guest owns a destination ingredient.");
+        scenario.AdvanceReady();
+        Check.That(scenario.FirstGuest.TryRequestCraft(11, new[] { second.Id }, new[] { second.Revision }, out _),
+            "The guest requests a reservation for the destination ingredient.");
+        scenario.AdvanceReady();
+        Check.That(scenario.Host.IsCraftReserved(second.Id), "The destination ingredient is locked for crafting.");
+
+        ItemDecision decision = default;
+        scenario.FirstGuest.ResultAccepted += (_, result) => decision = result;
+        Check.That(scenario.FirstGuest.TrySubmitSwap(first.Id, first.Slot, second.Slot, second.Id),
+            "The guest submits an occupied swap over the normal operation channel.");
+        scenario.AdvanceReady();
+        Check.That(decision == ItemDecision.Conflict && scenario.Host.TryGet(first.Id, out var source) &&
+            source.Slot == first.Slot && source.Revision == first.Revision && scenario.Host.TryGet(second.Id, out var destination) &&
+            destination.Slot == second.Slot && destination.Revision == second.Revision,
+            "A craft lock on the destination alone blocks the whole swap.");
     }
 
     private static void ForeignContainerRegistrationIsRejected()

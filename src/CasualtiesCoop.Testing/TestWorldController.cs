@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using CasualtiesCoop.Sandbox;
+using TMPro;
 using UnityEngine;
 
 namespace CasualtiesCoop.Testing;
@@ -16,26 +17,27 @@ internal sealed class TestWorldController : IDisposable
     private bool entering;
     private bool restored;
 
-    internal bool Ready
+    internal bool Ready => ReadyFor(0);
+
+    internal bool ReadyFor(int character)
     {
-        get
+        if (scene is null && PreRunScript.instance && SandboxScene.CanEnter(PreRunScript.instance))
         {
-            if (scene is null && PreRunScript.instance && SandboxScene.CanEnter(PreRunScript.instance))
-            {
-                entering = true;
-                scene = SandboxScene.Enter(PreRunScript.instance, character: 0, "normal");
-            }
-
-            scene?.Tick();
-            if (scene?.CourseLoaded != true)
-            {
-                return false;
-            }
-
-            RestorePreferences();
-            return true;
+            entering = true;
+            scene = SandboxScene.Enter(PreRunScript.instance, character, "normal");
         }
+
+        scene?.Tick();
+        if (scene?.CourseLoaded != true)
+        {
+            return false;
+        }
+
+        RestorePreferences();
+        return true;
     }
+
+    internal TMP_FontAsset? Font => scene?.Font;
 
     internal Body Body => PlayerCamera.main.body;
 

@@ -1,5 +1,6 @@
 using System;
 using CasualtiesCoop.Diagnostics;
+using CasualtiesCoop.Gameplay.Items;
 using UnityEngine;
 
 namespace CasualtiesCoop.Gameplay.Characters;
@@ -10,13 +11,14 @@ internal sealed class CharacterPoseSampler
     private const float FastInterval = 1f / 60f;
     private readonly AnimatorLayerPose[] bodyBuffer = new AnimatorLayerPose[CharacterPoseWire.MaxLayers];
     private readonly AnimatorLayerPose[] armBuffer = new AnimatorLayerPose[CharacterPoseWire.MaxLayers];
+    private readonly HeldItemPose[] heldBuffer = new HeldItemPose[CharacterPoseWire.MaxHeldItems];
     private CharacterPose last;
     private Body? sampledBody;
     private CharacterFace? face;
     private float sentAt;
     private uint sequence;
 
-    internal bool TrySample(Body body, ulong player, float now, out CharacterPose pose)
+    internal bool TrySample(Body body, SharedItemReplication items, ulong player, float now, out CharacterPose pose)
     {
         pose = default;
         float elapsed = now - sentAt;
@@ -48,7 +50,7 @@ internal sealed class CharacterPoseSampler
         Vector2 velocity = body.standing || !body.baseLimb || !body.baseLimb.rb ? body.rb.velocity : body.baseLimb.rb.velocity;
         pose = new CharacterPose(player, ++sequence, origin.x, origin.y,
             Mathf.Clamp(velocity.x, -1000f, 1000f), Mathf.Clamp(velocity.y, -1000f, 1000f), body.isRight, body.standing,
-            limbs, bodyLayers.ToArray(), armLayers.ToArray(), expressionPose);
+            limbs, bodyLayers.ToArray(), armLayers.ToArray(), expressionPose, CaptureHeldItems(body, items));
         if (CoopDiagnostics.Enabled && (graphChanged || last.Standing != pose.Standing))
         {
             AnimatorLayerPose bodyState = bodyLayers.IsEmpty ? default : bodyLayers[0];
@@ -69,6 +71,35 @@ internal sealed class CharacterPoseSampler
             sequence = confirmed;
         }
         last = default;
+    }
+
+    private HeldItemPose[] CaptureHeldItems(Body body, SharedItemReplication items)
+    {
+        int count = 0;
+        for (int index = 0; index < body.slots.Length && index < byte.MaxValue && count < heldBuffer.Length; index++)
+        {
+            Item? item = body.GetItem(index);
+            if (!item || !item!.gameObject.activeInHierarchy || !items.TryGetId(item, out ulong id))
+            {
+                continue;
+            }
+
+            Vector2 right = item.transform.TransformVector(Vector3.right);
+            Vector2 up = item.transform.TransformVector(Vector3.up);
+            float determinant = right.x * up.y - right.y * up.x;
+            if (!float.IsFinite(determinant) || determinant == 0f)
+            {
+                continue;
+            }
+            bool mirrored = determinant < 0f;
+            if (mirrored)
+            {
+                right = -right;
+            }
+            float angle = Mathf.Repeat(Mathf.Atan2(right.y, right.x) * Mathf.Rad2Deg, 360f);
+            heldBuffer[count++] = new HeldItemPose(id, (byte)index, angle, mirrored);
+        }
+        return count == 0 ? Array.Empty<HeldItemPose>() : heldBuffer.AsSpan(0, count).ToArray();
     }
 
     private static LimbPose[] CaptureLimbs(Body body, Vector2 origin)

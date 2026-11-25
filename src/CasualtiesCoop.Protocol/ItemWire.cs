@@ -9,7 +9,8 @@ internal enum ItemAction : byte
 {
     PickUp = 1,
     Drop,
-    Throw
+    Throw,
+    SwapSlots
 }
 
 internal enum ItemDecision : byte
@@ -54,6 +55,7 @@ internal struct SharedItemState
     internal ulong Id;
     internal uint Revision;
     internal uint Sample;
+    internal float SampleTime;
     internal string Definition;
     internal ulong Owner;
     internal ulong Parent;
@@ -73,6 +75,9 @@ internal struct SharedItemRequest
     internal uint Revision;
     internal ItemAction Action;
     internal byte Slot;
+    internal byte OtherSlot;
+    internal ulong OtherItemId;
+    internal uint OtherRevision;
     internal ItemLocation Location;
     internal byte[] Payload;
 }
@@ -109,8 +114,9 @@ internal static class ItemWire
     internal const int MaxPayloadLength = 12288;
     internal const byte NoSlot = byte.MaxValue;
 
-    private const int StateHeaderSize = 83;
+    private const int StateHeaderSize = 87;
     private const int RequestHeaderSize = 65;
+    private const int SwapRequestSize = RequestHeaderSize + 1 + sizeof(ulong) + sizeof(uint);
     private const int RegistrationHeaderSize = 74;
     private const int RegisteredSize = 45;
     private const int ReportHeaderSize = 77;
@@ -133,6 +139,7 @@ internal static class ItemWire
         GameplayWire.WriteFloat(message.AsSpan(53), state.Condition);
         WriteLocation(message.AsSpan(57), state.Location);
         BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(81), (ushort)payload.Length);
+        GameplayWire.WriteFloat(message.AsSpan(83), state.SampleTime);
         definition.CopyTo(message, StateHeaderSize);
         payload.CopyTo(message, StateHeaderSize + definition.Length);
         return message;
@@ -158,6 +165,7 @@ internal static class ItemWire
         state.Id = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(17));
         state.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(25));
         state.Sample = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(29));
+        state.SampleTime = GameplayWire.ReadFloat(message.Slice(83));
         state.Owner = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(33));
         state.Parent = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(41));
         state.Slot = message[49];
@@ -169,7 +177,7 @@ internal static class ItemWire
         state.Payload = message.Slice(StateHeaderSize + definitionLength, payloadLength).ToArray();
         return state.Id != 0 && state.Revision != 0 && IsDefinition(state.Definition) && message[52] <= 1 &&
             state.Placement <= ItemPlacement.Worn && IsPlacementValid(state) && state.Condition is >= 0f and <= 1f &&
-            IsLocationValid(state.Location);
+            float.IsFinite(state.SampleTime) && state.SampleTime >= 0f && IsLocationValid(state.Location);
     }
 
     internal static bool IsDefinition(string? definition)
@@ -194,12 +202,21 @@ internal static class ItemWire
     internal static byte[] WriteRequest(Guid session, SharedItemRequest request)
     {
         byte[] payload = request.Payload ?? Array.Empty<byte>();
-        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRequest, session, RequestHeaderSize + payload.Length);
+        bool swap = request.Action == ItemAction.SwapSlots;
+        byte[] message = GameplayWire.NewFrame(MessageKind.ItemRequest, session,
+            swap ? SwapRequestSize : RequestHeaderSize + payload.Length);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(17), request.Operation);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(25), request.ItemId);
         BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(33), request.Revision);
         message[37] = (byte)request.Action;
         message[38] = request.Slot;
+        if (swap)
+        {
+            message[RequestHeaderSize] = request.OtherSlot;
+            BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(RequestHeaderSize + 1), request.OtherItemId);
+            BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(RequestHeaderSize + 1 + sizeof(ulong)), request.OtherRevision);
+            return message;
+        }
         WriteLocation(message.AsSpan(39), request.Location);
         BinaryPrimitives.WriteUInt16LittleEndian(message.AsSpan(63), (ushort)payload.Length);
         payload.CopyTo(message, RequestHeaderSize);
@@ -214,8 +231,11 @@ internal static class ItemWire
             return false;
         }
 
+        request.Action = (ItemAction)message[37];
+        bool swap = request.Action == ItemAction.SwapSlots;
         int payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(63));
-        if (payloadLength > MaxPayloadLength || message.Length != RequestHeaderSize + payloadLength)
+        if (swap ? payloadLength != 0 || message.Length != SwapRequestSize
+                 : payloadLength > MaxPayloadLength || message.Length != RequestHeaderSize + payloadLength)
         {
             return false;
         }
@@ -223,13 +243,28 @@ internal static class ItemWire
         request.Operation = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(17));
         request.ItemId = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(25));
         request.Revision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(33));
-        request.Action = (ItemAction)message[37];
         request.Slot = message[38];
         request.Location = ReadLocation(message.Slice(39));
+        if (request.Operation == 0 || request.ItemId == 0 || request.Revision == 0 || request.Slot == NoSlot ||
+            !IsLocationValid(request.Location))
+        {
+            return false;
+        }
+        if (swap)
+        {
+            request.OtherSlot = message[RequestHeaderSize];
+            request.OtherItemId = BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(RequestHeaderSize + 1));
+            request.OtherRevision = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(RequestHeaderSize + 1 + sizeof(ulong)));
+            request.Payload = Array.Empty<byte>();
+            return IsValidSwap(request);
+        }
         request.Payload = message.Slice(RequestHeaderSize).ToArray();
-        return request.Operation != 0 && request.ItemId != 0 && request.Revision != 0 && request.Slot != NoSlot &&
-            request.Action is >= ItemAction.PickUp and <= ItemAction.Throw && IsLocationValid(request.Location);
+        return request.Action is >= ItemAction.PickUp and <= ItemAction.Throw;
     }
+
+    internal static bool IsValidSwap(SharedItemRequest request) =>
+        request.Slot != NoSlot && request.OtherSlot != NoSlot && request.Slot != request.OtherSlot &&
+        request.OtherItemId != request.ItemId && (request.OtherItemId == 0) == (request.OtherRevision == 0);
 
     internal static byte[] WriteRegistration(Guid session, SharedItemRegistration registration)
     {

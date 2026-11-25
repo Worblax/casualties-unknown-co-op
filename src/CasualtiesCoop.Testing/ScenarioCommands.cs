@@ -160,6 +160,8 @@ internal static class ScenarioCommands
             if (c["slot"] is not null) Integer(c, "slot", 0, 254);
         }, (r, c) => r.Items.Swap(c)),
         ["item.remove"] = Apply(Both, "item", Item, (r, c) => r.Items.Remove(String(c, "item"))),
+        ["item.removeAndAssertLiquidOrphan"] = Apply(Step, "item", Item,
+            (r, c) => r.RemoveAndAssertLiquidOrphan(String(c, "item"))),
         ["item.place"] = Apply(Both, "item position", c => { Item(c); Position(c); }, (r, c) => r.Items.Place(String(c, "item"), c)),
         ["item.condition"] = Apply(Both, "item condition", c => { Item(c); Scalar(c, "condition", 0, 1); },
             (r, c) => r.Items.SetCondition(String(c, "item"), Scalar(c, "condition", 0, 1))),

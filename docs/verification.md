@@ -151,3 +151,7 @@
 ## Автономные Unity-сценарии
 
 `Verify.ps1 -GameTests` добавляет запуск через `Run-GameTests.ps1` к стандартным сборке и проверкам. По умолчанию выводит отчёты в `artifacts/game-tests/<runId>`. Для ручного прогона можно выбрать `-Scenario`, для наблюдения — `-Visible`. Тесты используют настоящие SandboxCourse, Unity-объекты и production-обработчики, но виртуальный транспорт. Статусы, команды и ссылки на фактические отчёты находятся в [testing-progress.md](testing-progress.md).
+
+## Два процесса Unity
+
+`Run-MultiProcessTests.ps1 -Scenario tests/multiprocess/<имя>.json` запускает хоста и гостя в отдельных временных копиях игры. Сценарии проверяют двусторонние позы и состав спрайтов, удерживаемый фонарик и его луч, перестановки слотов, сбросы и броски, а также нативную речь. Локальные TCP и UDP каналы используют production `WorldSession` и Harmony-обработчики. Параметры `-LatencyMs`, `-JitterMs` и `-UnreliableLoss` задают профиль сети. Оба отчёта, сценарий, отпечатки сборки и логи сохраняются в `artifacts/multiprocess/<runId>`.

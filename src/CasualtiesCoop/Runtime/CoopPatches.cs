@@ -22,6 +22,7 @@ internal static class CoopPatches
                 prefix: new HarmonyMethod(typeof(CoopPatches), nameof(AllowVanillaSave)));
         }
         CharacterAudioHooks.Install(harmony);
+        CharacterSpeechHooks.Install(harmony);
         ClawEffects.Install(harmony);
         TerrainDamageReplication.Install(harmony);
         SharedItemHooks.Install(harmony);

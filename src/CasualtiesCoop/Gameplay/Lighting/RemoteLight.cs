@@ -21,8 +21,13 @@ internal sealed class RemoteLight : IDisposable
     private float phaseAt;
     private float receivedAt;
     private bool hasPose;
+    private Item? boundItem;
+    private Transform? boundEmitter;
 
     internal Light2D Light => light;
+    internal ulong HeldItemId => target.HeldItemId;
+    internal byte Component => target.Component;
+    internal bool MarkerVisible => glint.enabled && glint.gameObject.activeInHierarchy;
     internal bool Matches(byte definition, byte component) => target.Definition == definition && target.Component == component;
 
     internal RemoteLight(Light2D template, Sprite marker)
@@ -78,24 +83,31 @@ internal sealed class RemoteLight : IDisposable
         receivedAt = now;
     }
 
-    internal void Tick(Vector2 observer, WorldGeneration world)
+    internal void Tick(Vector2 observer, WorldGeneration world, float now, Item? heldItem)
     {
-        float now = Time.unscaledTime;
         if (now - receivedAt > 1.1f || (observer - target.Position).sqrMagnitude > 125f * 125f)
         {
-            light.gameObject.SetActive(false);
+            Hide();
             return;
         }
 
         Transform at = light.transform;
-        bool snap = !hasPose || !light.gameObject.activeSelf || (target.Position - (Vector2)at.position).sqrMagnitude > 36f;
-        float ease = 1f - Mathf.Exp(-18f * Time.unscaledDeltaTime);
-        at.position = snap ? target.Position : Vector2.Lerp(at.position, target.Position, ease);
-        float angle = snap ? target.Angle : Mathf.LerpAngle(at.eulerAngles.z, target.Angle, ease);
-        at.rotation = Quaternion.Euler(0f, 0f, angle);
-        at.localScale = new Vector3(target.Scale.x, target.Scale.y, 1f);
-        glint.transform.localScale = new Vector3(1f / Mathf.Max(0.02f, Mathf.Abs(target.Scale.x)),
-            1f / Mathf.Max(0.02f, Mathf.Abs(target.Scale.y)), 1f);
+        Transform? emitter = FindHeldEmitter(heldItem);
+        if (emitter)
+        {
+            ApplyHeldTransform(at, emitter!);
+        }
+        else
+        {
+            bool snap = !hasPose || !light.gameObject.activeSelf || (target.Position - (Vector2)at.position).sqrMagnitude > 36f;
+            float ease = 1f - Mathf.Exp(-18f * Time.unscaledDeltaTime);
+            at.position = snap ? target.Position : Vector2.Lerp(at.position, target.Position, ease);
+            float angle = snap ? target.Angle : Mathf.LerpAngle(at.eulerAngles.z, target.Angle, ease);
+            at.rotation = Quaternion.Euler(0f, 0f, angle);
+            at.localScale = new Vector3(target.Scale.x, target.Scale.y, 1f);
+            glint.transform.localScale = new Vector3(1f / Mathf.Max(0.02f, Mathf.Abs(target.Scale.x)),
+                1f / Mathf.Max(0.02f, Mathf.Abs(target.Scale.y)), 1f);
+        }
         light.color = target.Color;
         float intensity = target.Intensity;
         if (target.Blink && Mathf.FloorToInt((now - phaseAt) * 18f) % 2 != 0)
@@ -107,8 +119,40 @@ internal sealed class RemoteLight : IDisposable
         hasPose = true;
 
         Vector2 origin = at.position;
-        glint.enabled = intensity > 0.02f && LocalLightVisibility.CanSee(world, observer, origin);
+        glint.enabled = !emitter && intensity > 0.02f && LocalLightVisibility.CanSee(world, observer, origin);
         glint.color = new Color(light.color.r, light.color.g, light.color.b, Mathf.Min(0.75f, intensity));
+    }
+
+    internal void Hide() => light.gameObject.SetActive(false);
+
+    private static void ApplyHeldTransform(Transform target, Transform emitter)
+    {
+        // A reflected parent changes the beam's rendered basis independently of its quaternion.
+        Vector2 up = emitter.TransformVector(Vector3.up);
+        Vector2 right = emitter.TransformVector(Vector3.right);
+        float scaleY = up.magnitude;
+        float scaleX = scaleY > 0f ? (right.x * up.y - right.y * up.x) / scaleY : right.magnitude;
+        float angle = Mathf.Atan2(-up.x, up.y) * Mathf.Rad2Deg;
+        target.SetPositionAndRotation(emitter.position, Quaternion.Euler(0f, 0f, angle));
+        target.localScale = new Vector3(scaleX, scaleY, emitter.lossyScale.z);
+    }
+
+    private Transform? FindHeldEmitter(Item? item)
+    {
+        if (item != boundItem)
+        {
+            boundItem = item;
+            boundEmitter = null;
+            if (item && LightPrefabCatalog.DefinitionOf(item!) == target.Definition)
+            {
+                Light2D[] emitters = item!.GetComponentsInChildren<Light2D>(true);
+                if (target.Component < emitters.Length && emitters[target.Component])
+                {
+                    boundEmitter = emitters[target.Component].transform;
+                }
+            }
+        }
+        return item && item!.gameObject.activeInHierarchy ? boundEmitter : null;
     }
 
     public void Dispose()

@@ -21,7 +21,10 @@ internal sealed class SharedItemProjection : IDisposable
         internal uint AppliedRevision;
         internal byte[]? AppliedPayload;
         internal float NextReplicaAttempt;
-        internal bool SnapNextMotion;
+        internal ItemMotionBuffer? Motion;
+        internal bool InWorld;
+        internal uint MotionRevision;
+        internal float MotionTime;
     }
 
     private readonly SharedItemInventory inventory;
@@ -61,6 +64,9 @@ internal sealed class SharedItemProjection : IDisposable
 
     internal Item? FindReplica(ulong id) => views.TryGetValue(id, out View view) ? view.Item : null;
 
+    internal bool PlacementMatches(ItemState state) => views.TryGetValue(state.Id, out View view) &&
+        !NeedsProjection(state, view);
+
     internal void BeginRecovery(bool freshBody) => restoringFreshBody = freshBody;
     internal void Suppress(ulong id, bool value)
     {
@@ -95,13 +101,12 @@ internal sealed class SharedItemProjection : IDisposable
         return true;
     }
 
-    internal void OnStateAccepted(ItemState? previous, ItemState state)
+    internal void OnStateAccepted(ItemState? _, ItemState state)
     {
-        if (previous is { } old && old.Owner.IsNone && state.Owner.IsNone && old.Revision == state.Revision &&
-            views.TryGetValue(state.Id, out View view))
+        if (state.Placement == ItemPlacement.World && state.Owner.IsNone && !state.Removed &&
+            views.TryGetValue(state.Id, out View view) && view.InWorld)
         {
-            view.SnapNextMotion |= old.Location.VelocityX * state.Location.VelocityX +
-                old.Location.VelocityY * state.Location.VelocityY < -1f;
+            TrackMotion(view, state, clock.Now);
         }
     }
 
@@ -147,6 +152,11 @@ internal sealed class SharedItemProjection : IDisposable
         {
             case ItemPlacement.World:
                 objects.PutInWorld(replica, location, authoritative: false);
+                view.Motion ??= new ItemMotionBuffer();
+                view.Motion.Reset(location, clock.Now);
+                view.InWorld = true;
+                view.MotionRevision = 0;
+                view.MotionTime = 0f;
                 return true;
             case ItemPlacement.Inventory:
                 if (ApplyInventory(new ItemState { Slot = slot }, replica)) return true;
@@ -166,10 +176,10 @@ internal sealed class SharedItemProjection : IDisposable
         }
     }
 
-    internal void Reapply(ulong id, ItemState state)
+    internal void Reapply(ulong id, ItemState state, ItemReplicaStore replicas)
     {
         if (!views.TryGetValue(id, out View view) || !view.Item) return;
-        if (!Apply(state, view)) return;
+        if (!Apply(state, view, replicas)) return;
         view.AppliedRevision = state.Revision;
         view.AppliedPayload = state.Payload;
     }
@@ -189,6 +199,7 @@ internal sealed class SharedItemProjection : IDisposable
 
             if (!state.Owner.IsNone && state.Owner != local)
             {
+                view.InWorld = false;
                 if (state.Placement is ItemPlacement.Inventory or ItemPlacement.Worn && remoteVisuals is not null)
                 {
                     if (!view.Item && !Create(state, view, now)) continue;
@@ -201,7 +212,7 @@ internal sealed class SharedItemProjection : IDisposable
                     }
                     bool attached = state.Placement == ItemPlacement.Worn
                         ? remoteVisuals.AttachWornItem(state.Owner, view.Item!)
-                        : remoteVisuals.AttachHeldItem(state.Owner, state.Slot, view.Item!);
+                        : remoteVisuals.AttachHeldItem(state.Owner, state.Id, state.Slot, view.Item!);
                     if (attached)
                     {
                         view.Item!.rb.simulated = false;
@@ -234,7 +245,7 @@ internal sealed class SharedItemProjection : IDisposable
                 {
                     continue;
                 }
-                if (!Apply(state, view))
+                if (!Apply(state, view, replicas))
                 {
                     continue;
                 }
@@ -244,9 +255,14 @@ internal sealed class SharedItemProjection : IDisposable
 
             if (state.Placement == ItemPlacement.World && view.Item)
             {
-                Interpolate(view.Item!, state.Location, view.SnapNextMotion);
-                view.SnapNextMotion = false;
-                view.Item!.condition = state.Condition;
+                // Snapshot merge can replace the last sample without a live StateAccepted event.
+                TrackMotion(view, state, now);
+                ItemLocation at = view.Motion!.Evaluate(now);
+                Item projected = view.Item!;
+                // Update the collision body's pose so the native hover query sees the displayed item.
+                projected.rb.position = new Vector2(at.X, at.Y);
+                projected.rb.rotation = at.Angle;
+                projected.condition = state.Condition;
             }
         }
     }
@@ -343,7 +359,7 @@ internal sealed class SharedItemProjection : IDisposable
         return view.Item!.transform.parent;
     }
 
-    private bool Apply(ItemState state, View view)
+    private bool Apply(ItemState state, View view, ItemReplicaStore replicas)
     {
         Item replica = view.Item!;
         if (!objects.Apply(replica, state.Payload, state.Condition, state.Placement))
@@ -352,20 +368,32 @@ internal sealed class SharedItemProjection : IDisposable
             return false;
         }
 
+        if (state.Placement == ItemPlacement.World && view.InWorld && !replica.transform.parent &&
+            replica.gameObject.activeSelf)
+        {
+            return true;
+        }
+        view.InWorld = false;
         remoteVisuals?.DetachHeldItem(replica);
+        if (state.Placement == ItemPlacement.Inventory && state.Owner == local)
+        {
+            return ApplyInventory(state, replica, replicas);
+        }
         Detach(replica);
         switch (state.Placement)
         {
             case ItemPlacement.World:
                 objects.PutInWorld(replica, state.Location, authoritative: false);
+                view.Motion ??= new ItemMotionBuffer();
+                view.Motion.Reset(state.Location, clock.Now);
+                view.InWorld = true;
+                view.MotionRevision = state.Revision;
+                view.MotionTime = 0f;
+                TrackMotion(view, state, clock.Now);
                 return true;
             case ItemPlacement.Inventory:
                 if (state.Owner != local && remoteVisuals is not null &&
-                    remoteVisuals.AttachHeldItem(state.Owner, state.Slot, replica)) return true;
-                if (ApplyInventory(state, replica))
-                {
-                    return true;
-                }
+                    remoteVisuals.AttachHeldItem(state.Owner, state.Id, state.Slot, replica)) return true;
                 replica.gameObject.SetActive(false);
                 return false;
             case ItemPlacement.Worn:
@@ -381,6 +409,26 @@ internal sealed class SharedItemProjection : IDisposable
                 return true;
             default:
                 return false;
+        }
+    }
+
+    private static void TrackMotion(View view, ItemState state, float now)
+    {
+        if (state.Revision != view.MotionRevision && state.SampleTime == 0f)
+        {
+            ItemLocation current = view.Motion!.Evaluate(now);
+            Vector2 difference = new(state.Location.X - current.X, state.Location.Y - current.Y);
+            if (difference.sqrMagnitude > 16f)
+            {
+                view.Motion.Reset(state.Location, now);
+                view.MotionTime = 0f;
+            }
+        }
+        view.MotionRevision = state.Revision;
+        if (state.SampleTime > view.MotionTime)
+        {
+            view.Motion!.Push(state, now);
+            view.MotionTime = state.SampleTime;
         }
     }
 
@@ -423,7 +471,7 @@ internal sealed class SharedItemProjection : IDisposable
         return true;
     }
 
-    private bool ApplyInventory(ItemState state, Item replica)
+    private bool ApplyInventory(ItemState state, Item replica, ItemReplicaStore? replicas = null)
     {
         Body? body = inventory.Body;
         if (!body || state.Slot >= body!.slots.Length)
@@ -432,6 +480,7 @@ internal sealed class SharedItemProjection : IDisposable
         }
 
         Item? occupant = body.GetItem(state.Slot);
+        if (occupant == replica) return true;
         if (restoringFreshBody && occupant && occupant != replica && !TryGetId(occupant!, out _))
         {
             if (!inventory.TryDrop(occupant!))
@@ -440,12 +489,19 @@ internal sealed class SharedItemProjection : IDisposable
             }
             occupant!.gameObject.SetActive(false);
             UnityEngine.Object.Destroy(occupant.gameObject);
+            occupant = null;
         }
-        if (body.GetItem(state.Slot) != replica && body.HoldingItem(replica) && !inventory.TryDrop(replica))
+        if (body.HoldingItem(replica))
         {
-            return false;
+            int source = body.SlotOf(replica);
+            if (occupant && (replicas is null || !TryGetId(occupant!, out ulong id) || !replicas.TryGet(id, out ItemState other) ||
+                other.Owner != local || other.Placement != ItemPlacement.Inventory || other.Slot != source))
+            {
+                return false;
+            }
+            return inventory.TrySwapSlots(source, state.Slot);
         }
-        if (inventory.TryPickUp(replica, state.Slot))
+        if (!occupant && Detach(replica) && inventory.TryPickUp(replica, state.Slot))
         {
             return true;
         }
@@ -483,20 +539,7 @@ internal sealed class SharedItemProjection : IDisposable
         }
         view.Item = null;
         view.UnityId = 0;
-    }
-
-    private static void Interpolate(Item item, ItemLocation location, bool snap)
-    {
-        Vector2 target = new(location.X, location.Y);
-        float ease = 1f - Mathf.Exp(-18f * Time.unscaledDeltaTime);
-        if (snap || ((Vector2)item.transform.position - target).sqrMagnitude > 16f)
-        {
-            item.transform.SetPositionAndRotation(target, Quaternion.Euler(0, 0, location.Angle));
-            return;
-        }
-
-        item.transform.position = Vector2.Lerp(item.transform.position, target, ease);
-        item.transform.rotation = Quaternion.Euler(0, 0, Mathf.LerpAngle(item.transform.eulerAngles.z, location.Angle, ease));
+        view.InWorld = false;
     }
 
     public void Dispose()

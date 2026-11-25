@@ -20,6 +20,8 @@ internal static class GuestItemChecks
         IncompleteManifestRetries();
         GapRecoversFromSnapshot();
         OnePendingOperation();
+        SwapSlotsCommitAndReplay();
+        MissingSwapDeltaRepairsWithSnapshot();
     }
 
     private static void SnapshotWaitsAndResumes()
@@ -167,6 +169,98 @@ internal static class GuestItemChecks
         scenario.Sync();
         Check.That(scenario.Guest.Synced && !scenario.Guest.Replicas.TryGet(scenario.Second, out _) &&
             scenario.Guest.Replicas.TryGet(missed, out _), "The manifest repairs the invisible creation and removes the missed deletion.");
+    }
+
+    private static void SwapSlotsCommitAndReplay()
+    {
+        using var scenario = new Scenario();
+        PrepareSwap(scenario);
+        Check.That(!scenario.Guest.TrySubmitSwap(scenario.First, 0, 1, 0),
+            "The guest cannot claim a destination its replica shows as occupied.");
+
+        List<(ulong Sequence, SharedItemState State)> deltas = new();
+        scenario.Refuse = frame =>
+        {
+            if (ItemSnapshotWire.TryReadState(frame, MessageKind.ItemDelta, Session, out ulong sequence, out var state))
+            {
+                Check.That(scenario.Host.TryGet(scenario.First, out var first) && first.Slot == 1 &&
+                    scenario.Host.TryGet(scenario.Second, out var second) && second.Slot == 0,
+                    "The host registry has already applied both changes when the first swap delta is sent.");
+                deltas.Add((sequence, state));
+            }
+            return frame[0] == (byte)MessageKind.ItemResult;
+        };
+        Check.That(scenario.Guest.TrySubmitSwap(scenario.First, 0, 1, scenario.Second) &&
+            scenario.Guest.IsReserved(0) && scenario.Guest.IsReserved(1) && !scenario.Guest.IsReserved(2),
+            "An occupied-slot swap reserves both slots while the request is in flight.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.World.Swaps == 1 && scenario.Guest.Pending is { Action: ItemAction.SwapSlots } &&
+            deltas.Count == 2 && deltas[0].State.Id == scenario.First && deltas[1].State.Id == scenario.Second &&
+            deltas[1].Sequence == deltas[0].Sequence + 1 && deltas.All(delta => delta.State.Revision == 3),
+            "An occupied swap publishes consecutive structural changes, even when its result cannot be sent.");
+        scenario.Refuse = null;
+        scenario.Network.Advance(1);
+        scenario.Guest.Tick();
+        scenario.Network.Advance(0);
+        Check.That(scenario.Guest.Pending is null && !scenario.Guest.IsReserved(0) && !scenario.Guest.IsReserved(1) &&
+            scenario.Results[^1] == ItemDecision.Accepted && scenario.World.Swaps == 1 &&
+            scenario.Guest.Replicas.TryGet(scenario.First, out var firstReplica) && firstReplica.Slot == 1 &&
+            scenario.Guest.Replicas.TryGet(scenario.Second, out var secondReplica) && secondReplica.Slot == 0,
+            "A retry replays the result without moving either item again and releases both reservations.");
+
+        scenario.World.RejectSwap = true;
+        Check.That(scenario.Guest.TrySubmitSwap(scenario.First, 1, 2, 0), "Vacant destination request succeeds locally.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Results[^1] == ItemDecision.Unavailable &&
+            scenario.Host.TryGet(scenario.First, out var unchanged) && unchanged.Slot == 1 && unchanged.Revision == 3,
+            "Native refusal preserves the source slot and its revision.");
+        scenario.World.RejectSwap = false;
+        Check.That(scenario.Guest.TrySubmitSwap(scenario.First, 1, 2, 0), "Vacant destination can be retried as a new operation.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Results[^1] == ItemDecision.Accepted &&
+            scenario.Host.TryGet(scenario.First, out var moved) && moved.Slot == 2 && moved.Revision == 4 &&
+            scenario.Host.TryGet(scenario.Second, out var unmoved) && unmoved.Slot == 0 && unmoved.Revision == 3,
+            "A successful vacancy move advances only the item that moved.");
+
+        var stale = new SharedItemRequest
+        {
+            Operation = 6, ItemId = scenario.First, Slot = 2, Revision = 4, Action = ItemAction.SwapSlots,
+            OtherSlot = 0, OtherItemId = scenario.Second, OtherRevision = 2
+        };
+        Check.That(scenario.Host.ExecuteForParticipant(scenario.GuestPeers.LocalParticipant, stale) == ItemDecision.Unavailable &&
+            scenario.World.Swaps == 3, "A stale destination revision is rejected before touching native slots.");
+        stale.OtherItemId = 0;
+        stale.OtherRevision = 0;
+        Check.That(scenario.Host.ExecuteForParticipant(scenario.GuestPeers.LocalParticipant, stale) == ItemDecision.SlotOccupied &&
+            scenario.World.Swaps == 3, "The host rejects a vacancy claim for a currently occupied slot.");
+    }
+
+    private static void MissingSwapDeltaRepairsWithSnapshot()
+    {
+        using var scenario = new Scenario();
+        PrepareSwap(scenario);
+        scenario.Refuse = frame =>
+            ItemSnapshotWire.TryReadState(frame, MessageKind.ItemDelta, Session, out _, out var state) && state.Id == scenario.Second;
+        Check.That(scenario.Guest.TrySubmitSwap(scenario.First, 0, 1, scenario.Second), "A real occupied swap is queued.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Results[^1] == ItemDecision.Accepted && !scenario.Guest.Synced && !scenario.Guest.CanSubmit,
+            "An accepted swap missing the final structural delta detects the incomplete replica and requests repair.");
+        scenario.Sync();
+        Check.That(scenario.Guest.Synced && scenario.World.Swaps == 1 &&
+            scenario.Guest.Replicas.TryGet(scenario.First, out var first) && first.Slot == 1 &&
+            scenario.Guest.Replicas.TryGet(scenario.Second, out var second) && second.Slot == 0,
+            "The fresh snapshot repairs both slots without a second native swap.");
+    }
+
+    private static void PrepareSwap(Scenario scenario)
+    {
+        scenario.Sync();
+        Check.That(scenario.Guest.TrySubmit(scenario.First, ItemAction.PickUp, 0, default), "First item pickup is queued.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Guest.TrySubmit(scenario.Second, ItemAction.PickUp, 1, default), "Second item pickup is queued.");
+        scenario.Network.Advance(0);
+        Check.That(scenario.Results.SequenceEqual(new[] { ItemDecision.Accepted, ItemDecision.Accepted }),
+            "The host puts both swap inputs in the guest inventory.");
     }
 
     private static byte[] Done(Guid session, ulong id = 1) => ItemSnapshotWire.WriteDone(session, id, 0, 0);

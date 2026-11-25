@@ -155,10 +155,18 @@ internal static class SharedItemHooks
             return true;
         }
 
-        if (slot.isBody && shared.IsTracked(dragged) && !__instance.body.HoldingItem(dragged) &&
-            !__instance.body.HoldingItem(slot.slot))
+        if (slot.isBody && dragged)
         {
-            __instance.body.PickUpItem(dragged, slot.slot);
+            Body body = __instance.body;
+            if (body.HoldingItem(dragged))
+            {
+                int source = body.SlotOf(dragged);
+                if (source >= 0 && source != slot.slot) body.SwapSlots(source, slot.slot);
+            }
+            else if (shared.IsTracked(dragged) && !body.HoldingItem(slot.slot))
+            {
+                body.PickUpItem(dragged, slot.slot);
+            }
         }
 
         __result = true;

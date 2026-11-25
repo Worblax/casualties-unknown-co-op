@@ -12,6 +12,7 @@ internal readonly struct SessionRejoinState
     internal readonly uint PoseSequence;
     internal readonly uint SoundSequence;
     internal readonly uint LightSequence;
+    internal readonly uint SpeechSequence;
     internal readonly ulong ItemOperation;
     internal readonly ulong DrinkOperation;
     internal readonly ulong CraftOperation;
@@ -23,13 +24,14 @@ internal readonly struct SessionRejoinState
 
     internal SessionRejoinState(RoomLaunchPlan plan, Guid attempt, uint poseSequence, uint soundSequence, uint lightSequence,
         ulong itemOperation, ulong drinkOperation, ulong craftOperation, ulong registrationOperation, ulong lastClientKey,
-        float x, float y, bool hasPosition)
+        float x, float y, bool hasPosition, uint speechSequence = 0)
     {
         Plan = plan;
         Attempt = attempt;
         PoseSequence = poseSequence;
         SoundSequence = soundSequence;
         LightSequence = lightSequence;
+        SpeechSequence = speechSequence;
         ItemOperation = itemOperation;
         DrinkOperation = drinkOperation;
         CraftOperation = craftOperation;
@@ -44,7 +46,7 @@ internal readonly struct SessionRejoinState
 internal static class SessionRejoinWire
 {
     private const int ReferenceSize = 33;
-    private const int StateHeaderSize = 94;
+    private const int StateHeaderSize = 98;
 
     internal static byte[] WriteReference(MessageKind frame, Guid session, Guid attempt)
     {
@@ -76,6 +78,7 @@ internal static class SessionRejoinWire
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(70), state.CraftOperation);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(78), state.RegistrationOperation);
         BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(86), state.LastClientKey);
+        BinaryPrimitives.WriteUInt32LittleEndian(message.AsSpan(94), state.SpeechSequence);
         plan.CopyTo(message, StateHeaderSize);
         return message;
     }
@@ -103,7 +106,7 @@ internal static class SessionRejoinWire
             BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(41)), BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(45)),
             BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(53)), BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(70)),
             BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(78)), BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(86)),
-            x, y, message[69] != 0);
+            x, y, message[69] != 0, BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(94)));
         return true;
     }
 }

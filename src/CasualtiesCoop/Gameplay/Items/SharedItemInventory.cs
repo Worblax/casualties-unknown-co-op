@@ -54,6 +54,38 @@ internal sealed class SharedItemInventory
     internal bool HoldsSlot(Item item, int slot) =>
         Body && slot >= 0 && slot < Body!.slots.Length && Body.GetItem(slot) == item;
 
+    internal static bool CanSwapInto(Body actor, Item? item, int slot) =>
+        slot >= 0 && slot < actor.slots.Length && slot < ItemWire.NoSlot &&
+        (!item || !item!.Stats.onlyHoldInHands || actor.slots[slot].isHand);
+
+    internal bool TrySwapSlots(int first, int second)
+    {
+        Body? body = Body;
+        if (!body || first == second || !CanSwapInto(body!, null, first) || !CanSwapInto(body!, null, second))
+        {
+            return false;
+        }
+
+        Item? left = body!.GetItem(first);
+        Item? right = body.GetItem(second);
+        if (!CanSwapInto(body, left, second) || !CanSwapInto(body, right, first))
+        {
+            return false;
+        }
+
+        bool wasApplying = Applying;
+        Applying = true;
+        try
+        {
+            body.SwapSlots(first, second);
+            return body.GetItem(first) == right && body.GetItem(second) == left;
+        }
+        finally
+        {
+            Applying = wasApplying;
+        }
+    }
+
     internal bool TryDrop(Item item)
     {
         Body? body = Body;

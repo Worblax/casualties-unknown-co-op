@@ -6,6 +6,7 @@ namespace CasualtiesCoop.Gameplay.Lighting;
 
 internal sealed class LightPrefabCatalog
 {
+    internal const int MaxComponents = 16;
     private static readonly string[] ItemIds =
         { "", "flashlight", "emergencylight", "headlamp", "makeshiftheadlamp", "roselight", "lantern", "lightbulb", "torch", "campfire" };
 

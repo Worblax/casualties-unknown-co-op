@@ -51,10 +51,6 @@ internal sealed class SharedItemObjects
         }
         item.rb.bodyType = RigidbodyType2D.Kinematic;
         item.rb.gravityScale = 0;
-        foreach (Collider2D collider in instance.GetComponentsInChildren<Collider2D>(true))
-        {
-            collider.isTrigger = true;
-        }
         item.rb.simulated = false;
         return item;
     }
@@ -87,6 +83,14 @@ internal sealed class SharedItemObjects
             item.rb.velocity = new Vector2(at.VelocityX, at.VelocityY);
             item.rb.angularVelocity = at.Spin;
             item.rb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
+        }
+        else
+        {
+            item.rb.bodyType = RigidbodyType2D.Kinematic;
+            item.rb.gravityScale = 0f;
+            item.rb.velocity = Vector2.zero;
+            item.rb.angularVelocity = 0f;
+            item.rb.interpolation = RigidbodyInterpolation2D.None;
         }
     }
 

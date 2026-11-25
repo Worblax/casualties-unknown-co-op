@@ -216,6 +216,13 @@ internal sealed class AuthoritativeItemRegistry
         return Advance(record);
     }
 
+    internal ItemState CommitSlot(ulong id, byte slot)
+    {
+        Record record = items[id];
+        record.State.Slot = slot;
+        return Advance(record);
+    }
+
     internal ItemState CommitPlacement(ulong id, ItemPlacement placement, ParticipantId owner, ulong parent, byte slot,
         ItemLocation location, float condition, byte[] payload)
     {
@@ -323,6 +330,7 @@ internal sealed class AuthoritativeItemRegistry
         record.State.Location = at;
         record.State.Condition = condition;
         record.State.Sample++;
+        record.State.SampleTime = now;
         state = record.State;
         reliable = stopped || refresh;
         if (reliable)
@@ -347,6 +355,7 @@ internal sealed class AuthoritativeItemRegistry
         record.State.Sequence = Sequence;
         record.State.Revision++;
         record.State.Sample = 0;
+        record.State.SampleTime = 0f;
         record.PreviousAt = 0;
         return record.State;
     }

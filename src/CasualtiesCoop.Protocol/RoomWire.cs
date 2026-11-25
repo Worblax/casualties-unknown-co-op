@@ -48,12 +48,13 @@ internal enum MessageKind : byte
     ReservedTerrainSync,
     SandboxAlcohol,
     WorldChunkControl,
-    WorldChunkSnapshot
+    WorldChunkSnapshot,
+    CharacterSpeech
 }
 
 internal static class RoomWire
 {
-    internal const string LobbyProtocolVersion = "17";
+    internal const string LobbyProtocolVersion = "18";
     internal const int MaxFrameSize = 16384;
     private const int HandshakeSize = 41;
     private const int PlanHeaderSize = 36;

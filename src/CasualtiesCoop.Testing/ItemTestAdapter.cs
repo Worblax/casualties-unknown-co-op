@@ -328,11 +328,9 @@ internal sealed class ItemTestAdapter : IDisposable
                 if (index != from && body.GetItem(index) == null) { to = index; break; }
             }
         }
-        if (from == ItemWire.NoSlot || to < 0 || to == from)
+        if (from == ItemWire.NoSlot || to < 0 || to >= body.slots.Length || to == from)
             throw new TestBlocked("The native Body has no second empty pickup slot.");
         Cluster.RunAs(actor, _ => { body.SwapSlots(from, to); return true; });
-        if (body.GetItem(to) != ReplicaFor(peer, alias))
-            throw new InvalidOperationException($"Guest {peer} could not move the item to slot {to}.");
         slots[peer + "/" + alias] = (byte)to;
     }
 
@@ -528,6 +526,21 @@ internal sealed class ItemTestAdapter : IDisposable
         UnityEngine.Object.Destroy(ItemFor(alias).gameObject);
     }
 
+    internal string RemoveTrackedLiquidNativeImmediately(string alias)
+    {
+        ulong id = IdFor(alias);
+        Item item = ItemFor(alias);
+        if (!Cluster.Host.Session.TryGet(id, out ItemState state) || Cluster.Host.FindTracked(id) != item ||
+            !item.GetComponentInChildren<WaterContainerItem>(true))
+        {
+            throw new InvalidOperationException($"Fixture {alias} requires a tracked native liquid container.");
+        }
+
+        // The host can retire this registry entry on its next tick. Observe the orphan before then.
+        UnityEngine.Object.DestroyImmediate(item.gameObject);
+        return state.Definition;
+    }
+
     internal bool Near(string alias, Body body, float distance) =>
         ((Vector2)(ItemFor(alias).transform.position - body.transform.position)).sqrMagnitude <= distance * distance;
 
@@ -716,7 +729,11 @@ internal sealed class ItemTestAdapter : IDisposable
     internal bool HostSlotMatchesClient(string actor, string target)
     {
         if (!slots.TryGetValue(actor + "/" + target, out byte slot)) return false;
-        return Cluster.Host.Session.TryGet(IdFor(target), out ItemState state) && state.Slot == slot;
+        ulong id = IdFor(target);
+        if (!Cluster.Host.Session.TryGet(id, out ItemState state) || state.Slot != slot) return false;
+        if (!Cluster.Actors.TryGetValue(actor, out var member) || !member.NativeBody) return true;
+        Item? replica = member.ItemReplication?.FindReplica(id);
+        return replica && member.NativeBody!.GetItem(slot) == replica;
     }
 
     internal int CountNativeDefinitionInSlots(string definition)

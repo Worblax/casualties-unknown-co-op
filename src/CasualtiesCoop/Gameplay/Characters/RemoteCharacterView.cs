@@ -13,6 +13,7 @@ internal sealed class RemoteCharacterView : IDisposable
     private readonly GameObject[] limbs;
     private readonly TextMeshPro name;
     private readonly CharacterFace? face;
+    private readonly NativeCharacterSpeechView? speech;
     private SpriteRenderer? head;
     private SpriteRenderer? eyes;
     private SpriteRenderer? nose;
@@ -34,6 +35,7 @@ internal sealed class RemoteCharacterView : IDisposable
         }
     }
     private readonly Dictionary<int, HandAnchor> slots = new();
+    private readonly Dictionary<byte, (ulong Id, Item Item)> heldItems = new();
     private readonly Dictionary<string, Transform> limbsByName = new(StringComparer.OrdinalIgnoreCase);
     private readonly int charType;
     private readonly bool hasTemplate;
@@ -44,6 +46,7 @@ internal sealed class RemoteCharacterView : IDisposable
     {
         root = new GameObject("Co-op remote character");
         Body? template = LoadCharacter(character);
+        speech = NativeCharacterSpeechView.Create(template, root.transform);
         hasTemplate = template;
         charType = template ? template!.charType : 0;
         FacialExpression? expression = template ? template!.GetComponentInChildren<FacialExpression>(true) : null;
@@ -63,6 +66,10 @@ internal sealed class RemoteCharacterView : IDisposable
             {
                 // Nested body limbs each have their own network transform.
                 if (sprite.GetComponentInParent<Limb>(true) != template.limbs[index])
+                {
+                    continue;
+                }
+                if (!ActiveBelow(sprite.transform, source))
                 {
                     continue;
                 }
@@ -168,10 +175,59 @@ internal sealed class RemoteCharacterView : IDisposable
             limb.SetActive(true);
         }
 
+        ApplyHeldItems(pose, previous, progress, blendLimbs);
         ApplyFace(progress >= 0.5f || !previous.Face.HasExpression ? pose.Face : previous.Face);
         Vector3 headPosition = limbs.Length > 0 && limbs[0].activeSelf ? limbs[0].transform.localPosition : Vector3.zero;
         name.transform.localPosition = headPosition + new Vector3(0, 2.1f, -0.1f);
         root.SetActive(true);
+        speech?.Tick(root.transform.TransformPoint(headPosition));
+    }
+
+    private void ApplyHeldItems(CharacterPose pose, CharacterPose previous, float progress, bool interpolate)
+    {
+        // Native item Update can re-enable an emitter from its replicated power state.
+        foreach (var attached in heldItems.Values)
+        {
+            if (attached.Item) HeldItemVisualState.Disable(attached.Item, suppressNetworkLights: true);
+        }
+        foreach (HeldItemPose held in pose.HeldItems ?? Array.Empty<HeldItemPose>())
+        {
+            if (!heldItems.TryGetValue(held.Slot, out var attached) || attached.Id != held.ItemId || !attached.Item ||
+                !slots.TryGetValue(held.Slot, out HandAnchor anchor))
+            {
+                continue;
+            }
+
+            float angle = held.Angle;
+            if (interpolate)
+            {
+                foreach (HeldItemPose old in previous.HeldItems ?? Array.Empty<HeldItemPose>())
+                {
+                    if (old.ItemId == held.ItemId && old.Slot == held.Slot && old.Mirrored == held.Mirrored)
+                    {
+                        angle = Mathf.LerpAngle(old.Angle, angle, progress);
+                        break;
+                    }
+                }
+            }
+
+            ApplyHeldRotation(attached.Item.transform, anchor, angle, held.Mirrored);
+        }
+    }
+
+    private static void ApplyHeldRotation(Transform item, HandAnchor anchor, float angle, bool mirrored)
+    {
+        Transform parent = anchor.Parent;
+        Vector3 right = Quaternion.Euler(0f, 0f, angle) * Vector3.right;
+        Vector3 up = new(-right.y, right.x, 0f);
+        Vector3 localRight = parent.InverseTransformVector(right).normalized;
+        Vector3 localUp = new(-localRight.y, localRight.x, 0f);
+        float verticalDirection = Mathf.Sign(Vector3.Dot(parent.TransformVector(localUp), up));
+        Vector3 scale = anchor.Scale;
+        item.localRotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(localRight.y, localRight.x) * Mathf.Rad2Deg);
+        item.localScale = new Vector3(
+            SafeScale(Mathf.Abs(scale.x), parent.TransformVector(localRight).magnitude) * (mirrored ? -1f : 1f),
+            SafeScale(Mathf.Abs(scale.y), parent.TransformVector(localUp).magnitude) * verticalDirection, scale.z);
     }
 
     private void ApplyFace(FacePose pose)
@@ -191,7 +247,30 @@ internal sealed class RemoteCharacterView : IDisposable
         }
     }
 
-    internal void Hide() => root.SetActive(false);
+    internal void PresentSpeech(CharacterSpeech line) => speech?.Present(line);
+    internal void ClearSpeech() => speech?.Clear();
+    internal string RenderedSpeech => speech?.RenderedText ?? string.Empty;
+    internal Vector3 SpeechWorldPosition => speech?.WorldPosition ?? root.transform.position;
+
+    internal void Hide()
+    {
+        if (root.activeSelf) ClearSpeech();
+        root.SetActive(false);
+    }
+
+    internal bool Visible => root.activeSelf;
+    internal Vector3 WorldPosition => root.transform.position;
+    internal int SpriteRendererCount => root.GetComponentsInChildren<SpriteRenderer>(true).Length;
+    internal Transform VisualRoot => root.transform;
+
+    private static bool ActiveBelow(Transform target, Transform root)
+    {
+        for (Transform? current = target; current && current != root; current = current.parent)
+        {
+            if (!current.gameObject.activeSelf) return false;
+        }
+        return true;
+    }
 
     internal void ShowAt(Vector2 position)
     {
@@ -228,9 +307,42 @@ internal sealed class RemoteCharacterView : IDisposable
         return true;
     }
 
-    internal bool AttachHeldItem(byte slot, Item item)
+    internal bool TryGetHeldItem(ulong id, out Item? item)
+    {
+        foreach (var entry in heldItems.Values)
+        {
+            if (entry.Id == id && entry.Item && entry.Item.transform.IsChildOf(root.transform))
+            {
+                item = entry.Item;
+                return true;
+            }
+        }
+        item = null;
+        return false;
+    }
+
+    internal bool TryGetHeldItem(byte slot, out ulong id, out Item? item)
+    {
+        if (heldItems.TryGetValue(slot, out var entry) && entry.Item && entry.Item.gameObject.activeInHierarchy)
+        {
+            id = entry.Id;
+            item = entry.Item;
+            return true;
+        }
+        id = 0;
+        item = null;
+        return false;
+    }
+
+    internal bool AttachHeldItem(ulong id, byte slot, Item item)
     {
         if (!item || !slots.TryGetValue(slot, out HandAnchor anchor)) return false;
+        if (heldItems.TryGetValue(slot, out var attached) && attached.Item && attached.Item != item)
+        {
+            DetachHeldItem(attached.Item);
+        }
+        ForgetHeldItem(item);
+        heldItems[slot] = (id, item);
         item.transform.SetParent(anchor.Parent, false);
         item.transform.localPosition = anchor.Position;
         item.transform.localRotation = anchor.Rotation * Quaternion.Euler(0f, 0f, item.Stats.slotRotation);
@@ -244,13 +356,14 @@ internal sealed class RemoteCharacterView : IDisposable
             sprite.enabled = true;
             sprite.sortingOrder = anchor.SortingOrder;
         }
-        HeldItemVisualState.Disable(item);
+        HeldItemVisualState.Disable(item, suppressNetworkLights: true);
         return true;
     }
 
     internal bool AttachWornItem(Item item)
     {
         if (!item || !item.Stats.wearable || !hasTemplate) return false;
+        if (ForgetHeldItem(item)) HeldItemVisualState.Restore(item);
         Transform? limb = null;
         if (!string.IsNullOrEmpty(item.Stats.desiredWearLimb))
             limbsByName.TryGetValue(item.Stats.desiredWearLimb, out limb);
@@ -280,10 +393,21 @@ internal sealed class RemoteCharacterView : IDisposable
 
     internal void DetachHeldItem(Item item)
     {
-        if (!item || !item.transform.IsChildOf(root.transform)) return;
+        if (!item) return;
+        ForgetHeldItem(item);
+        if (!item.transform.IsChildOf(root.transform)) return;
         HeldItemVisualState.Restore(item);
         item.transform.SetParent(null, true);
         item.gameObject.SetActive(false);
+    }
+
+    private bool ForgetHeldItem(Item item)
+    {
+        foreach (var entry in heldItems)
+        {
+            if (entry.Value.Item == item) return heldItems.Remove(entry.Key);
+        }
+        return false;
     }
 
     private static float SafeScale(float source, float divisor) =>

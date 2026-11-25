@@ -25,6 +25,11 @@ internal sealed partial class WorldSession
             Terrain.ResetPeer(peer);
             WorldChunks.Forget(peer);
             Items.ResetPeer(peer);
+            speech.ClearPending(peers.IsHost ? peer : 0);
+            foreach (var remote in remotes)
+            {
+                if (!peers.IsHost || remote.Key == peer) remote.Value.View?.ClearSpeech();
+            }
         }
         if (peers.IsHost)
         {
@@ -117,7 +122,7 @@ internal sealed partial class WorldSession
         if (previous.Player == 0 || !IsWorldPosition(at)) at = initialSpawn;
         return new SessionRejoinState(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
             lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer), Items.LastCraftOperation(peer),
-            Items.LastRegistrationOperation(peer), Items.LastClientKey(peer), at.x, at.y, IsWorldPosition(at));
+            Items.LastRegistrationOperation(peer), Items.LastClientKey(peer), at.x, at.y, IsWorldPosition(at), speech.LastSequence(peer));
     }
 
     internal void RestoreFrom(SessionRejoinState state)
@@ -127,6 +132,7 @@ internal sealed partial class WorldSession
         poseSampler.Resume(state.PoseSequence);
         AdvanceSequence(ref soundSequence, state.SoundSequence);
         lights.AdvanceLocalSequence(state.LightSequence);
+        speech.Resume(state.SpeechSequence);
         Items.BeginRecovery(state.ItemOperation, state.CraftOperation, state.RegistrationOperation,
             state.LastClientKey, freshBody: !SceneReady);
         Fluids.BeginRecovery(state.DrinkOperation);

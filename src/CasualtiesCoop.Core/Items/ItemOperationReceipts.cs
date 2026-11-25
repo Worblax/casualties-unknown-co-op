@@ -14,12 +14,14 @@ internal sealed class ItemOperationReceipts
     {
         internal readonly ulong Operation;
         internal readonly ulong ItemId;
+        internal readonly ItemAction Action;
         internal readonly ItemDecision Decision;
 
         internal Receipt(SharedItemRequest request, ItemDecision decision)
         {
             Operation = request.Operation;
             ItemId = request.ItemId;
+            Action = request.Action;
             Decision = decision;
         }
     }

@@ -29,9 +29,9 @@ internal sealed class TestRemoteItemVisuals : IRemoteItemVisuals, IDisposable
             if (positions.TryGetValue(pair.Key, out Vector2 position)) pair.Value.ShowAt(position);
     }
 
-    public bool AttachHeldItem(ParticipantId owner, byte slot, Item item)
+    public bool AttachHeldItem(ParticipantId owner, ulong id, byte slot, Item item)
     {
-        bool ok = views.TryGetValue(owner, out RemoteCharacterView? view) && view.AttachHeldItem(slot, item);
+        bool ok = views.TryGetValue(owner, out RemoteCharacterView? view) && view.AttachHeldItem(id, slot, item);
         AttachAttempts++;
         if (ok) AttachSuccesses++;
         if (!ok) Debug.Log($"test remote attach failed owner={owner.Seat} slot={slot} item={(item ? item.id : "null")}");

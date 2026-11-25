@@ -51,6 +51,8 @@ internal sealed class SharedItemReplication : IDisposable
     private readonly SharedItemProjection? projection;
     private readonly SharedItemCrafting? crafting;
     private readonly Dictionary<ulong, float> localPlacementUntil = new();
+    private readonly HashSet<ulong> authoritativePlacements = new();
+    private SharedItemRequest? confirmedSwap;
 
     internal SharedItemReplication(SessionPeers peers, PlayerPositionLookup playerPosition, IMonotonicClock clock,
         IRemoteItemVisuals? remoteVisuals = null)
@@ -91,7 +93,12 @@ internal sealed class SharedItemReplication : IDisposable
         hostScene?.Session.LastRegistrationOperation(player) ?? 0;
     internal ulong LastClientKey(ulong player) => hostScene?.Session.LastClientKey(player) ?? 0;
 
-    internal void SuspendForRecovery() => guest?.SuspendForRecovery();
+    internal void SuspendForRecovery()
+    {
+        confirmedSwap = null;
+        authoritativePlacements.Clear();
+        guest?.SuspendForRecovery();
+    }
 
     internal void BeginRecovery(ulong confirmedOperation, ulong confirmedCraftOperation,
         ulong confirmedRegistrationOperation, ulong confirmedClientKey, bool freshBody)
@@ -103,6 +110,18 @@ internal sealed class SharedItemReplication : IDisposable
 
     internal bool RecoveryComplete() =>
         guest is { Synced: true } && projection!.InventoryReady(guest.Replicas);
+
+    internal void AttachRegisteredRemoteItems(ParticipantId owner)
+    {
+        if (hostScene is null || owner.IsNone) return;
+        foreach (ItemState state in hostScene.Session.Snapshot())
+        {
+            if (state.Owner == owner && state.Placement is ItemPlacement.Inventory or ItemPlacement.Worn)
+            {
+                hostScene.ApplyRemoteState(state);
+            }
+        }
+    }
 
     internal void Tick(Body localBody)
     {
@@ -130,10 +149,35 @@ internal sealed class SharedItemReplication : IDisposable
             }
         }
         projection!.Tick(guest.Replicas, guest.Synced);
+        if (authoritativePlacements.Count != 0)
+        {
+            authoritativePlacements.RemoveWhere(id => !guest.Replicas.TryGet(id, out ItemState state) ||
+                projection.PlacementMatches(state));
+        }
+        if (guest.Synced && confirmedSwap is { } swap &&
+            !SwapProjectionPending(swap.ItemId, swap.OtherSlot) &&
+            !SwapProjectionPending(swap.OtherItemId, swap.Slot))
+        {
+            confirmedSwap = null;
+        }
     }
 
     private void OnStateChanged(ItemState? previous, ItemState state)
     {
+        if (previous is not { } old || old.Owner != state.Owner || old.Placement != state.Placement ||
+            old.Slot != state.Slot || old.Parent != state.Parent || state.Removed)
+        {
+            localPlacementUntil.Remove(state.Id);
+            // A newly accepted delta can reach the guest before its native inventory changes.
+            if (!state.Removed && EffectiveOwnedBy(state.Id, peers.LocalParticipant))
+            {
+                authoritativePlacements.Add(state.Id);
+            }
+            else
+            {
+                authoritativePlacements.Remove(state.Id);
+            }
+        }
         projection!.OnStateAccepted(previous, state);
         recipeRefresh = true;
     }
@@ -172,7 +216,7 @@ internal sealed class SharedItemReplication : IDisposable
         }
         if (projection!.TryGetId(item!, out ulong id) && guest!.Replicas.TryGet(id, out ItemState state))
         {
-            projection.Reapply(id, state);
+            projection.Reapply(id, state, guest.Replicas);
             return;
         }
         if (!registrationObjects.Contains(item!.GetInstanceID())) TryRegisterLocal(item!);
@@ -335,31 +379,60 @@ internal sealed class SharedItemReplication : IDisposable
         return false;
     }
 
-    internal bool IsReserved(int slot) => guest?.IsReserved(slot) == true;
+    internal bool IsReserved(int slot) => guest?.IsReserved(slot) == true ||
+        (confirmedSwap is { } swap && (swap.Slot == slot || swap.OtherSlot == slot));
 
     internal bool TryNativeSwap(Body body, int first, int second)
     {
         if (inventory.Applying || !inventory.Body || inventory.Body != body) return true;
+        if (first == second || !SharedItemInventory.CanSwapInto(body, null, first) ||
+            !SharedItemInventory.CanSwapInto(body, null, second)) return false;
         Item? left = body.GetItem(first);
         Item? right = body.GetItem(second);
         if (!IsTracked(left) && !IsTracked(right)) return true;
-        if (IsReserved(first) || IsReserved(second)) return false;
+        if (IsReserved(first) || IsReserved(second) || confirmedSwap is not null) return false;
         if ((left && !CanChangePlacement(left)) || (right && !CanChangePlacement(right))) return false;
-        inventory.Applying = true;
-        try
+        if (!SharedItemInventory.CanSwapInto(body, left, second) || !SharedItemInventory.CanSwapInto(body, right, first))
         {
-            body.SwapSlots(first, second);
+            return false;
         }
-        finally
+
+        if (!left)
         {
-            inventory.Applying = false;
+            (left, right) = (right, left);
+            (first, second) = (second, first);
         }
-        nextGuestState = 0;
+        ItemState other = default;
+        if (!TryGetState(left!, out ItemState state) || (right && !TryGetState(right!, out other)))
+        {
+            nextRegistrationScan = 0;
+            if (!IsTracked(left)) Observe(left);
+            if (right && !IsTracked(right)) Observe(right);
+            Alert("Waiting for the host to confirm shared items.");
+            return false;
+        }
+        if (!CanRequest()) return false;
+
+        if (hostScene is not null)
+        {
+            var request = new SharedItemRequest
+            {
+                ItemId = state.Id, Revision = state.Revision, Action = ItemAction.SwapSlots, Slot = (byte)first,
+                OtherItemId = other.Id, OtherRevision = other.Revision, OtherSlot = (byte)second,
+                Payload = Array.Empty<byte>()
+            };
+            OnResult(request, hostScene.Session.ExecuteLocal(request));
+        }
+        else
+        {
+            guest!.TrySubmitSwap(state.Id, (byte)first, (byte)second, other.Id);
+        }
         return false;
     }
 
     internal Sprite? PendingSprite(int slot) =>
-        guest is { Pending: { } request } && guest.IsReserved(slot) ? projection!.SpriteFor(request.ItemId) : null;
+        guest is { Pending: { Action: ItemAction.PickUp } request } && request.Slot == slot
+            ? projection!.SpriteFor(request.ItemId) : null;
 
     internal bool HandleWorldUpdate(Item item)
     {
@@ -424,7 +497,9 @@ internal sealed class SharedItemReplication : IDisposable
     {
         foreach (ItemState state in guest!.Replicas.States)
         {
-            if (state.Removed || !EffectiveOwnedBy(state.Id, peers.LocalParticipant))
+            if (state.Removed || authoritativePlacements.Contains(state.Id) ||
+                !EffectiveOwnedBy(state.Id, peers.LocalParticipant) ||
+                (confirmedSwap is { } swap && SwapContains(swap, state.Id)))
             {
                 continue;
             }
@@ -466,7 +541,15 @@ internal sealed class SharedItemReplication : IDisposable
     }
 
     private bool LocalPlacementPending(ulong id) =>
-        localPlacementUntil.TryGetValue(id, out float until) && clock.Now < until;
+        (guest?.Pending is { Action: ItemAction.SwapSlots } swap && SwapContains(swap, id)) ||
+        (localPlacementUntil.TryGetValue(id, out float until) && clock.Now < until);
+
+    private static bool SwapContains(SharedItemRequest swap, ulong id) => id == swap.ItemId || id == swap.OtherItemId;
+
+    private bool SwapProjectionPending(ulong id, byte slot) => id != 0 &&
+        guest!.Replicas.TryGet(id, out ItemState state) && state.Owner == peers.LocalParticipant &&
+        state.Placement == ItemPlacement.Inventory && state.Slot == slot &&
+        (projection!.FindReplica(id) is not { } item || !item || !inventory.HoldsSlot(item, slot));
 
     private bool EffectiveOwnedBy(ulong id, ParticipantId player)
     {
@@ -679,6 +762,12 @@ internal sealed class SharedItemReplication : IDisposable
     {
         if (decision == ItemDecision.Accepted)
         {
+            if (request.Action == ItemAction.SwapSlots && guest is not null)
+            {
+                confirmedSwap = request;
+                localPlacementUntil.Remove(request.ItemId);
+                localPlacementUntil.Remove(request.OtherItemId);
+            }
             if (request.Action == ItemAction.Throw && inventory.Body is { } body && body)
             {
                 body.armsAnimator.Play("ArmsSwing", -1, 0f);

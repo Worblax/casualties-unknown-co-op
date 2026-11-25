@@ -8,6 +8,7 @@ namespace CasualtiesCoop.Gameplay.Lighting;
 internal struct LightSample
 {
     internal uint Id;
+    internal ulong HeldItemId;
     internal byte Definition;
     internal byte Component;
     internal bool World;
@@ -24,7 +25,7 @@ internal static class LightWire
 {
     internal const int MaxSources = 16;
     private const int HeaderSize = 30;
-    private const int SampleSize = 36;
+    private const int SampleSize = 44;
 
     internal static byte[] Write(Guid session, ulong player, uint sequence, ReadOnlySpan<LightSample> samples)
     {
@@ -51,6 +52,7 @@ internal static class LightWire
             data[33] = sample.Color.g;
             data[34] = sample.Color.b;
             data[35] = sample.Color.a;
+            BinaryPrimitives.WriteUInt64LittleEndian(data.Slice(36), sample.HeldItemId);
         }
         return message;
     }
@@ -80,6 +82,7 @@ internal static class LightWire
             var sample = new LightSample
             {
                 Id = BinaryPrimitives.ReadUInt32LittleEndian(data),
+                HeldItemId = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(36)),
                 Definition = data[4],
                 Component = data[5],
                 World = (data[6] & 1) != 0,
@@ -91,7 +94,8 @@ internal static class LightWire
                 Scale = new Vector2(GameplayWire.ReadFloat(data.Slice(24)), GameplayWire.ReadFloat(data.Slice(28))),
                 Color = new Color32(data[32], data[33], data[34], data[35])
             };
-            if (sample.Id == 0 || sample.Definition == 0 || sample.Component >= 16 || data[6] > 3 ||
+            if (sample.Id == 0 || sample.Definition == 0 || sample.Component >= LightPrefabCatalog.MaxComponents ||
+                data[6] > 3 || (sample.World && sample.HeldItemId != 0) ||
                 !GameplayWire.IsCoordinate(sample.Position.x) || !GameplayWire.IsCoordinate(sample.Position.y) ||
                 !GameplayWire.InRange(sample.Angle, 360) || sample.Intensity is < 0f or > 16f || !float.IsFinite(sample.Intensity) ||
                 !GameplayWire.InRange(sample.Scale.x, 8) || !GameplayWire.InRange(sample.Scale.y, 8))
@@ -100,7 +104,9 @@ internal static class LightWire
             }
             for (int previous = 0; previous < index; previous++)
             {
-                if (samples[previous].Id == sample.Id)
+                LightSample other = samples[previous];
+                if (other.Id == sample.Id || (sample.HeldItemId != 0 &&
+                    other.HeldItemId == sample.HeldItemId && other.Component == sample.Component))
                 {
                     return false;
                 }

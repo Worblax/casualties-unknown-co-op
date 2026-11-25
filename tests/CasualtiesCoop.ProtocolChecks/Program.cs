@@ -3,12 +3,14 @@ using System.Buffers.Binary;
 using CasualtiesCoop.Gameplay.Audio;
 using CasualtiesCoop.Lobby;
 using CasualtiesCoop.Gameplay.Characters;
+using CasualtiesCoop.Gameplay.Items;
 using CasualtiesCoop.Networking;
 using CasualtiesCoop.Session;
 
 VerifyHandshake();
 VerifyLaunchPlan();
 VerifyCharacterPose();
+VerifyHeldItemPose();
 VerifyCharacterSound();
 WireCompatibilityChecks.Run();
 VerifySandboxGameplay();
@@ -76,7 +78,8 @@ static void VerifyCharacterPose()
     Guid session = Guid.NewGuid();
     byte[] frame = CharacterPoseWire.Write(session, new CharacterPose(9, 12, 2.5f, -106f));
     Check(CharacterPoseWire.TryRead(frame, session, out CharacterPose pose) &&
-        pose.Player == 9 && pose.Sequence == 12 && pose.X == 2.5f && pose.Y == -106f, "Position round trip");
+        pose.Player == 9 && pose.Sequence == 12 && pose.X == 2.5f && pose.Y == -106f && pose.HeldItems.Length == 0,
+        "Position round trip");
     Check(!CharacterPoseWire.TryRead(frame, Guid.NewGuid(), out _), "Position from another session");
     Check(!CharacterPoseWire.TryRead(frame.AsSpan(0, 36), session, out _), "Truncated position");
     BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(29), BitConverter.SingleToInt32Bits(float.NaN));
@@ -106,6 +109,56 @@ static void VerifyCharacterPose()
 
     BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(frame.Length - sizeof(float)), BitConverter.SingleToInt32Bits(float.NaN));
     Check(!CharacterPoseWire.TryRead(frame, session, out _), "Invalid animation transition");
+}
+
+static void VerifyHeldItemPose()
+{
+    Guid session = Guid.NewGuid();
+    HeldItemPose[] heldItems = new HeldItemPose[CharacterPoseWire.MaxHeldItems];
+    for (int index = 0; index < heldItems.Length; index++)
+    {
+        heldItems[index] = new HeldItemPose(0xABCD_0000_0000_0001UL + (ulong)index, (byte)index, 22.5f * index,
+            mirrored: index % 2 != 0);
+    }
+
+    byte[] WritePose(params HeldItemPose[] items) => CharacterPoseWire.Write(session, new CharacterPose(9, 15, 2, -5,
+        limbs: new LimbPose[CharacterPoseWire.MaxLimbs], bodyLayers: new AnimatorLayerPose[CharacterPoseWire.MaxLayers],
+        armLayers: new AnimatorLayerPose[CharacterPoseWire.MaxLayers], heldItems: items));
+
+    byte[] frame = WritePose(heldItems);
+    Check(frame.Length <= RoomWire.MaxFrameSize, "Largest character packet with held items fits the room limit");
+    Check(CharacterPoseWire.TryRead(frame, session, out CharacterPose pose) && pose.HeldItems.Length == heldItems.Length,
+        "Bounded held item pose frame round trip");
+    for (int index = 0; index < heldItems.Length; index++)
+    {
+        HeldItemPose expected = heldItems[index];
+        HeldItemPose actual = pose.HeldItems[index];
+        Check(actual.ItemId == expected.ItemId && actual.Slot == expected.Slot && actual.Angle == expected.Angle &&
+            actual.Mirrored == expected.Mirrored, "Held item ID, slot, angle and reflection round trip");
+    }
+
+    Check(!CharacterPoseWire.TryRead(frame.AsSpan(0, frame.Length - 1), session, out _), "Truncated held item pose");
+    byte[] tooMany = new byte[frame.Length + 14];
+    frame.CopyTo(tooMany, 0);
+    tooMany[57]++;
+    frame.AsSpan(frame.Length - 14).CopyTo(tooMany.AsSpan(frame.Length));
+    BinaryPrimitives.WriteUInt64LittleEndian(tooMany.AsSpan(frame.Length), 1);
+    tooMany[frame.Length + 8] = byte.MaxValue - 1;
+    Check(!CharacterPoseWire.TryRead(tooMany, session, out _), "Excess held item count");
+    frame[^1] = 2;
+    Check(!CharacterPoseWire.TryRead(frame, session, out _), "Non-boolean held item reflection");
+    Check(!CharacterPoseWire.TryRead(WritePose(new HeldItemPose(0, 0, 0, false)), session, out _), "Zero held item ID");
+    Check(!CharacterPoseWire.TryRead(WritePose(new HeldItemPose(1, ItemWire.NoSlot, 0, false)), session, out _),
+        "Missing held item slot");
+    Check(!CharacterPoseWire.TryRead(WritePose(heldItems[0], new HeldItemPose(1, 0, 0, false)), session, out _),
+        "Duplicate held item slot");
+    Check(!CharacterPoseWire.TryRead(WritePose(heldItems[0], new HeldItemPose(heldItems[0].ItemId, 1, 0, false)), session, out _),
+        "Duplicate held item ID");
+    foreach (float invalidAngle in new[] { float.NaN, float.PositiveInfinity, -0.1f, 360.1f })
+    {
+        Check(!CharacterPoseWire.TryRead(WritePose(new HeldItemPose(1, 0, invalidAngle, false)), session, out _),
+            "Invalid held item angle");
+    }
 }
 
 static void VerifyCharacterSound()

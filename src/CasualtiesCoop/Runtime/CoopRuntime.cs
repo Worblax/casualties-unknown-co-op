@@ -21,7 +21,8 @@ internal sealed class CoopRuntime : IDisposable
 
     internal static WorldSession? ActiveWorld => current?.sandbox?.World is { SceneReady: true } world ? world : null;
     internal static bool MenuOpen => current?.menu.IsOpen == true;
-    internal static bool IsTestMode { get; } = Array.IndexOf(Environment.GetCommandLineArgs(), "--coop-test") >= 0;
+    internal static bool IsTestMode { get; } = HasArgument("--coop-test") || HasArgument("--coop-mp");
+    private static bool HasArgument(string value) => Array.IndexOf(Environment.GetCommandLineArgs(), value) >= 0;
     internal static bool SuppressVanillaSave => IsTestMode || current?.sandbox?.SuppressVanillaSave == true;
 
     internal SteamLobby? Lobby => steam.Lobby;

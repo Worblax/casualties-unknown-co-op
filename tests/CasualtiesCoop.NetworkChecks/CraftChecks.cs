@@ -196,6 +196,7 @@ internal static class CraftChecks
         internal readonly HashSet<ulong> Accessible = new();
         public ItemDecision CheckPickup(ParticipantId player, ulong item, byte slot, ItemLocation? previousPosition) => ItemDecision.Accepted;
         public bool TryPickUp(ParticipantId player, ulong item, byte slot, out float condition) { condition = 1; return true; }
+        public bool TrySwapSlots(ParticipantId player, ItemState first, byte destination, ItemState? second) => false;
         public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location, out float condition)
         { location = request.Location; condition = 1; return ItemDecision.Accepted; }
         public bool TryApplyState(ulong item, byte[] payload) => true;

@@ -11,6 +11,7 @@ using CasualtiesCoop.Gameplay.Items;
 using CasualtiesCoop.Gameplay.Lighting;
 using CasualtiesCoop.Gameplay.Terrain;
 using CasualtiesCoop.Networking;
+using CasualtiesCoop.Runtime;
 using CasualtiesCoop.Session;
 using Steamworks;
 using TMPro;
@@ -46,9 +47,18 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
     private readonly Dictionary<ulong, RemotePlayer> remotes = new();
     private readonly SpatialCharacterAudio audio;
     private readonly CharacterPoseSampler poseSampler = new();
+    private readonly CharacterSpeechReplication speech;
     private readonly LightReplication lights;
     private uint soundSequence;
     private Vector2 initialSpawn;
+
+    internal int PoseFrames { get; private set; }
+    internal int PoseInbound { get; private set; }
+    internal int PoseInvalid { get; private set; }
+    internal int PoseSourceRejected { get; private set; }
+    internal int PoseStale { get; private set; }
+    internal int PoseAccepted { get; private set; }
+    internal int RemoteCount => remotes.Count;
 
     internal bool SceneReady { get; private set; }
     internal SharedItemReplication Items { get; }
@@ -72,7 +82,9 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         Claws = new ClawEffects(peers, clock, TryGetPosition);
         WorldChunks = new WorldChunkReplication(peers, clock, TryGetPosition);
         Terrain = new TerrainDamageReplication(peers, clock, TryGetPosition, WorldChunks);
-        lights = new LightReplication(peers, TryGetPosition, SendLocal, Broadcast, clock);
+        speech = new CharacterSpeechReplication(peers, clock);
+        lights = new LightReplication(peers, TryGetPosition, SendLocal, Broadcast, clock,
+            Items.TryGetId, FindHeldItem, IsHeldLightCurrent);
         peers.ConnectionChanged += OnRecoveryPeerChanged;
         peers.AttachReceiver(Receive);
     }
@@ -106,12 +118,11 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         Body body = PlayerCamera.main.body;
         float now = clock.Now;
         Vector2 position = body.transform.position;
-        if (!WaitingForRecovery && poseSampler.TrySample(body, peers.LocalPlayer, now, out CharacterPose localPose))
+        if (!WaitingForRecovery && poseSampler.TrySample(body, Items, peers.LocalPlayer, now, out CharacterPose localPose))
         {
             SendLocal(CharacterPoseWire.Write(plan.Id, localPose));
         }
 
-        lights.Tick(body);
         foreach (KeyValuePair<ulong, RemotePlayer> entry in remotes)
         {
             RemotePlayer remote = entry.Value;
@@ -124,13 +135,33 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
 
             if (remote.View is null && plan.TryGetPlayer(entry.Key, out LaunchPlayer member))
             {
-                remote.View = new RemoteCharacterView(member.Character, SteamFriends.GetFriendPersonaName(new CSteamID(entry.Key)), font);
+                string displayName = CoopRuntime.IsTestMode
+                    ? "Player " + entry.Key : SteamFriends.GetFriendPersonaName(new CSteamID(entry.Key));
+                remote.View = new RemoteCharacterView(member.Character, displayName, font);
+                Items.AttachRegisteredRemoteItems(peers.Identify(entry.Key));
             }
-            remote.View?.Apply(remote.Pose, remote.PreviousPose, age, remote.PoseInterval);
+            if (remote.View is { } view)
+            {
+                if (!WaitingForRecovery && speech.TryTakeLatest(entry.Key, out CharacterSpeech line)) view.PresentSpeech(line);
+                view.Apply(remote.Pose, remote.PreviousPose, age, remote.PoseInterval);
+            }
         }
 
+        lights.Tick(body);
         audio.Tick(position);
     }
+
+    private Item? FindHeldItem(ulong owner, ulong id) =>
+        remotes.TryGetValue(owner, out RemotePlayer remote) && remote.View is { Visible: true } view &&
+        view.TryGetHeldItem(id, out Item? item) ? item : null;
+
+    private bool IsHeldLightCurrent(ulong owner, ulong id) =>
+        !Items.TryGetById(id, out var state) ||
+        (state.Placement == ItemPlacement.Inventory && state.Owner == peers.Identify(owner));
+
+    internal bool TryGetHeldBeam(ulong owner, ulong id, byte component,
+        out UnityEngine.Rendering.Universal.Light2D? beam, out bool markerVisible) =>
+        lights.TryGetHeldBeam(owner, id, component, out beam, out markerVisible);
 
     internal bool Receive(ulong sender, byte[] bytes)
     {
@@ -140,6 +171,7 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         }
 
         MessageKind frame = (MessageKind)bytes[0];
+        if (frame == MessageKind.CharacterPose) PoseInbound++;
         if (frame is >= MessageKind.SessionRejoinRequest and <= MessageKind.SessionRejoinCommitted)
         {
             return ReceiveRecovery(sender, bytes);
@@ -161,6 +193,7 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         {
             MessageKind.CharacterPose => ReceivePose(sender, bytes),
             MessageKind.CharacterSound => ReceiveSound(sender, bytes),
+            MessageKind.CharacterSpeech => !SceneReady || WaitingForRecovery || speech.Receive(sender, bytes),
             MessageKind.ClawEffect => !SceneReady || Claws.Receive(sender, bytes),
             MessageKind.SandboxAlcohol => !SceneReady || Items.ReceiveAlcohol(sender, bytes),
 
@@ -177,14 +210,17 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
 
     private bool ReceivePose(ulong sender, byte[] bytes)
     {
+        PoseFrames++;
         if (!CharacterPoseWire.TryRead(bytes, plan.Id, out CharacterPose pose))
         {
+            PoseInvalid++;
             CoopDiagnostics.Count("Character", "Invalid pose");
             return true;
         }
 
         if (!IsExpectedSource(sender, pose.Player))
         {
+            PoseSourceRejected++;
             return false;
         }
 
@@ -195,6 +231,7 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         }
         else if (unchecked((int)(pose.Sequence - remote.Pose.Sequence)) <= 0)
         {
+            PoseStale++;
             CoopDiagnostics.Count("Character", "Stale pose");
             return true;
         }
@@ -205,6 +242,7 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         remote.PoseInterval = Mathf.Clamp(interval, CharacterPoseSampler.SendInterval * 0.5f, 0.08f);
         remote.Pose = pose;
         remote.UpdatedAt = now;
+        PoseAccepted++;
         if (peers.IsHost)
         {
             Broadcast(bytes, sender);
@@ -237,6 +275,27 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
             return true;
         }
         return false;
+    }
+
+    internal bool TryGetRemotePose(ulong player, out CharacterPose pose)
+    {
+        if (remotes.TryGetValue(player, out RemotePlayer? remote) && remote.Pose.Player != 0)
+        {
+            pose = remote.Pose;
+            return true;
+        }
+        pose = default;
+        return false;
+    }
+
+    internal RemoteCharacterView? RemoteViewFor(ulong player) =>
+        remotes.TryGetValue(player, out RemotePlayer? remote) ? remote.View : null;
+
+    internal bool IsRemotePeerVerified(ulong player) => peers.IsVerified(player);
+
+    internal void CaptureSpeech(string text, float timeMultiplier)
+    {
+        if (SceneReady && !WaitingForRecovery) speech.Send(text, timeMultiplier);
     }
 
     internal void CaptureSound(string? key, AudioClip clip, Vector2 origin, AudioSource playback, bool followPlayer)
@@ -329,11 +388,11 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
         }
     }
 
-    bool IRemoteItemVisuals.AttachHeldItem(ParticipantId owner, byte slot, Item item)
+    bool IRemoteItemVisuals.AttachHeldItem(ParticipantId owner, ulong id, byte slot, Item item)
     {
         ulong address = peers.AddressOf(owner);
         return address != 0 && remotes.TryGetValue(address, out RemotePlayer? remote) &&
-            remote.View is not null && remote.View.AttachHeldItem(slot, item);
+            remote.View is not null && remote.View.AttachHeldItem(id, slot, item);
     }
 
     bool IRemoteItemVisuals.AttachWornItem(ParticipantId owner, Item item)

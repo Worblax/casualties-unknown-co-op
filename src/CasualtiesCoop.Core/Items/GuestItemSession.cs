@@ -38,7 +38,12 @@ internal sealed class GuestItemSession : IDisposable
     internal event Action<ulong, ulong, uint>? RegistrationAccepted;
     internal event Action<ulong, int, ItemDecision>? CraftResultAccepted;
 
-    internal bool IsReserved(int slot) => Pending is { Action: ItemAction.PickUp } pickup && pickup.Slot == slot;
+    internal bool IsReserved(int slot) => Pending is { } request && request.Action switch
+    {
+        ItemAction.PickUp => request.Slot == slot,
+        ItemAction.SwapSlots => request.Slot == slot || request.OtherSlot == slot,
+        _ => false
+    };
 
     internal bool TrySubmit(ulong item, ItemAction action, byte slot, ItemLocation at) =>
         TrySubmit(item, action, slot, at, Array.Empty<byte>());
@@ -61,6 +66,50 @@ internal sealed class GuestItemSession : IDisposable
         };
         Pending = request;
         SendRequest(request);
+        return true;
+    }
+
+    internal bool TrySubmitSwap(ulong primaryId, byte first, byte second, ulong otherId)
+    {
+        if (!CanSubmit || first == second || first == ItemWire.NoSlot || second == ItemWire.NoSlot ||
+            !IsLocalSlot(primaryId, first, out uint revision))
+        {
+            return false;
+        }
+        uint otherRevision = 0;
+        if (otherId != 0 && !IsLocalSlot(otherId, second, out otherRevision))
+        {
+            return false;
+        }
+        foreach (ItemState state in Replicas.States)
+        {
+            if (state.Owner == peers.LocalParticipant &&
+                ((state.Slot == first && state.Id != primaryId) || (state.Slot == second && state.Id != otherId)))
+            {
+                return false;
+            }
+        }
+
+        var request = new SharedItemRequest
+        {
+            Operation = ++lastOperation, ItemId = primaryId, Revision = revision, Action = ItemAction.SwapSlots,
+            Slot = first, OtherSlot = second, OtherItemId = otherId, OtherRevision = otherRevision,
+            Payload = Array.Empty<byte>()
+        };
+        Pending = request;
+        SendRequest(request);
+        return true;
+    }
+
+    private bool IsLocalSlot(ulong id, byte slot, out uint revision)
+    {
+        revision = 0;
+        if (!Replicas.TryGet(id, out ItemState state) || state.Removed || state.Placement != ItemPlacement.Inventory ||
+            state.Owner != peers.LocalParticipant || state.Slot != slot || state.Revision is 0 or uint.MaxValue)
+        {
+            return false;
+        }
+        revision = state.Revision;
         return true;
     }
 
@@ -212,6 +261,12 @@ internal sealed class GuestItemSession : IDisposable
                 if (ItemWire.TryReadResult(frame, peers.SessionId, out ulong operation, out ItemDecision decision) &&
                     Pending is { } pending && pending.Operation == operation)
                 {
+                    if (decision == ItemDecision.Accepted && pending.Action == ItemAction.SwapSlots &&
+                        (!HasNewRevision(pending.ItemId, pending.Revision) ||
+                         (pending.OtherItemId != 0 && !HasNewRevision(pending.OtherItemId, pending.OtherRevision))))
+                    {
+                        snapshot.MarkOutOfSync();
+                    }
                     Pending = null;
                     ResultAccepted?.Invoke(pending, decision);
                 }
@@ -241,6 +296,9 @@ internal sealed class GuestItemSession : IDisposable
                 return false;
         }
     }
+
+    private bool HasNewRevision(ulong id, uint revision) =>
+        Replicas.TryGet(id, out ItemState state) && state.Revision > revision;
 
     private void ReceiveDelta(byte[] frame)
     {

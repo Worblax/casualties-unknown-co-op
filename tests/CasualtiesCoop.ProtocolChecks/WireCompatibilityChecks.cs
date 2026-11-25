@@ -24,8 +24,44 @@ internal static class WireCompatibilityChecks
     internal static void Run()
     {
         ItemFrames();
+        SwapFrames();
         FluidFrames();
         RejoinFrames();
+    }
+
+    private static void SwapFrames()
+    {
+        var request = new SharedItemRequest
+        {
+            Operation = Operation, ItemId = ItemId, Revision = Revision, Action = ItemAction.SwapSlots,
+            Slot = 2, OtherSlot = 3, OtherItemId = ItemId + 1, OtherRevision = Revision + 1
+        };
+        byte[] frame = ItemWire.WriteRequest(Session, request);
+        Require(ItemWire.TryReadRequest(frame, Session, out SharedItemRequest copy) &&
+            copy.Operation == Operation && copy.Action == ItemAction.SwapSlots && copy.ItemId == ItemId &&
+            copy.Revision == Revision && copy.Slot == 2 && copy.OtherSlot == 3 && copy.OtherItemId == ItemId + 1 &&
+            copy.OtherRevision == Revision + 1 && copy.Payload.Length == 0, "Occupied swap request round trips");
+        Require(!ItemWire.TryReadRequest(frame.AsSpan(0, frame.Length - 1), Session, out _) &&
+            !ItemWire.TryReadRequest(frame.Append((byte)0).ToArray(), Session, out _), "Swap has one exact wire size");
+        frame[63] = 1;
+        Require(!ItemWire.TryReadRequest(frame, Session, out _), "Swap request cannot carry a state payload");
+
+        request.OtherItemId = 0;
+        Require(!Accepts(), "Vacancy cannot specify an occupant revision");
+        request.OtherRevision = 0;
+        Require(Accepts(), "Vacant destination round trips");
+        request.OtherItemId = ItemId + 1;
+        Require(!Accepts(), "Occupied destination requires a revision");
+        request.OtherRevision = Revision;
+        request.OtherItemId = ItemId;
+        Require(!Accepts(), "The same item cannot occupy both slots");
+        request.OtherItemId = ItemId + 1;
+        request.OtherSlot = request.Slot;
+        Require(!Accepts(), "Swap requires two different slots");
+        request.OtherSlot = ItemWire.NoSlot;
+        Require(!Accepts(), "Swap destination must identify a slot");
+
+        bool Accepts() => ItemWire.TryReadRequest(ItemWire.WriteRequest(Session, request), Session, out _);
     }
 
     private static void ItemFrames()
@@ -47,21 +83,32 @@ internal static class WireCompatibilityChecks
 
         SharedItemState state = new()
         {
-            Id = ItemId, Revision = Revision, Sample = 3, Definition = "stick", Owner = Operation,
+            Id = ItemId, Revision = Revision, Sample = 3, SampleTime = 42.5f, Definition = "stick", Owner = Operation,
             Placement = ItemPlacement.Inventory, Slot = 2, Condition = 0.75f,
             Location = new ItemLocation(1, -2, 4, 0.5f, -1, 8), Payload = new byte[] { 9, 8, 7 }
         };
         frame = ItemWire.WriteState(MessageKind.ItemState, Session, state);
         Require(ItemWire.TryReadState(frame, MessageKind.ItemState, Session, out SharedItemState copy) &&
-            copy.Owner == Operation && copy.Placement == ItemPlacement.Inventory && copy.Sample == 3 &&
+            copy.Owner == Operation && copy.Placement == ItemPlacement.Inventory && copy.Sample == 3 && copy.SampleTime == 42.5f &&
             copy.Definition == "stick" && copy.Location.Spin == 8 && copy.Payload.SequenceEqual(new byte[] { 9, 8, 7 }),
             "ItemState carries placement and opaque component state");
         state.Owner = 0;
         state.Placement = ItemPlacement.World;
         state.Slot = ItemWire.NoSlot;
         frame = ItemWire.WriteState(MessageKind.ItemMotion, Session, state);
-        Require(ItemWire.TryReadState(frame, MessageKind.ItemMotion, Session, out copy) && copy.Payload.Length == 0,
+        Require(ItemWire.TryReadState(frame, MessageKind.ItemMotion, Session, out copy) && copy.Payload.Length == 0 &&
+            copy.SampleTime == 42.5f,
             "Motion frames stay compact and never repeat component state");
+        frame = ItemSnapshotWire.WriteState(MessageKind.ItemSnapshotEntry, Session, Operation, state);
+        Require(ItemSnapshotWire.TryReadState(frame, MessageKind.ItemSnapshotEntry, Session, out _, out copy) &&
+            copy.SampleTime == 42.5f, "Snapshot items carry the latest motion timestamp");
+        foreach (float invalidTime in new[] { float.NaN, float.PositiveInfinity, -0.01f })
+        {
+            SharedItemState invalid = state;
+            invalid.SampleTime = invalidTime;
+            frame = ItemWire.WriteState(MessageKind.ItemMotion, Session, invalid);
+            Require(!ItemWire.TryReadState(frame, MessageKind.ItemMotion, Session, out _), "Invalid motion timestamp");
+        }
         state.Placement = (ItemPlacement)9;
         Require(!ItemWire.TryReadState(ItemWire.WriteState(MessageKind.ItemState, Session, state), MessageKind.ItemState,
             Session, out _), "Unknown placement is rejected");
@@ -125,14 +172,16 @@ internal static class WireCompatibilityChecks
     {
         RoomLaunchPlan plan = new(Session, Attempt, "normal", RoomOptions.Sandbox,
             new LaunchPlayer[] { new(1, 0), new(2, 3) });
-        SessionRejoinState state = new(plan, Attempt, 1, 2, 3, Operation, ItemId, 5, 6, 7, 1, -2, true);
+        SessionRejoinState state = new(plan, Attempt, 1, 2, 3, Operation, ItemId, 5, 6, 7, 1, -2, true,
+            speechSequence: 0x12345678);
         const string planBytes = "04" + SessionBytes + AttemptBytes + "1006026E6F726D616C010000000000000000020000000000000003";
         byte[] frame = Match("SessionRejoinState", SessionRejoinWire.WriteState(state),
             "16" + SessionBytes + AttemptBytes + "010000000200000003000000" + OperationBytes + ItemIdBytes +
-            "0000803F000000C001" + "050000000000000006000000000000000700000000000000" + planBytes);
+            "0000803F000000C001" + "05000000000000000600000000000000070000000000000078563412" + planBytes);
         Require(SessionRejoinWire.TryReadState(frame, Session, out SessionRejoinState copy) &&
             copy.Attempt == Attempt && copy.ItemOperation == Operation && copy.DrinkOperation == ItemId &&
             copy.CraftOperation == 5 && copy.RegistrationOperation == 6 && copy.LastClientKey == 7 &&
+            copy.SpeechSequence == 0x12345678 &&
             copy.HasPosition && copy.Y == -2 && copy.Plan.TryGetPlayer(2, out LaunchPlayer player) && player.Character == 3,
             "SessionRejoinState fixture decodes");
         Require(!SessionRejoinWire.TryReadState(frame, Attempt, out _), "SessionRejoinState rejects another session");

@@ -198,7 +198,7 @@ internal sealed class SharedItemHostScene : IItemWorld
         if (state.Owner.IsNone || state.Owner == peers.LocalParticipant) return;
 
         remoteVisuals?.DetachHeldItem(item);
-        if (state.Placement == ItemPlacement.Inventory && remoteVisuals?.AttachHeldItem(state.Owner, state.Slot, item) == true)
+        if (state.Placement == ItemPlacement.Inventory && remoteVisuals?.AttachHeldItem(state.Owner, state.Id, state.Slot, item) == true)
         {
             item.rb.simulated = false;
             return;
@@ -1309,13 +1309,56 @@ internal sealed class SharedItemHostScene : IItemWorld
         else
         {
             item.rb.simulated = false;
-            if (remoteVisuals?.AttachHeldItem(player, slot, item) != true)
+            if (remoteVisuals?.AttachHeldItem(player, id, slot, item) != true)
             {
                 item!.gameObject.SetActive(false);
             }
         }
 
         condition = item.condition;
+        return true;
+    }
+
+    public bool TrySwapSlots(ParticipantId player, ItemState first, byte destination, ItemState? second)
+    {
+        if (!byId.TryGetValue(first.Id, out var firstView) || !firstView.Item)
+        {
+            return false;
+        }
+        Item left = firstView.Item;
+        Item? right = null;
+        if (second is { } other)
+        {
+            if (!byId.TryGetValue(other.Id, out var secondView) || !secondView.Item) return false;
+            right = secondView.Item;
+        }
+        if (player == peers.LocalParticipant)
+        {
+            Body? body = inventory.Body;
+            return body && SharedItemInventory.CanSwapInto(body!, left, destination) &&
+                SharedItemInventory.CanSwapInto(body!, right, first.Slot) &&
+                body!.GetItem(first.Slot) == left && (!right ? !body.GetItem(destination) : body.GetItem(destination) == right) &&
+                inventory.TrySwapSlots(first.Slot, destination);
+        }
+
+        if (!peers.TryGetPlayer(peers.AddressOf(player), out LaunchPlayer member) ||
+            RemoteCharacterView.LoadCharacter(member.Character) is not { } template ||
+            !SharedItemInventory.CanSwapInto(template, left, destination) ||
+            !SharedItemInventory.CanSwapInto(template, right, first.Slot))
+        {
+            return false;
+        }
+
+        remoteVisuals?.DetachHeldItem(left);
+        if (right) remoteVisuals?.DetachHeldItem(right!);
+        if (remoteVisuals?.AttachHeldItem(player, first.Id, destination, left) != true)
+        {
+            left.gameObject.SetActive(false);
+        }
+        if (second is { } swap && remoteVisuals?.AttachHeldItem(player, swap.Id, first.Slot, right!) != true)
+        {
+            right!.gameObject.SetActive(false);
+        }
         return true;
     }
 
@@ -1341,17 +1384,18 @@ internal sealed class SharedItemHostScene : IItemWorld
             return ItemDecision.Unavailable;
         }
         bool local = player == peers.LocalParticipant;
-        if (local && (!inventory.HoldsSlot(item!, request.Slot) || !inventory.TryDrop(item!)))
+        if (local && !inventory.HoldsSlot(item!, request.Slot))
         {
             return ItemDecision.Unavailable;
         }
 
         byte[] payload = request.Payload.Length > 0 ? request.Payload : state.Payload;
-        remoteVisuals?.DetachHeldItem(item!);
-        if (!objects.Apply(item!, payload, state.Condition, ItemPlacement.World))
+        if (!objects.Apply(item!, payload, state.Condition, ItemPlacement.World) ||
+            (local && !inventory.TryDrop(item!)))
         {
             return ItemDecision.Unavailable;
         }
+        remoteVisuals?.DetachHeldItem(item!);
         Vector2 velocity = Vector2.ClampMagnitude(new Vector2(requested.VelocityX, requested.VelocityY), 100f);
         float spin = request.Action == ItemAction.Throw ? UnityEngine.Random.Range(-800f, 800f) : 0f;
         location = new ItemLocation(at.x, at.y, requested.Angle, velocity.x, velocity.y, spin);
