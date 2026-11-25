@@ -1,0 +1,123 @@
+﻿using System;
+using System.Collections.Generic;
+using CasualtiesCoop.Core.Items;
+using CasualtiesCoop.Core.Session;
+using CasualtiesCoop.Gameplay;
+using CasualtiesCoop.Gameplay.Items;
+using CasualtiesCoop.Lobby;
+using CasualtiesCoop.Networking;
+
+internal static class P0CraftChecks
+{
+    private const ulong HostAddress = 10;
+    private const ulong First = 11;
+    private const ulong Second = 12;
+    private static readonly Guid Session = new("22334455-6677-8899-aabb-ccddeeff0011");
+
+    internal static void Run()
+    {
+        DuplicateAndOverlapRejected();
+        WrongResultRejected();
+        MissingIngredientRejected();
+        HostCannotMutateReserved();
+        NestedReservationBlocksParent();
+        ExpiredRejected();
+        DuplicateCommitIsIdempotent();
+        RegistrationIdempotentAcrossKeys();
+        ForeignContainerRejected();
+        RegistryOverflowLeavesIngredients();
+    }
+    private static void DuplicateAndOverlapRejected()
+    {
+        using var scenario = new Scenario();
+        Check.That(scenario.Request(First, 7), "A two-ingredient reservation starts.");
+
+        var overlap = new ItemCraftCommit { Operation = scenario.Operation, Recipe = 7 };
+        overlap.Removed.Add(scenario.Item0);
+        overlap.Updated.Add(new CraftUpdatedItem { Id = scenario.Item0, Revision = 1, Condition = .5f,
+            Payload = new byte[] { 1 } });
+        overlap.Created.Add(Result("rope", 1));
+        scenario.Guest(First).TryCommitCraft(overlap);
+        scenario.Advance();
+        Check.That(scenario.Host.TryGet(scenario.Item0, out _) && scenario.Host.TryGet(scenario.Item1, out _),
+            "A commit that both removes and updates one ingredient changes nothing.");
+
+        using var repeated = new Scenario();
+        Check.That(repeated.Request(Second, 7), "A second reservation starts.");
+        var duplicate = new ItemCraftCommit { Operation = repeated.Operation, Recipe = 7 };
+        duplicate.Removed.Add(repeated.Item0);
+        duplicate.Removed.Add(repeated.Item0);
+        duplicate.Created.Add(Result("rope", 1));
+        repeated.Guest(Second).TryCommitCraft(duplicate);
+        repeated.Advance();
+        Check.That(repeated.Host.TryGet(repeated.Item0, out _) && repeated.Host.TryGet(repeated.Item1, out _),
+            "Duplicate removed ids reject the whole commit.");
+    }
+
+    private static void WrongResultRejected()
+    {
+        using var scenario = new Scenario();
+        Check.That(scenario.Request(First, 7), "A reservation starts.");
+        var commit = new ItemCraftCommit { Operation = scenario.Operation, Recipe = 7 };
+        commit.Removed.Add(scenario.Item0);
+        commit.Removed.Add(scenario.Item1);
+        commit.Created.Add(Result("knife", 1));
+        scenario.Guest(First).TryCommitCraft(commit);
+        scenario.Advance();
+        Check.That(scenario.Host.TryGet(scenario.Item0, out _) && scenario.Host.TryGet(scenario.Item1, out _),
+            "A result from another recipe is rejected atomically.");
+    }
+
+    private static void MissingIngredientRejected()
+    {
+        using var scenario = new Scenario();
+        Check.That(scenario.Request(First, 7), "A reservation starts.");
+        var commit = new ItemCraftCommit { Operation = scenario.Operation, Recipe = 7 };
+        commit.Removed.Add(scenario.Item0);
+        commit.Created.Add(Result("rope", 1));
+        scenario.Guest(First).TryCommitCraft(commit);
+        scenario.Advance();
+        Check.That(scenario.Host.TryGet(scenario.Item0, out _) && scenario.Host.TryGet(scenario.Item1, out _),
+            "Omitting an ingredient rejects the commit without consuming anything.");
+    }
+    private static void HostCannotMutateReserved()
+    {
+        using var scenario = new Scenario();
+        Check.That(scenario.Request(First, 7), "A reservation starts.");
+        Check.That(scenario.Host.ExecuteForParticipant(scenario.HostParticipant, new SharedItemRequest
+        {
+            ItemId = scenario.Item0, Revision = 1, Operation = 900, Action = ItemAction.PickUp, Slot = 0
+        }) == ItemDecision.Conflict, "The host cannot pick up a reserved ingredient.");
+    }
+
+    private static void NestedReservationBlocksParent()
+    {
+        using var scenario = new Scenario();
+        Check.That(scenario.Host.TryRegister("box", ItemPlacement.Inventory, scenario.HostParticipant, 0, 4,
+            default, 1f, new byte[] { 1 }, 0, out ItemState box), "A host container is registered.");
+        Check.That(scenario.Host.TryRegister("stick", ItemPlacement.Container, default, box.Id, ItemWire.NoSlot,
+            default, 1f, new byte[] { 1 }, 0, out ItemState child), "A child item is registered in the container.");
+        scenario.Accessible(child.Id);
+        Check.That(scenario.RequestSingle(First, 11, child.Id), "The guest reserves a nested ingredient.");
+        scenario.Advance();
+        Check.That(scenario.Host.ExecuteForParticipant(scenario.HostParticipant, new SharedItemRequest
+        {
+            ItemId = box.Id, Revision = 1, Operation = 901, Action = ItemAction.Drop, Slot = 4,
+            Location = new ItemLocation(1, 1, 0)
+        }) == ItemDecision.Conflict, "Moving a parent container is rejected while a nested item is reserved.");
+    }
+
+    private static void ExpiredRejected()
+    {
+        using var scenario = new Scenario();
+        Check.That(scenario.Request(First, 7), "A reservation starts.");
+        scenario.AdvanceSeconds(20);
+        var commit = new ItemCraftCommit { Operation = scenario.Operation, Recipe = 7 };
+        commit.Removed.Add(scenario.Item0);
+        commit.Removed.Add(scenario.Item1);
+        commit.Created.Add(Result("rope", 1));
+        scenario.Guest(First).TryCommitCraft(commit);
+        scenario.Advance();
+        Check.That(scenario.Host.TryGet(scenario.Item0, out _) && scenario.Host.TryGet(scenario.Item1, out _),
+            "An expired reservation cannot be confirmed.");
+    }

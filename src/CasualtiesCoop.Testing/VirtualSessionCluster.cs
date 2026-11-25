@@ -48,8 +48,10 @@ internal sealed class VirtualSessionCluster : IDisposable
     internal readonly Dictionary<string, Actor> Actors = new(StringComparer.Ordinal);
     internal readonly List<(string Peer, ulong Id, ItemDecision Decision)> Results = new();
     internal readonly List<(string Peer, int Recipe, ItemDecision Decision)> CraftResults = new();
+    internal readonly List<(string Peer, ulong Operation, int Recipe, ItemDecision Decision)> CraftDetails = new();
     internal readonly Body Body;
     internal readonly Actor? ProjectedActor;
+    internal TestRemoteItemVisuals? RemoteVisuals;
     private SharedItemProjection? projection;
     private readonly TerrainDamageReplication terrain;
     private readonly WorldChunkReplication chunks;
@@ -69,6 +71,11 @@ internal sealed class VirtualSessionCluster : IDisposable
         standaloneItems = scenario.StandaloneItems;
         Network = new SimulatedNetwork(scenario.Seed, scenario.Profile);
         Network.Trace += trace;
+        if (scenario.Setup.Any(command => command.Value<string>("op") == "remote.enable"))
+        {
+            RemoteVisuals = new TestRemoteItemVisuals(Enumerable.Range(1, members.Length)
+                .Select(seat => new ParticipantId(seat)));
+        }
         var plan = new RoomLaunchPlan(Guid.NewGuid(), Guid.NewGuid(), "normal", RoomOptions.Sandbox,
             members.Select((_, index) => new LaunchPlayer((ulong)index + 1, 0)).ToArray());
         for (int index = 0; index < members.Length; index++)
@@ -86,7 +93,7 @@ internal sealed class VirtualSessionCluster : IDisposable
             if (guestCraft)
             {
                 if (member.Body is null) throw new FormatException("Guest crafting requires NativeActor guests.");
-                var replication = new SharedItemReplication(peers, PositionOf, Network.Clock);
+                var replication = new SharedItemReplication(peers, PositionOf, Network.Clock, RemoteVisuals);
                 actor.ItemReplication = replication;
                 guest = replication.TestGuest ?? throw new InvalidOperationException("Guest item replication has no session.");
             }
@@ -96,7 +103,11 @@ internal sealed class VirtualSessionCluster : IDisposable
             }
             actor.Guest = guest;
             guest.ResultAccepted += (request, decision) => Results.Add((actor.Name, request.ItemId, decision));
-            guest.CraftResultAccepted += (_, recipe, decision) => CraftResults.Add((actor.Name, recipe, decision));
+            guest.CraftResultAccepted += (operation, recipe, decision) =>
+            {
+                CraftResults.Add((actor.Name, recipe, decision));
+                CraftDetails.Add((actor.Name, operation, recipe, decision));
+            };
             if (!terrainFixture)
                 actor.Terrain = new TestChunkGrid((int)WorldGeneration.world.width, (int)WorldGeneration.world.height);
             actor.WorldChunks = new WorldChunkReplication(peers, Network.Clock, PositionOf, actor.Terrain);
@@ -119,14 +130,15 @@ internal sealed class VirtualSessionCluster : IDisposable
         SessionPeers hostPeers = Actors.Values.First().Peers;
         if (scenario.Steps.Any(UsesNativePickup))
         {
-            nativeItemHooks = new SharedItemReplication(hostPeers, PositionOf, Network.Clock);
+            nativeItemHooks = new SharedItemReplication(hostPeers, PositionOf, Network.Clock, RemoteVisuals);
             SharedItemHooks.BindTestItems(nativeItemHooks);
             Host = nativeItemHooks.TestHostScene!;
         }
         else
         {
             var hostInventory = new SharedItemInventory { Body = body };
-            Host = new SharedItemHostScene(hostPeers, PositionOf, Network.Clock, hostInventory, new SharedItemObjects());
+            Host = new SharedItemHostScene(hostPeers, PositionOf, Network.Clock, hostInventory, new SharedItemObjects(),
+                RemoteVisuals);
         }
         chunks = new WorldChunkReplication(hostPeers, Network.Clock, PositionOf);
         terrain = new TerrainDamageReplication(hostPeers, Network.Clock, PositionOf, chunks);
@@ -163,13 +175,13 @@ internal sealed class VirtualSessionCluster : IDisposable
         {
             ProjectedActor = Actors.Values.First(actor => actor.Guest is not null);
             projection = new SharedItemProjection(new SharedItemInventory { Body = ProjectionBody }, new SharedItemObjects(),
-                Network.Clock, ProjectedActor.Peers.LocalParticipant);
+                Network.Clock, ProjectedActor.Peers.LocalParticipant, RemoteVisuals);
             ProjectedActor.Guest!.StateAccepted += projection.OnStateAccepted;
         }
     }
 
     private static bool UsesNativePickup(JObject command) =>
-        command.Value<string>("op") == "item.nativePickup" ||
+        command.Value<string>("op") is "item.nativePickup" or "item.nativeHostDrop" or "item.nativeHostThrow" ||
         command["actions"] is JArray actions &&
         actions.Cast<JObject>().Any(UsesNativePickup);
 
@@ -179,7 +191,10 @@ internal sealed class VirtualSessionCluster : IDisposable
         actions.Cast<JObject>().Any(UsesGuestCraft);
 
     private static bool UsesGuestItemReplication(JObject command) =>
-        command.Value<string>("op") is "item.throw" or "item.swap" ||
+        command.Value<string>("op") is "item.throw" or "item.swap" or "item.nativeDrop" or "item.nativeThrow" or
+            "item.nativePickupPeer" or "item.nativeWear" ||
+        command.Value<string>("query") == "items.guestHoverDescription" ||
+        command["condition"] is JObject condition && condition.Value<string>("op") == "items.guestHoverDescription" ||
         command["actions"] is JArray actions &&
         actions.Cast<JObject>().Any(UsesGuestItemReplication);
 
@@ -205,6 +220,11 @@ internal sealed class VirtualSessionCluster : IDisposable
         if (ProjectedActor is { Guest: { } guest } && projection is not null)
         {
             projection.Tick(guest.Replicas, guest.Synced);
+        }
+        if (RemoteVisuals is not null)
+        {
+            foreach (Actor actor in Actors.Values) RemoteVisuals.SetPosition(actor.Participant, actor.Position);
+            RemoteVisuals.Tick();
         }
     }
 
@@ -241,7 +261,10 @@ internal sealed class VirtualSessionCluster : IDisposable
         Network.SetConnected(1, actor.Peers.LocalPlayer, connected);
         if (connected && !before)
         {
-            actor.Guest!.ResumeAfterOffer(Host.Session.LastOperation(actor.Peers.LocalPlayer));
+            actor.Guest!.ResumeAfterOffer(Host.Session.LastOperation(actor.Peers.LocalPlayer),
+                Host.Session.LastCraftOperation(actor.Peers.LocalPlayer),
+                Host.Session.LastRegistrationOperation(actor.Peers.LocalPlayer),
+                Host.Session.LastClientKey(actor.Peers.LocalPlayer));
             actor.WorldChunks!.Resume(Guid.Empty);
         }
     }
@@ -333,6 +356,102 @@ internal sealed class VirtualSessionCluster : IDisposable
         projection?.FindReplica(id) is { } item && item && item != authoritative && item.gameObject.activeSelf &&
         !item.transform.parent && !ProjectionBody.HoldingItem(item);
 
+    // Mirrors PlayerCamera.HandleWorldHover: a point query with the vanilla layer mask, then the
+    // real vanilla tooltip builder. Headless tests cannot move Input.mousePosition, so the point
+    // under test is the item itself. Both the guest replica and a shared-scene host object with
+    // the same network id are accepted; transport identity, not the fixture object, is the target.
+    internal bool HoverDescription(ulong id, out string detail)
+    {
+        detail = "no-replica";
+        Item? replica = projection?.FindReplica(id) ??
+            Actors.Values.FirstOrDefault(actor => actor.Guest is not null)?.ItemReplication?.FindReplica(id);
+        if (!replica)
+        {
+            return false;
+        }
+        int mask = LayerMask.GetMask("Item", "Ground", "Descriptor", "Limb");
+        Collider2D? hit = Physics2D.OverlapPoint(replica!.transform.position, mask);
+        if (!hit)
+        {
+            detail = "hit=none";
+            return false;
+        }
+        if (!hit.TryGetComponent<Item>(out Item item))
+        {
+            detail = $"hit={hit.gameObject.name} item=none";
+            return false;
+        }
+        bool same = item == replica || hit.transform.IsChildOf(replica.transform);
+        same |= Host.TryGetId(item, out ulong hostId) && hostId == id;
+        if (!same)
+        {
+            detail = $"hit={hit.gameObject.name} item={item.id} id-mismatch";
+            return false;
+        }
+        (string name, string description) = PlayerCamera.ItemHoverDescription(item);
+        detail = $"ok name={name.Length} description={description.Length}";
+        return !string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(description);
+    }
+
+    internal int GuestReportsSent(string peer) => Actors.TryGetValue(peer, out Actor? actor)
+        ? actor.ItemReplication?.ReportsSent ?? 0 : -1;
+    internal int GuestNativePlacement(string peer, ulong id) => Actors.TryGetValue(peer, out Actor? actor)
+        ? actor.ItemReplication?.LocalPlacementOf(id) ?? -1 : -1;
+    internal int GuestCraftPending(string peer) => Actors.TryGetValue(peer, out Actor? actor) &&
+        actor.ItemReplication?.CraftPending == true ? 1 : 0;
+    internal int GuestReplicaLiquidPositive(string peer, ulong id) =>
+        Actors.TryGetValue(peer, out Actor? actor) && actor.ItemReplication?.FindReplica(id) is { } item &&
+        item.TryGetComponent<WaterContainerItem>(out WaterContainerItem water) && water.CurrentTotal > 0f ? 1 : 0;
+    internal int GuestReplicaLiquidMl(string peer, ulong id) =>
+        Actors.TryGetValue(peer, out Actor? actor) && actor.ItemReplication?.FindReplica(id) is { } item &&
+        item.TryGetComponent<WaterContainerItem>(out WaterContainerItem water) ? Mathf.RoundToInt(water.CurrentTotal) : -1;
+    internal int GuestReplicaLiquidLumalgae(string peer, ulong id) =>
+        Actors.TryGetValue(peer, out Actor? actor) && actor.ItemReplication?.FindReplica(id) is { } item &&
+        item.TryGetComponent<WaterContainerItem>(out WaterContainerItem water) && water.HasLiquid("lumalgae") ? 1 : 0;
+    internal int GuestDefinitionLiquid(string peer, string definition, bool biochem)
+    {
+        if (!Actors.TryGetValue(peer, out Actor? actor) || actor.ItemReplication is null) return -1;
+        foreach (ItemState state in actor.Guest!.Replicas.States)
+        {
+            if (state.Removed || state.Definition != definition) continue;
+            Item? item = actor.ItemReplication.FindReplica(state.Id);
+            if (!item)
+            {
+                item = Item.allItems.FirstOrDefault(candidate => candidate && candidate.id == definition &&
+                    candidate.GetComponentInChildren<WaterContainerItem>(true));
+            }
+            WaterContainerItem? water = item ? item.GetComponentInChildren<WaterContainerItem>(true) : null;
+            if (!item || !water) continue;
+            if (water.CurrentTotal <= 0f) return 0;
+            if (!biochem) return 1;
+            return water.stack.Count == 1 && water.stack[0].liquidId == "biochem" ? 1 : 0;
+        }
+        return -1;
+    }
+    internal bool WorldReplicaHover(ulong id, out string detail)
+    {
+        detail = "no-replica";
+        if (projection?.FindReplica(id) is not { } replica || !replica) return false;
+        Collider2D[] colliders = replica.GetComponentsInChildren<Collider2D>(true);
+        detail = $"layer={LayerMask.LayerToName(replica.gameObject.layer)} active={replica.gameObject.activeInHierarchy} " +
+            $"parent={(replica.transform.parent ? replica.transform.parent.name : "none")} colliders={colliders.Length}";
+        foreach (Collider2D collider in colliders)
+            detail += $" [{collider.GetType().Name} enabled={collider.enabled} trigger={collider.isTrigger} " +
+                $"layer={LayerMask.LayerToName(collider.gameObject.layer)}]";
+        Vector2 at = replica.transform.position;
+        int mask = LayerMask.GetMask("Item", "Ground", "Descriptor", "Limb");
+        Collider2D hit = Physics2D.OverlapPoint(at, mask);
+        if (!hit)
+        {
+            detail += " hit=none";
+            return false;
+        }
+        bool same = hit.gameObject == replica.gameObject || hit.transform.IsChildOf(replica.transform);
+        bool hasItem = hit.TryGetComponent<Item>(out Item hitItem) && hitItem == replica;
+        detail += $" hit={hit.gameObject.name} same={same} item={hasItem}";
+        return hasItem || same;
+    }
+
     private bool PositionOf(ulong address, out Vector2 position)
     {
         foreach (var actor in Actors.Values)
@@ -369,5 +488,7 @@ internal sealed class VirtualSessionCluster : IDisposable
             else actor.Guest?.Dispose();
             actor.Peers.Dispose();
         }
+        RemoteVisuals?.Dispose();
+        RemoteVisuals = null;
     }
 }

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "name": "items.remote-worn-visual",
+  "level": "UNITY_ACTORS",
+  "seed": 155,
+  "timeoutMs": 90000,
+  "network": { "latencyMs": 35, "jitterMs": 5, "unreliableLoss": 0.02 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "remote.enable" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "hat", "catalogId": "hoodie", "position": [-2, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.pickup", "peer": "alice", "item": "hat", "slot": "$fixture.emptyPickupSlot" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "hat"
+    } },
+    { "op": "item.nativeWear", "peer": "alice", "item": "hat" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "hat", "expected": 3
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.definitionConverged", "target": "hoodie", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "remote.heldCount", "target": "alice", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "remote.enabledColliders", "target": "alice", "expected": 0 },
+    { "op": "assert.equal", "query": "remote.finiteTransform", "target": "alice", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

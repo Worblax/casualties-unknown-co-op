@@ -214,7 +214,9 @@ internal static class RecoveryChecks
                 byte[]? offer = HostRecovery.Offer(sender, attempt, () =>
                 {
                     CapturedOffers++;
-                    return new SessionRejoinState(Plan, attempt, 13, 12, 11, hostItems.LastOperation(sender), 0, 0, 0, false);
+                    return new SessionRejoinState(Plan, attempt, 13, 12, 11, hostItems.LastOperation(sender), 0,
+                        hostItems.LastCraftOperation(sender), hostItems.LastRegistrationOperation(sender),
+                        hostItems.LastClientKey(sender), 0, 0, false);
                 }, out _);
                 if (offer is not null)
                 {

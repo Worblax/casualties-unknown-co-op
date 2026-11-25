@@ -167,9 +167,13 @@ internal sealed class GuestItemSession : IDisposable
         Replicas.CancelSnapshot();
     }
 
-    internal void ResumeAfterOffer(ulong confirmedOperation)
+    internal void ResumeAfterOffer(ulong confirmedOperation, ulong confirmedCraft = 0,
+        ulong confirmedRegistration = 0, ulong confirmedClientKey = 0)
     {
         lastOperation = Math.Max(lastOperation, confirmedOperation);
+        lastCraftOperation = Math.Max(lastCraftOperation, confirmedCraft);
+        lastRegistrationOperation = Math.Max(lastRegistrationOperation, confirmedRegistration);
+        nextClientKey = Math.Max(nextClientKey, confirmedClientKey);
         Pending = null;
         snapshot.Resume();
         Replicas.CancelSnapshot();

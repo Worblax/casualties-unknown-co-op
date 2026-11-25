@@ -1,6 +1,6 @@
 # Universal item sync handoff
 
-Protocol: 16. Plugin version: 0.1.20.
+Protocol: 17. Plugin version: 0.1.21.
 
 ## Current stopping point
 
@@ -16,7 +16,8 @@ powershell.exe -NoProfile -File ./scripts/Verify.ps1 -DotnetPath 'C:/Program Fil
 Latest result: Release build, ProtocolChecks, ArchitectureChecks, virtual-network
 NetworkChecks and every available Unity game scenario passed on 2026-11-25, including
 `tests/scenarios/items/guest-inventory-throw.json` (pickup -> long throw -> remote pickup ->
-throw back -> pickup). Unity tests must run outside the sandbox in this environment because
+throw back -> pickup), `liquid-craft`, `host-drop-guest-craft`, `guest-gives-host` and
+`host-throw-guest-hover`. Unity tests must run outside the sandbox in this environment because
 they replace DLLs under the Steam installation.
 
 ## Landed P0 work
@@ -61,6 +62,16 @@ they replace DLLs under the Steam installation.
 - Remote-owned held items remain visible and are attached to the corresponding hand anchor of
   the remote character view. A long throw (velocity, spin and flight) releases that anchor and
   becomes an ordinary world/inventory state, so a later pickup cannot leave a stale remote copy.
+- Craft results are never registered by the guest as ordinary items before the commit. The host
+  validates the result placement and creates the authoritative object once, so committing does
+  not collide with an already-occupied inventory slot.
+- The host ignores projection replicas and guest-local craft objects during discovery. In the
+  single-scene test sandbox this prevents adopting a guest's item as a second authoritative item.
+- Liquid result validation uses the vanilla container invariant (`condition == current mL /
+  capacity`) instead of comparing the item condition to the recipe's mL amount. Native recipe
+  replay allows only a small condition drift while still requiring an exact payload.
+- Failed commits keep a bounded diagnostic (`LastCraftFailure`, last prepare stage) so a rejected
+  craft can be attributed without enabling verbose tracing.
 - Craft commit wire adds updated-item placement/parent/slot/location and carries result
   conditions. Protocol bumped 14 -> 15 and plugin 0.1.18 -> 0.1.19 in `f4616ea`; the item
   placement hotfix bumps protocol 15 -> 16 and plugin 0.1.19 -> 0.1.20.
@@ -75,23 +86,37 @@ foreign-container registration, expiry, commit replay after reconnect and A-B-A 
 `items.guest-inventory-throw` covers remote inventory visibility, hand attachment, a long throw,
 remote pickup and throwing the same item back without a duplicate or stale projection.
 
+Additional Unity coverage added with the P0 interaction fix:
+
+- `items.host-drop-guest-craft`: the host picks up and drops two foliage items natively, the
+  guest picks both up natively, crafts rope through the production guest path, drops the result
+  and the host picks it up natively. Registry, native objects, slots and convergence are checked.
+- `items.guest-gives-host`: the guest natively picks up a stick, drops it and the host picks it up.
+- `items.host-throw-guest-hover`: the host throws a hand-held item; the guest hover query repeats
+  the vanilla `HandleWorldHover` layer query and builds the real `ItemHoverDescription` tooltip.
+- `items.liquid-craft`: lumalgae and a heatsource produce a biochem crafting bottle on the guest;
+  the host accepts the commit, the guest reaches a terminal result and no duplicate authority
+  state appears.
+- `items.craft-fault-injection` now covers the `vanilla-spawn-result` fault in addition to every
+  prepare/apply/bind/confirm/finalize fault point.
+
 `tests/scenarios/items/concurrent-craft.json` now sets deterministic INT for both test bodies
 before the recipe, because recipe 0 uses `INT` to decide whether `SpawnResult` can produce rope.
 This changes a precondition, not an expected outcome.
 
 ## Known P0 limitations
 
-1. A dedicated Unity scenario for a failed vanilla `SpawnResult` rollback still needs to be
-   added. The local-rejection path is implemented and logs a warning, but the current Unity
-   suite does not force a failed recipe on a real native body.
-2. Guest-side rollback of nested containers is implemented from captured replica state, but
+1. Guest-side rollback of nested containers is implemented from captured replica state, but
    only container unload/placement paths exercised by current scenarios are covered.
-3. Hung guest registrations are retried and capped at 256 per process; there is no protocol
+2. Hung guest registrations are retried and capped at 256 per process; there is no protocol
    acknowledgement that lets the guest prove a failed registration without a host query.
-4. Commit size remains bounded by 64 changed/created entries and the 16 KiB frame limit.
+3. Commit size remains bounded by 64 changed/created entries and the 16 KiB frame limit.
    Composite operations larger than that are not implemented.
-5. `tests/CasualtiesCoop.NetworkChecks/P0CraftChecks.cs.draft` is the superseded draft kept
+4. `tests/CasualtiesCoop.NetworkChecks/P0CraftChecks.cs.draft` is the superseded draft kept
    in the working tree; the compiled `P0CraftChecks.cs` is the active suite.
+5. The hover test uses the item's world position as the point query because a headless Unity
+   process cannot drive `Input.mousePosition`. Physics masks and the vanilla description builder
+   are real; an interactive window remains the manual check for literal mouse input.
 
 ## Remaining P1
 
@@ -120,3 +145,6 @@ This changes a precondition, not an expected outcome.
   hand-maintained recipe table.
 - Placement reports must validate the effective owner through the container chain and must never
   revive a stale remote copy after a throw or pickup.
+- Never self-register a craft result before its commit; the host registers commit results once.
+- Host discovery must ignore projection replicas and guest-local craft objects.
+- Do not compare a liquid container's condition to millilitres; it is a normalized fill ratio.

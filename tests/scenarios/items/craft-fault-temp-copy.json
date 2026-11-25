@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "items.craft-fault-temp-copy",
+  "level": "UNITY_ACTORS",
+  "seed": 157,
+  "timeoutMs": 90000,
+  "network": { "latencyMs": 20, "jitterMs": 2, "unreliableLoss": 0 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "character.intelligence", "target": "left", "value": 5 },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "ropeA", "catalogId": "rope", "position": [-0.6, 0.5] },
+    { "op": "item.spawn", "id": "ropeB", "catalogId": "rope", "position": [0, 0.5] },
+    { "op": "item.spawn", "id": "stick", "catalogId": "stick", "position": [0.6, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "character.place", "target": "left", "position": [0, 0] },
+    { "op": "craft.fault", "point": "prepare-temp-copy" },
+    { "op": "item.craft", "peer": "alice", "recipe": 2 },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": { "op": "items.craftPending", "target": "alice", "expected": 0 } },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "rope", "expected": 2 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "stick", "expected": 1 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "string", "expected": 0 },
+    { "op": "assert.equal", "query": "items.hostNativeDefinitionCount", "target": "rope", "expected": 2 },
+    { "op": "assert.equal", "query": "items.hostNativeDefinitionCount", "target": "stick", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

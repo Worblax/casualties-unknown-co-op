@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "name": "items.guest-world-hover",
+  "level": "UNITY_GUEST",
+  "seed": 52,
+  "timeoutMs": 45000,
+  "network": { "latencyMs": 45, "jitterMs": 8, "unreliableLoss": 0.03 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "peer.add", "id": "alice", "role": "guest", "position": [1, 0] },
+    { "op": "item.spawn", "id": "target", "catalogId": "$fixture.pickupableItem", "position": [0, 0] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.guestWorldReplica", "item": "target"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.worldReplicaHover", "item": "target"
+    } },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

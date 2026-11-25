@@ -60,6 +60,13 @@ internal sealed class SharedItemCrafting
     private readonly SharedItemObjects objects;
     private PendingCraft? pending;
     private bool executing;
+    internal int LastCreatedCount { get; private set; }
+    internal int LastUpdatedCount { get; private set; }
+    internal int LastRemovedCount { get; private set; }
+    internal int LastCompletion { get; private set; }
+    internal int LastScopeUsed { get; private set; }
+    internal int LastScopeCreated { get; private set; }
+    internal int LastLiquidTargets { get; private set; }
 
     internal SharedItemCrafting(SharedItemReplication items, SharedItemObjects objects)
     {
@@ -68,6 +75,7 @@ internal sealed class SharedItemCrafting
     }
 
     internal bool IsReserved(ulong id) => pending is { } craft && craft.Originals.Any(value => value.Id == id);
+    internal bool HasPending => pending is not null;
 
     internal bool TryBegin(Recipe recipe)
     {
@@ -171,13 +179,16 @@ internal sealed class SharedItemCrafting
             else
             {
                 pending = null;
+                LastCompletion = 5;
             }
             return;
         }
 
         if (craft.Executed)
         {
+            LastCompletion = 6;
             Reject(craft, decision, restoreLocal: decision != ItemDecision.Conflict);
+            pending = null;
             Alert(decision == ItemDecision.Conflict
                 ? "The host state changed; the local craft was rolled back and will be resynchronized."
                 : "The host rejected the crafting result; the previous state was restored.");
@@ -203,6 +214,7 @@ internal sealed class SharedItemCrafting
         }
         catch (Exception)
         {
+            LastCompletion = 2;
             Debug.LogWarning($"Craft {craft.Operation} ({craft.Recipe.index}) failed during local execution.");
             Reject(craft, ItemDecision.Unavailable, restoreLocal: true);
             pending = null;
@@ -224,6 +236,7 @@ internal sealed class SharedItemCrafting
         }
         catch (Exception)
         {
+            LastCompletion = 4;
             Debug.LogWarning($"Craft {craft.Operation} ({craft.Recipe.index}) could not be serialized.");
             Reject(craft, ItemDecision.Unavailable, restoreLocal: true);
             pending = null;
@@ -231,8 +244,12 @@ internal sealed class SharedItemCrafting
             Alert("The crafting state could not be serialized and was restored.");
             return;
         }
+        LastScopeUsed = craft.Scope.Used.Count;
+        LastScopeCreated = craft.Scope.Created.Count;
+        LastLiquidTargets = craft.Scope.LiquidTargets.Count;
         if (!ValidateOutcome(craft, commit))
         {
+            LastCompletion = 3;
             Debug.LogWarning($"Craft {craft.Operation} ({craft.Recipe.index}) produced no valid outcome: " +
                 $"used={craft.Scope.Used.Count}/{craft.Originals.Length}, created={commit.Created.Count}, " +
                 $"expected={Math.Max(1, craft.Recipe.result.amount)}, liquid={craft.Recipe.result.isLiquid}, " +
@@ -245,6 +262,7 @@ internal sealed class SharedItemCrafting
         }
 
         craft.Commit = commit;
+        LastCompletion = 1;
         items.CommitCraft(commit);
         craft.NextSend = Time.unscaledTime + RetryInterval;
     }
@@ -309,6 +327,9 @@ internal sealed class SharedItemCrafting
                 commit.Updated.Any(value => value.Id == id) || !items.TryGetState(id, out ItemState state)) continue;
             commit.Updated.Add(UpdateItem(target, id, state.Revision));
         }
+        LastCreatedCount = commit.Created.Count;
+        LastUpdatedCount = commit.Updated.Count;
+        LastRemovedCount = commit.Removed.Count;
         return commit;
     }
 
@@ -387,11 +408,6 @@ internal sealed class SharedItemCrafting
     private (ItemPlacement Placement, ulong Parent, byte Slot) Placement(Item item)
     {
         Body? body = items.LocalBody;
-        if (item.TryGetParentContainer(out Container container) && container.TryGetComponent<Item>(out Item containerItem) &&
-            items.TryGetId(containerItem, out ulong parent))
-        {
-            return (ItemPlacement.Container, parent, ItemWire.NoSlot);
-        }
         if (body)
         {
             for (int slot = 0; slot < body!.slots.Length; slot++)
@@ -399,6 +415,11 @@ internal sealed class SharedItemCrafting
                 if (body.GetItem(slot) == item) return (ItemPlacement.Inventory, 0, (byte)slot);
             }
             if (body.GetAllWearables().Contains(item)) return (ItemPlacement.Worn, 0, ItemWire.NoSlot);
+        }
+        if (item.TryGetParentContainer(out Container container) && container.TryGetComponent<Item>(out Item containerItem) &&
+            items.TryGetId(containerItem, out ulong parent))
+        {
+            return (ItemPlacement.Container, parent, ItemWire.NoSlot);
         }
         return (ItemPlacement.World, 0, ItemWire.NoSlot);
     }

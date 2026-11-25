@@ -29,6 +29,7 @@ internal sealed class SharedItemProjection : IDisposable
     private readonly IMonotonicClock clock;
     private readonly ParticipantId local;
     private readonly IRemoteItemVisuals? remoteVisuals;
+    private readonly Func<ulong, bool>? localPlacementPending;
     private readonly Dictionary<ulong, View> views = new();
     private readonly Dictionary<int, ulong> byObject = new();
     private static readonly HashSet<int> ReplicaIds = new();
@@ -37,17 +38,23 @@ internal sealed class SharedItemProjection : IDisposable
     private bool restoringFreshBody;
 
     internal SharedItemProjection(SharedItemInventory inventory, SharedItemObjects objects, IMonotonicClock clock,
-        ParticipantId local, IRemoteItemVisuals? remoteVisuals = null)
+        ParticipantId local, IRemoteItemVisuals? remoteVisuals = null,
+        Func<ulong, bool>? localPlacementPending = null)
     {
         this.inventory = inventory;
         this.objects = objects;
         this.clock = clock;
         this.local = local;
         this.remoteVisuals = remoteVisuals;
+        this.localPlacementPending = localPlacementPending;
     }
 
     internal bool TryGetId(Item item, out ulong id) => byObject.TryGetValue(item.GetInstanceID(), out id);
     internal static bool IsReplica(Item item) => item && ReplicaIds.Contains(item.GetInstanceID());
+    internal static void MarkReplica(Item? item)
+    {
+        if (item) ReplicaIds.Add(item.GetInstanceID());
+    }
 
     internal Sprite? SpriteFor(ulong id) => views.TryGetValue(id, out View view) && view.Item
         ? view.Item!.GetComponent<SpriteRenderer>()?.sprite : null;
@@ -111,6 +118,7 @@ internal sealed class SharedItemProjection : IDisposable
         var view = new View { Item = item, UnityId = item.GetInstanceID(), CreatedFrame = Time.frameCount - 1 };
         views[id] = view;
         byObject[view.UnityId] = id;
+        ReplicaIds.Add(view.UnityId);
     }
 
     internal bool RestoreItem(ulong id, string definition, byte[] payload, float condition,
@@ -126,12 +134,14 @@ internal sealed class SharedItemProjection : IDisposable
             view.Item = objects.CreateReplica(definition, location);
             if (!view.Item) return false;
             view.UnityId = view.Item.GetInstanceID();
+            ReplicaIds.Add(view.UnityId);
             view.CreatedFrame = Time.frameCount - 1;
             byObject[view.UnityId] = id;
         }
 
         Item replica = view.Item;
         if (!objects.Apply(replica, payload, condition, placement)) return false;
+        remoteVisuals?.DetachHeldItem(replica);
         Detach(replica);
         switch (placement)
         {
@@ -179,7 +189,7 @@ internal sealed class SharedItemProjection : IDisposable
 
             if (!state.Owner.IsNone && state.Owner != local)
             {
-                if (state.Placement == ItemPlacement.Inventory && remoteVisuals is not null)
+                if (state.Placement is ItemPlacement.Inventory or ItemPlacement.Worn && remoteVisuals is not null)
                 {
                     if (!view.Item && !Create(state, view, now)) continue;
                     if (view.AppliedRevision != state.Revision || view.AppliedPayload is null ||
@@ -189,7 +199,10 @@ internal sealed class SharedItemProjection : IDisposable
                         view.AppliedRevision = state.Revision;
                         view.AppliedPayload = state.Payload;
                     }
-                    if (remoteVisuals.AttachHeldItem(state.Owner, state.Slot, view.Item!))
+                    bool attached = state.Placement == ItemPlacement.Worn
+                        ? remoteVisuals.AttachWornItem(state.Owner, view.Item!)
+                        : remoteVisuals.AttachHeldItem(state.Owner, state.Slot, view.Item!);
+                    if (attached)
                     {
                         view.Item!.rb.simulated = false;
                         view.Item.condition = state.Condition;
@@ -215,6 +228,12 @@ internal sealed class SharedItemProjection : IDisposable
             if (view.AppliedRevision != state.Revision || view.AppliedPayload is null ||
                 !view.AppliedPayload.SequenceEqual(state.Payload) || NeedsProjection(state, view))
             {
+                if (state.Owner == local && (state.Placement is ItemPlacement.Inventory or ItemPlacement.Worn) &&
+                    localPlacementPending?.Invoke(state.Id) == true &&
+                    NeedsProjection(state, view))
+                {
+                    continue;
+                }
                 if (!Apply(state, view))
                 {
                     continue;
@@ -254,6 +273,12 @@ internal sealed class SharedItemProjection : IDisposable
             return false;
         }
         if (state.Owner == local || (state.Owner.IsNone && state.Parent == 0))
+        {
+            return true;
+        }
+        // Other players' held and worn items are visual-only replicas. They must be projected
+        // through the remote character anchors instead of being simulated or ignored.
+        if (!state.Owner.IsNone && (state.Placement is ItemPlacement.Inventory or ItemPlacement.Worn))
         {
             return true;
         }
@@ -327,6 +352,7 @@ internal sealed class SharedItemProjection : IDisposable
             return false;
         }
 
+        remoteVisuals?.DetachHeldItem(replica);
         Detach(replica);
         switch (state.Placement)
         {
@@ -334,6 +360,8 @@ internal sealed class SharedItemProjection : IDisposable
                 objects.PutInWorld(replica, state.Location, authoritative: false);
                 return true;
             case ItemPlacement.Inventory:
+                if (state.Owner != local && remoteVisuals is not null &&
+                    remoteVisuals.AttachHeldItem(state.Owner, state.Slot, replica)) return true;
                 if (ApplyInventory(state, replica))
                 {
                     return true;
@@ -341,6 +369,8 @@ internal sealed class SharedItemProjection : IDisposable
                 replica.gameObject.SetActive(false);
                 return false;
             case ItemPlacement.Worn:
+                if (state.Owner != local && remoteVisuals is not null && remoteVisuals.AttachWornItem(state.Owner, replica))
+                    return true;
                 return inventory.TryWear(replica);
             case ItemPlacement.Container:
                 if (!views.TryGetValue(state.Parent, out View parent) || !parent.Item || !inventory.TryAttach(parent.Item!, replica))

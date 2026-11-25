@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "name": "items.host-drop-guest-craft",
+  "level": "UNITY_ACTORS",
+  "seed": 161,
+  "timeoutMs": 120000,
+  "network": { "latencyMs": 35, "jitterMs": 5, "unreliableLoss": 0.02 },
+  "limits": { "items": 6, "bodies": 4 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "character.intelligence", "target": "left", "value": 5 },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "foliageA", "catalogId": "foliage", "position": [-3.7, 0.5] },
+    { "op": "item.spawn", "id": "foliageB", "catalogId": "foliage", "position": [-2.3, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.nativePickup", "item": "foliageA" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotContainsAuthority", "item": "foliageA"
+    } },
+    { "op": "item.nativePickup", "item": "foliageB" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotContainsAuthority", "item": "foliageB"
+    } },
+    { "op": "item.nativeHostDrop", "item": "foliageA" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "foliageA", "expected": 0
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.unownedConverged", "item": "foliageA"
+    } },
+    { "op": "item.nativePickupPeer", "peer": "alice", "item": "foliageA" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "alice", "target": "foliageA"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "foliageA"
+    } },
+    { "op": "item.nativeHostDrop", "item": "foliageB" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "foliageB", "expected": 0
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.unownedConverged", "item": "foliageB"
+    } },
+    { "op": "item.nativePickupPeer", "peer": "alice", "item": "foliageB" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "alice", "target": "foliageB"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "foliageB"
+    } },
+    { "op": "item.craft", "peer": "alice", "recipe": 0 },
+    { "op": "assert.eventually", "timeoutMs": 20000, "condition": {
+      "op": "items.craftPending", "target": "alice", "expected": 0
+    } },
+    { "op": "assert.equal", "query": "items.lastCraftCompletion", "target": "alice", "expected": 5 },
+    { "op": "assert.equal", "query": "items.craftAcceptedCount", "expected": 1 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "rope", "expected": 1 },
+    { "op": "assert.equal", "query": "items.replicaDefinitionCount", "actor": "alice", "target": "rope", "expected": 1 },
+    { "op": "item.alias", "id": "rope", "definition": "rope" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "rope", "expected": 1
+    } },
+    { "op": "item.nativeDrop", "peer": "alice", "item": "rope" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.unownedConverged", "item": "rope"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.activeWorldCount", "item": "rope"
+    } },
+    { "op": "item.nativePickup", "item": "rope" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotContainsAuthority", "item": "rope"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "rope"
+    } },
+    { "op": "assert.equal", "query": "items.hostPlacement", "item": "rope", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

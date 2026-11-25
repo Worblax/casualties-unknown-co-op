@@ -41,10 +41,14 @@ internal static class ScenarioQueries
             c => { String(c, "item"); String(c, "actor"); Distance(c, 3); }),
         ["character.holdsItem"] = new((r, c) => Bool(r.Items.Holds(r.Fixtures.Characters.Get(String(c, "actor")), String(c, "item"))),
             c => { String(c, "item"); String(c, "actor"); }),
+        // One craft produces a reservation response and a terminal commit response for the same
+        // operation; the counters describe the final outcome of each operation.
         ["items.craftAcceptedCount"] = NoTarget((r, _) =>
-            r.Items.Cluster.CraftResults.Count(result => result.Decision == ItemDecision.Accepted)),
+            r.Items.Cluster.CraftDetails.GroupBy(result => (result.Peer, result.Operation))
+                .Count(group => group.Last().Decision == ItemDecision.Accepted)),
         ["items.craftRejectedCount"] = NoTarget((r, _) =>
-            r.Items.Cluster.CraftResults.Count(result => result.Decision != ItemDecision.Accepted)),
+            r.Items.Cluster.CraftDetails.GroupBy(result => (result.Peer, result.Operation))
+                .Count(group => group.Last().Decision != ItemDecision.Accepted)),
         ["items.craftPeerCount"] = NoTarget((r, _) =>
             r.Items.Cluster.CraftResults.Select(result => result.Peer).Distinct().Count()),
         ["items.authoritativeDefinitionCount"] = ForTarget((r, t) => r.Items.CountAuthoritativeDefinition(t)),
@@ -56,6 +60,7 @@ internal static class ScenarioQueries
             c => { String(c, "actor"); String(c, "target"); }),
         ["items.definitionConverged"] = ForTarget((r, t) => Bool(r.Items.DefinitionConverged(t))),
         ["items.nativeDefinitionCount"] = ForTarget((r, t) => r.Items.CountNativeDefinition(t)),
+        ["items.hostNativeDefinitionCount"] = ForTarget((r, t) => r.Items.CountHostNativeDefinition(t)),
         ["items.nativeDefinitionInSlots"] = ForTarget((r, t) => r.Items.CountNativeDefinitionInSlots(t)),
         ["world.solidCount"] = ForTarget((r, t) => r.Fixtures.Terrain.SolidCount(t)),
         ["world.firstBlock"] = ForTarget((r, t) => r.Fixtures.Terrain.Block(r.Fixtures.Terrain.Cell(t))),
@@ -102,6 +107,52 @@ internal static class ScenarioQueries
     static ScenarioQueries()
     {
         Registry.Add("items.activeWorldCount", ForTarget((r, t) => Bool(r.Items.IsInWorld(t))));
+        Registry.Add("remote.heldCount", ForTarget((r, t) => r.Items.RemoteHeldCount(t)));
+        Registry.Add("remote.enabledColliders", ForTarget((r, t) => r.Items.RemoteEnabledColliders(t)));
+        Registry.Add("remote.finiteTransform", ForTarget((r, t) => r.Items.RemoteFiniteTransform(t)));
+        Registry.Add("remote.attachAttempts", NoTarget((r, _) => r.Items.RemoteAttachAttempts()));
+        Registry.Add("items.guestReportsSent", ForTarget((r, t) => r.Items.GuestReportsSent(t)));
+        Registry.Add("items.hostReportsReceived", NoTarget((r, _) => r.Items.HostReportsReceived()));
+        Registry.Add("items.guestNativePlacement", new((r, c) =>
+            r.Items.GuestNativePlacement(String(c, "actor"), String(c, "item")),
+            c => { String(c, "actor"); String(c, "item"); }));
+        Registry.Add("items.definitionLiquidPositive", ForTarget((r, t) => r.Items.AuthoritativeLiquidState(t, false)));
+        Registry.Add("items.definitionLiquidBiochem", ForTarget((r, t) => r.Items.AuthoritativeLiquidState(t, true)));
+        Registry.Add("items.recipeIngredients", new((r, c) =>
+            r.Items.RecipeIngredientsFor(String(c, "actor"), int.Parse(String(c, "target"))),
+            c => { String(c, "actor"); String(c, "target"); }));
+        Registry.Add("items.craftCandidates", ForTarget((r, t) => r.Items.CraftCandidateCount(t)));
+        Registry.Add("items.liquidPayloadRoundTrip", ForTarget((r, t) => r.Items.LiquidPayloadRoundTrip(t)));
+        Registry.Add("items.guestDefinitionLiquid", new((r, c) =>
+            r.Items.GuestDefinitionLiquid(String(c, "actor"), String(c, "item"), c["target"]?.Value<string>() == "biochem"),
+            c => { String(c, "actor"); String(c, "item"); if (c["target"] is not null) String(c, "target"); }));
+        Registry.Add("items.payloadLiquidState", new((r, c) =>
+            r.Items.PayloadLiquidState(String(c, "item"), c["target"]?.Value<string>() == "biochem"),
+            c => { String(c, "item"); if (c["target"] is not null) String(c, "target"); }));
+        Registry.Add("items.registrationBinds", ForTarget((r, t) => r.Items.RegistrationBinds(t)));
+        Registry.Add("items.lastCraftCreated", ForTarget((r, t) => r.Items.LastCraftCreatedCount(t)));
+        Registry.Add("items.lastCraftCompletion", ForTarget((r, t) => r.Items.LastCraftCompletion(t)));
+        Registry.Add("items.lastScopeUsed", ForTarget((r, t) => r.Items.LastScopeUsed(t)));
+        Registry.Add("items.lastScopeCreated", ForTarget((r, t) => r.Items.LastScopeCreated(t)));
+        Registry.Add("items.lastLiquidTargets", ForTarget((r, t) => r.Items.LastLiquidTargets(t)));
+        Registry.Add("items.anyLiquidBiochem", NoTarget((r, _) => r.Items.AnyLiquidBiochem()));
+        Registry.Add("items.resourceExists", new((r, c) => r.Items.ResourceExists(String(c, "item")),
+            c => String(c, "item")));
+        Registry.Add("items.craftPending", ForTarget((r, t) => r.Items.GuestCraftPending(t)));
+        Registry.Add("items.guestReplicaLiquidPositive", new((r, c) =>
+            r.Items.GuestReplicaLiquidPositive(String(c, "actor"), String(c, "item")),
+            c => { String(c, "actor"); String(c, "item"); }));
+        Registry.Add("items.guestReplicaLiquidMl", new((r, c) =>
+            r.Items.GuestReplicaLiquidMl(String(c, "actor"), String(c, "item")),
+            c => { String(c, "actor"); String(c, "item"); }));
+        Registry.Add("items.guestReplicaLiquidLumalgae", new((r, c) =>
+            r.Items.GuestReplicaLiquidLumalgae(String(c, "actor"), String(c, "item")),
+            c => { String(c, "actor"); String(c, "item"); }));
+        Registry.Add("items.craftReserved", new((r, c) =>
+            Bool(r.Items.Cluster.Host.Session.IsCraftReserved(r.Items.IdForAlias(String(c, "item")))),
+            c => String(c, "item")));
+        Registry.Add("items.lastCraftDecision", NoTarget((r, _) => r.Items.LastCraftDecision()));
+        Registry.Add("items.lastCraftOperation", NoTarget((r, _) => r.Items.LastCraftOperation()));
         foreach (string name in ItemTestAdapter.NetworkQueryNames)
             Registry.Add(name, ForTarget((r, t) => r.Items.ReadNetworkQuery(name, t)));
     }

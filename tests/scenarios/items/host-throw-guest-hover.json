@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "name": "items.host-throw-guest-hover",
+  "level": "UNITY_ACTORS",
+  "seed": 163,
+  "timeoutMs": 90000,
+  "network": { "latencyMs": 35, "jitterMs": 5, "unreliableLoss": 0.02 },
+  "limits": { "items": 4, "bodies": 4 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "target", "catalogId": "stick", "position": [-3.2, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.nativePickup", "item": "target" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotContainsAuthority", "item": "target"
+    } },
+    { "op": "item.nativeHostThrow", "item": "target", "direction": 1 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostPlacement", "item": "target", "expected": 0
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.unownedConverged", "item": "target"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.activeWorldCount", "item": "target"
+    } },
+    { "op": "items.auditHover", "item": "target" },
+    { "op": "assert.equal", "query": "items.guestHoverDescription", "item": "target", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

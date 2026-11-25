@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using CasualtiesCoop.Core.Items;
+using CasualtiesCoop.Gameplay.Items;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
@@ -155,6 +157,57 @@ internal sealed class TestRuntime : IDisposable
         }
     }
 
+    internal void CaptureRecipes() => report.Write("recipes.json", Recipes.recipes.Select((recipe, index) => new
+    {
+        index,
+        result = recipe.result.id,
+        amount = recipe.result.amount,
+        liquid = recipe.result.isLiquid,
+        condition = recipe.result.resultCondition,
+        dontDrain = recipe.result.dontDrainResultLiquid,
+        ingredients = recipe.items.Select(item => new
+        {
+            destroy = item.destroyItem, liquid = item.isLiquid, specific = item.specific,
+            id = item.specificId, minimum = item.minimumCondition, noMax = item.noMaxCondition,
+            quality = item.quality?.id, qualityAmount = item.quality?.amount ?? 0f
+        }).ToArray()
+    }));
+
+    internal void CaptureItemQualities() => report.Write("item-qualities.json", Item.GlobalItems.Select(pair => new
+    {
+        id = pair.Key,
+        qualities = (pair.Value.qualities ?? new List<CraftingQuality>()).Select(value => value.id).ToArray(),
+        tags = pair.Value.tags
+    }).OrderBy(value => value.id, StringComparer.Ordinal).ToArray());
+
+    internal void AuditRecipeMatch(string actor, int recipe) =>
+        report.Write("recipe-match.json", Items.RecipeMatchDetails(actor, recipe));
+
+    internal void AuditAuthority() => report.Write("authority.json", new
+    {
+        craftFailure = Items.Cluster.Host.Session.LastCraftFailure,
+        prepareFailure = Items.Cluster.Host.LastCraftPrepareFailure,
+        scopeUsed = Items.LastScopeUsed("alice"), scopeCreated = Items.LastScopeCreated("alice"),
+        liquidTargets = Items.LastLiquidTargets("alice"), completion = Items.LastCraftCompletion("alice"),
+        lastCraftDecision = Items.LastCraftDecision(), lastCraftOperation = Items.LastCraftOperation(),
+        accepted = Items.Cluster.CraftResults.Count(result => result.Decision == ItemDecision.Accepted),
+        rejected = Items.Cluster.CraftResults.Count(result => result.Decision != ItemDecision.Accepted),
+        states = Items.Cluster.Host.Session.Snapshot().Select(state => new
+        {
+            state.Id, state.Definition, owner = state.Owner.Seat, placement = (int)state.Placement,
+            state.Parent, state.Slot, state.Revision, state.Removed, state.Condition,
+            native = Items.Cluster.Host.FindTracked(state.Id) is { } item && item,
+            stacks = Items.Cluster.Host.FindTracked(state.Id) is { } native &&
+                native.GetComponentInChildren<WaterContainerItem>(true) is { } water
+                ? water.stack.Select(value => new { value.liquidId, value.amount }).ToArray() : null
+        }).ToArray()
+    });
+
+    internal void AuditHover(string alias) =>
+        report.Write("hover.json", new { alias, detail = Items.HoverDetails(alias) });
+
+    internal void AuditNatives() => report.Write("natives.json", Items.NativeDetails());
+
     private bool catalogCaptured;
 
     internal bool PauseCycle()
@@ -251,6 +304,7 @@ internal sealed class TestRuntime : IDisposable
 
     private void DisposeWorld()
     {
+        CraftFaultInjection.Clear();
         observation.Restore();
         items?.Dispose();
         items = null;

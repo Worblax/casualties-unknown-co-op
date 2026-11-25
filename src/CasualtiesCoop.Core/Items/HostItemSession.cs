@@ -18,6 +18,9 @@ internal sealed class HostItemSession : IDisposable
     private readonly HostItemSnapshots snapshots;
     private readonly HostCraftReservations crafts;
     private readonly Dictionary<ParticipantId, Dictionary<ulong, RegistrationReceipt>> registrations = new();
+    private readonly Dictionary<ParticipantId, Queue<ulong>> registrationOrder = new();
+    private readonly Dictionary<ParticipantId, ulong> lastRegistrationOperation = new();
+    private readonly Dictionary<ParticipantId, ulong> lastClientKey = new();
 
     private readonly struct RegistrationReceipt
     {
@@ -55,6 +58,14 @@ internal sealed class HostItemSession : IDisposable
     internal bool IsCraftReserved(ulong id) => crafts.IsReserved(id);
     internal bool SlotOccupied(ParticipantId player, byte slot) => items.Occupied(player, slot);
     internal ulong LastOperation(ulong address) => operations.LastOperation(peers.Identify(address));
+    internal ulong LastCraftOperation(ulong address) => crafts.LastOperation(peers.Identify(address));
+    internal ulong LastRegistrationOperation(ulong address) =>
+        lastRegistrationOperation.TryGetValue(peers.Identify(address), out ulong value) ? value : 0;
+    internal ulong LastClientKey(ulong address) =>
+        lastClientKey.TryGetValue(peers.Identify(address), out ulong value) ? value : 0;
+    internal int ReportsReceived { get; private set; }
+    internal string LastCraftFailure => lastCraftFailure.Length > 0 ? lastCraftFailure : crafts.LastFailure;
+    private string lastCraftFailure = string.Empty;
 
     internal bool TryRegister(string definition, ItemLocation location, float condition, out ulong id)
     {
@@ -320,7 +331,7 @@ internal sealed class HostItemSession : IDisposable
         }
         if (!crafts.TryValidateCommit(player, commit, plan, out ItemDecision validation))
         {
-            CraftFailure?.Invoke($"validation failed for operation {commit.Operation}: {crafts.LastFailure}");
+            CraftFailed($"validation failed for operation {commit.Operation}: {crafts.LastFailure}");
             crafts.Complete(player, commit.Operation, ItemDecision.Conflict);
             CraftStateChanged?.Invoke();
             peers.Send(sender, ItemCraftWire.WriteResult(peers.SessionId, commit.Operation, commit.Recipe,
@@ -330,7 +341,7 @@ internal sealed class HostItemSession : IDisposable
 
         if (!items.HasCapacityFor(commit.Created.Count) || commit.Created.Any(value => IsClientKeyUsed(player, value.ClientKey)))
         {
-            CraftFailure?.Invoke($"capacity or client key failed for operation {commit.Operation}.");
+            CraftFailed($"capacity or client key failed for operation {commit.Operation}.");
             crafts.Complete(player, commit.Operation, ItemDecision.Unavailable);
             CraftStateChanged?.Invoke();
             peers.Send(sender, ItemCraftWire.WriteResult(peers.SessionId, commit.Operation, commit.Recipe,
@@ -340,7 +351,7 @@ internal sealed class HostItemSession : IDisposable
         if (!ValidateCreatedPlacement(player, commit) ||
             !crafts.TryGetIngredients(player, commit.Operation, out ItemState[] ingredients))
         {
-            CraftFailure?.Invoke($"result placement or ingredient snapshot failed for operation {commit.Operation}.");
+            CraftFailed($"result placement or ingredient snapshot failed for operation {commit.Operation}.");
             crafts.Complete(player, commit.Operation, ItemDecision.Conflict);
             CraftStateChanged?.Invoke();
             peers.Send(sender, ItemCraftWire.WriteResult(peers.SessionId, commit.Operation, commit.Recipe,
@@ -356,15 +367,19 @@ internal sealed class HostItemSession : IDisposable
         try
         {
             native = world.BeginCraft(commit, plan, ingredients);
-            if (native is null) throw new InvalidOperationException();
-            if (!native.TryApply()) throw new InvalidOperationException();
+            if (native is null) throw new InvalidOperationException("Craft transaction preparation failed.");
+            if (!native.TryApply()) throw new InvalidOperationException("Craft transaction apply failed.");
+            int removedIndex = 0;
             foreach (ulong id in commit.Removed)
             {
+                if (removedIndex == 0) CraftFaultInjection.Hit("apply-first-ingredient");
+                else if (removedIndex == 1) CraftFaultInjection.Hit("apply-second-ingredient");
                 if (!items.TryRemove(id, out ItemState removed))
                 {
                     throw new InvalidOperationException("Craft removal lost its authoritative item.");
                 }
                 changes.Add(removed);
+                removedIndex++;
             }
             foreach (CraftUpdatedItem update in commit.Updated)
             {
@@ -378,6 +393,7 @@ internal sealed class HostItemSession : IDisposable
             {
                 ParticipantId owner = result.Placement is ItemPlacement.Inventory or ItemPlacement.Worn
                     ? player : default;
+                CraftFaultInjection.Hit("register-result");
                 if (!items.TryRegister(result.Definition, result.Placement, owner, result.Parent, result.Slot, result.Location,
                         result.Condition, result.Payload, result.ClientKey, out ItemState state))
                 {
@@ -386,13 +402,15 @@ internal sealed class HostItemSession : IDisposable
                 changes.Add(state);
                 created.Add(new CraftCreatedResult(result.ClientKey, state.Id, state.Revision));
             }
-            if (!native.Bind(created, commit.Created)) throw new InvalidOperationException();
+            if (!native.Bind(created, commit.Created)) throw new InvalidOperationException("Craft result binding failed.");
+            // Confirm is the last fallible native step. The registry transaction is committed only
+            // after native placement and container unloads have succeeded.
+            if (!native.Confirm()) throw new InvalidOperationException("Native craft confirmation failed.");
             registry.Commit();
-            native.Confirm();
         }
         catch (Exception exception)
         {
-            CraftFailure?.Invoke($"native/registry commit failed for operation {commit.Operation}: {exception}");
+            CraftFailed($"native/registry commit failed for operation {commit.Operation}: {exception}");
             registry.Rollback();
             native?.Dispose();
             crafts.Complete(player, commit.Operation, ItemDecision.Unavailable);
@@ -402,7 +420,22 @@ internal sealed class HostItemSession : IDisposable
             return;
         }
 
+        // Ingredient destruction is irreversible, so it happens only after the authoritative
+        // registry accepts the commit. FinalizeCommit reconciles a failed Unity destroy and never
+        // turns an accepted registry commit back into a rejected one.
+        try
+        {
+            native.FinalizeCommit();
+        }
+        catch (Exception exception)
+        {
+            CraftFailed($"Irreversible craft finalization failed for operation {commit.Operation}: {exception}");
+        }
         native.Dispose();
+        foreach (ItemState state in changes)
+        {
+            if (!state.Removed) world.ApplyRemoteState(state);
+        }
         foreach (CraftCreatedResult result in created) RecordRegistration(player, result.ClientKey, result.Item, result.Revision);
         foreach (ItemState state in changes) PublishDelta(state);
         foreach (CraftCreatedResult item in created)
@@ -448,17 +481,37 @@ internal sealed class HostItemSession : IDisposable
     private bool IsClientKeyUsed(ParticipantId player, ulong clientKey) =>
         registrations.TryGetValue(player, out Dictionary<ulong, RegistrationReceipt>? known) && known.ContainsKey(clientKey);
 
+    private void CraftFailed(string message)
+    {
+        lastCraftFailure = message;
+        CraftFailure?.Invoke(message);
+    }
+
     private void RecordRegistration(ParticipantId player, ulong clientKey, ulong item, uint revision)
     {
+        AdvanceClientKey(player, clientKey);
         if (!registrations.TryGetValue(player, out Dictionary<ulong, RegistrationReceipt>? history))
-            registrations[player] = history = new Dictionary<ulong, RegistrationReceipt>();
-        if (history.Count >= 32)
         {
-            ulong oldest = 0;
-            foreach (ulong key in history.Keys) { oldest = key; break; }
-            if (oldest != 0) history.Remove(oldest);
+            registrations[player] = history = new Dictionary<ulong, RegistrationReceipt>();
+            registrationOrder[player] = new Queue<ulong>();
+        }
+        if (!history.ContainsKey(clientKey))
+        {
+            registrationOrder[player].Enqueue(clientKey);
+            while (history.Count >= 32 && registrationOrder[player].Count > 0)
+            {
+                history.Remove(registrationOrder[player].Dequeue());
+            }
         }
         history[clientKey] = new RegistrationReceipt(clientKey, item, revision);
+    }
+
+    private void AdvanceClientKey(ParticipantId player, ulong clientKey)
+    {
+        if (clientKey != 0 && (!lastClientKey.TryGetValue(player, out ulong previous) || clientKey > previous))
+        {
+            lastClientKey[player] = clientKey;
+        }
     }
 
     private void ReceiveRegistration(ulong sender, ParticipantId player, byte[] frame)
@@ -467,11 +520,17 @@ internal sealed class HostItemSession : IDisposable
         {
             return;
         }
+        AdvanceClientKey(player, registration.ClientKey);
         if (registrations.TryGetValue(player, out Dictionary<ulong, RegistrationReceipt>? known) &&
             known.TryGetValue(registration.ClientKey, out RegistrationReceipt previous))
         {
+            AdvanceRegistrationOperation(player, registration.Operation);
             peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, registration.Operation, registration.ClientKey,
                 previous.Item, previous.Revision));
+            return;
+        }
+        if (!AdvanceRegistrationOperation(player, registration.Operation))
+        {
             return;
         }
 
@@ -499,6 +558,7 @@ internal sealed class HostItemSession : IDisposable
             return;
         }
         RecordRegistration(player, registration.ClientKey, state.Id, state.Revision);
+        world.ApplyRemoteState(state);
         peers.Send(sender, ItemWire.WriteRegistered(peers.SessionId, registration.Operation, registration.ClientKey,
             state.Id, state.Revision));
         PublishDelta(state);
@@ -506,6 +566,7 @@ internal sealed class HostItemSession : IDisposable
 
     private void ReceiveStateReport(ulong sender, ParticipantId player, byte[] frame)
     {
+        ReportsReceived++;
         if (!ItemWire.TryReadReport(frame, peers.SessionId, out SharedItemStateReport report) ||
             IsItemConflict(report.ItemId) || !items.TryGet(report.ItemId, out ItemState state) || state.Removed)
         {
@@ -527,7 +588,19 @@ internal sealed class HostItemSession : IDisposable
             peers.Send(sender, Encode(current, reliable: true));
             return;
         }
+        world.ApplyRemoteState(committed);
         PublishDelta(committed);
+    }
+
+    private bool AdvanceRegistrationOperation(ParticipantId player, ulong operation)
+    {
+        if (operation == 0) return true;
+        if (lastRegistrationOperation.TryGetValue(player, out ulong previous) && operation <= previous)
+        {
+            return false;
+        }
+        lastRegistrationOperation[player] = operation;
+        return true;
     }
 
     private bool ReportedPlacementValid(ParticipantId player, SharedItemStateReport report, ItemState state)

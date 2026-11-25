@@ -96,6 +96,9 @@ internal sealed class CraftExecutionScope
         if (item != null && !Created.Contains(item))
         {
             Created.Add(item);
+            // The guest creates the vanilla result locally before the host accepts the commit.
+            // It must not be adopted by a host that shares the sandbox scene with the guest.
+            SharedItemProjection.MarkReplica(item);
         }
     }
 

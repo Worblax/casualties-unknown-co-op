@@ -6,7 +6,7 @@ internal sealed class SharedItemInventory
 {
     internal Body? Body { get; set; }
 
-    internal bool Applying { get; private set; }
+    internal bool Applying { get; set; }
 
     internal static bool CanPlaceInSlot(Body actor, Item item, int slot, bool force) =>
         slot >= 0 && slot < actor.slots.Length && slot < ItemWire.NoSlot && !actor.HoldingItem(slot) &&

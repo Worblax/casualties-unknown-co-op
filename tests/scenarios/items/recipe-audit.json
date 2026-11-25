@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "name": "items.recipe-audit",
+  "level": "UNITY_HOST",
+  "seed": 1,
+  "timeoutMs": 30000,
+  "network": { "latencyMs": 0 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "recipe.audit" },
+    { "op": "items.auditQualities" },
+    { "op": "peer.add", "id": "host", "role": "host" }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

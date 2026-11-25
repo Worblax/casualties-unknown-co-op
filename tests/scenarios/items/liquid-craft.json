@@ -1,0 +1,71 @@
+﻿{
+  "schemaVersion": 1,
+  "name": "items.liquid-craft",
+  "level": "UNITY_ACTORS",
+  "seed": 159,
+  "timeoutMs": 120000,
+  "network": { "latencyMs": 20, "jitterMs": 2, "unreliableLoss": 0 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "character.intelligence", "target": "left", "value": 20 },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "algae", "catalogId": "alcohol", "position": [-3.6, 0.5] },
+    { "op": "item.spawn", "id": "target", "catalogId": "campfire", "position": [-2.4, 0.5] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    
+    { "op": "item.liquid", "item": "algae", "liquid": "lumalgae", "amount": 300, "clear": true },
+    { "op": "item.condition", "item": "target", "condition": 1 },
+    { "op": "item.condition", "item": "algae", "condition": 1 },
+    { "op": "wait.frames", "count": 30 },
+    { "op": "assert.equal", "query": "items.hostLiquidPositive", "item": "algae", "expected": 1 },
+    { "op": "assert.equal", "query": "items.hostLiquidMl", "item": "algae", "expected": 300 },
+    { "op": "assert.equal", "query": "items.hostLiquidLumalgae", "item": "algae", "expected": 1 },
+    { "op": "assert.equal", "query": "items.liquidPayloadRoundTrip", "item": "algae", "expected": 1 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.replicaPayloadMatches", "item": "algae", "expected": 1 } },
+    { "op": "assert.equal", "query": "items.qualityHeatsource", "item": "target", "expected": 1 },
+
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.guestReplicaLiquidLumalgae", "actor": "alice", "item": "algae", "expected": 1 } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.recipeIngredients", "actor": "alice", "target": "8", "expected": 2 } },
+    { "op": "assert.equal", "query": "items.guestReplicaLiquidPositive", "actor": "alice", "item": "algae", "expected": 1 },
+    { "op": "assert.equal", "query": "items.craftCandidates", "target": "alice", "expected": 2 },
+    { "op": "assert.equal", "query": "items.guestReplicaLiquidMl", "actor": "alice", "item": "algae", "expected": 300 },
+    { "op": "recipe.matchAudit", "peer": "alice", "recipe": 8 },
+    { "op": "item.craft", "peer": "alice", "recipe": 8 },
+    { "op": "assert.eventually", "timeoutMs": 20000, "condition": { "op": "items.craftPending", "target": "alice", "expected": 0 } },
+    { "op": "assert.equal", "query": "items.resourceExists", "item": "craftingbottle", "expected": 1 },
+    { "op": "items.auditAuthority" },
+    { "op": "assert.equal", "query": "items.lastCraftCompletion", "target": "alice", "expected": 5 },
+    { "op": "assert.equal", "query": "items.craftAcceptedCount", "expected": 1 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.anyLiquidBiochem", "expected": 1 } },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

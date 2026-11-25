@@ -6,7 +6,7 @@
 | --- | --- |
 | `item.craft`, `item.craft` с `peer` | Запускает ванильный крафт локально у хоста или через production `SharedItemReplication`/`SharedItemCrafting` выбранного гостя. |
 | `items.unownedConverged`, `items.nativeDefinitionCount`, `items.nativeDefinitionInSlots` | Проверка полного совпадения после броска и подсчёт нативных предметов по `id` во всей сцене или только в слотах тела. |
-| `items.craftAcceptedCount`, `items.craftRejectedCount`, `items.craftPeerCount` | Число принятых и отклонённых craft-результатов и число гостей, получивших результат. |
+| `items.craftAcceptedCount`, `items.craftRejectedCount`, `items.craftPeerCount` | Число операций с финальным принятым/отклонённым результатом (промежуточный ответ резервирования не считается отдельной операцией) и число гостей, получивших результат. |
 | `items.authoritativeDefinitionCount`, `items.replicaDefinitionCount`, `items.definitionConverged` | Подсчёт authoritative/guest-состояний по определению и проверка отсутствия дублей и совпадения реплик. |
 | `world.loadSandbox`, `world.loadLayout` | Запуск production Sandbox и установка клеток ASCII-карты через `WorldGeneration.SetBlock`. |
 | `peer.add`, `peer.disconnect`, `peer.reconnect` | Участник `VirtualOnly` или `NativeActor`, соединение с хостом и прерывание транспорта. |
@@ -15,6 +15,10 @@
 | `character.move`, `character.crouch`, `character.jump`, `character.ragdoll` | Управление штатным движением и приседанием конкретного Body, вызов стандартных действий прыжка и ragdoll. |
 | `item.spawn`, `item.pickup`, `item.drop`, `item.remove` | Создание нативного предмета, сетевые запросы через `GuestItemSession`, удаление Unity-объекта для проверки production-обнаружения исчезновения. |
 | `item.nativePickup` | `Body.PickUpItem` локального хоста через production-хук. |
+| `item.nativePickupPeer`, `item.nativeDrop`, `item.nativeThrow`, `item.nativeHostDrop`, `item.nativeHostThrow`, `item.nativeWear`, `item.containerLoad` | Нативные действия соответствующего Body через `PickUpItem`, `DropItem`, `ThrowItem`, `WearWearable` и `Container.LoadItem`. |
+| `item.alias` | Даёт алиас уже существующему предмету по определению (`id`, `definition`, опционально `peer`); используется для нативных действий с крафт-результатом. |
+| `items.guestHoverDescription` | Повторяет физику ванильного `PlayerCamera.HandleWorldHover` и строит настоящее описание через `PlayerCamera.ItemHoverDescription`. В headless-тесте точка запроса — позиция предмета, поскольку `Input.mousePosition` недоступен. |
+| `items.auditAuthority`, `items.auditHover`, `items.auditNatives`, `recipe.audit`, `recipe.matchAudit`, `items.auditQualities` | Диагностические отчёты о состоянии реестра, hover, нативных объектах, рецептах и качествах. |
 | `character.pickup`, `character.throw` | Нативный инвентарь конкретного Body в изолированном `UNITY_ACTORS` с `standaloneItems: true`. |
 | `terrain.hit`, `terrain.breakNative`, `terrain.state` | Сетевой удар в хост, ванильное разрушение для физического теста или входящий кадр гостевой проекции. |
 | `fluid.fill`, `fluid.probe`, `fluid.enableFlow` | Заполнение области, объявление пассивной области наблюдения, включение штатных `WaterPusher`. |

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "name": "items.remote-held-visual",
+  "level": "UNITY_ACTORS",
+  "seed": 154,
+  "timeoutMs": 90000,
+  "network": { "latencyMs": 35, "jitterMs": 5, "unreliableLoss": 0.02 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "remote.enable" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "target", "catalogId": "stick", "position": [-2, 0.5] },
+    { "op": "item.spawn", "id": "bottle", "catalogId": "waterbottle", "position": [-2, 0.8] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "item.pickup", "peer": "alice", "item": "target", "slot": "$fixture.emptyPickupSlot" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "target"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "remote.heldCount", "target": "alice", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "remote.enabledColliders", "target": "alice", "expected": 0 },
+    { "op": "assert.equal", "query": "remote.finiteTransform", "target": "alice", "expected": 1 },
+    { "op": "item.swap", "peer": "alice", "item": "target", "slot": 1 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "alice", "target": "target"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "remote.heldCount", "target": "alice", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "remote.enabledColliders", "target": "alice", "expected": 0 },
+    { "op": "item.pickup", "peer": "alice", "item": "bottle", "slot": 0 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "alice", "target": "bottle"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.converged", "item": "bottle"
+    } },
+    { "op": "item.swap", "peer": "alice", "item": "bottle", "slot": 2 },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.hostSlotMatchesClient", "actor": "alice", "target": "bottle"
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "remote.heldCount", "target": "alice", "expected": 2
+    } },
+    { "op": "assert.equal", "query": "remote.enabledColliders", "target": "alice", "expected": 0 },
+    { "op": "item.nativeDrop", "peer": "alice", "item": "target" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "remote.heldCount", "target": "alice", "expected": 1
+    } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "items.activeWorldCount", "item": "target"
+    } },
+    { "op": "item.nativePickup", "item": "target" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": {
+      "op": "remote.heldCount", "target": "host", "expected": 1
+    } },
+    { "op": "assert.equal", "query": "remote.enabledColliders", "target": "host", "expected": 0 },
+    { "op": "assert.equal", "query": "remote.finiteTransform", "target": "host", "expected": 1 },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

@@ -1,3 +1,4 @@
+using CasualtiesCoop.Core.Items;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using static CasualtiesCoop.Testing.ScenarioDocument;
@@ -31,8 +32,19 @@ internal static class ScenarioCommands
     private static readonly Dictionary<string, Command> Registry = new(StringComparer.Ordinal)
     {
         ["world.loadSandbox"] = Apply(Setup, "", None, (_, _) => { }),
+        ["remote.enable"] = Apply(Setup, "", None, (_, _) => { }),
+        ["recipe.audit"] = Apply(Setup, "", None, (r, _) => r.CaptureRecipes()),
+        ["items.auditQualities"] = Apply(Setup, "", None, (r, _) => r.CaptureItemQualities()),
+        ["items.auditAuthority"] = Apply(Both, "", None, (r, _) => r.AuditAuthority()),
+        ["items.auditHover"] = Apply(Both, "item", Item, (r, c) => r.AuditHover(String(c, "item"))),
+        ["items.auditNatives"] = Apply(Both, "", None, (r, _) => r.AuditNatives()),
         ["peer.add"] = Apply(Setup, "id role position mode body", ValidatePeer, (_, _) => { }),
         ["item.spawn"] = Apply(Setup, "id catalogId position", Spawn, (_, _) => { }),
+        ["item.alias"] = Apply(Both, "id definition", c =>
+        {
+            String(c, "id"); String(c, "definition");
+            if (c["peer"] is not null) String(c, "peer");
+        }, (r, c) => r.Items.BindAlias(String(c, "id"), String(c, "definition"), c.Value<string>("peer"))),
         ["world.loadLayout"] = Apply(Setup, "id rows legend position", Layout, (r, c) =>
         {
             r.Fixtures.Terrain.Load(c);
@@ -104,7 +116,49 @@ internal static class ScenarioCommands
             Scalar(c, "velocityY", -100, 100);
             if (c["spin"] is not null) Scalar(c, "spin", -2000, 2000);
         }, (r, c) => r.Items.Throw(c)),
-        ["item.swap"] = Apply(Both, "peer item", PeerItem, (r, c) => r.Items.Swap(c)),
+        ["item.nativeDrop"] = Apply(Both, "peer item", PeerItem, (r, c) =>
+        {
+            r.Items.NativeDrop(c);
+            r.Fixtures.CoveredPaths.Add("Body.DropItem/SharedItemHooks.Drop");
+        }),
+        ["item.nativeThrow"] = Apply(Both, "peer item direction", c => { PeerItem(c); Scalar(c, "direction", -1, 1); },
+            (r, c) =>
+            {
+                r.Items.NativeThrow(c);
+                r.Fixtures.CoveredPaths.Add("Body.ThrowItem/SharedItemHooks.Throw");
+            }),
+        ["item.nativePickupPeer"] = Apply(Both, "peer item", PeerItem, (r, c) =>
+        {
+            r.Items.NativePickupPeer(c);
+            r.Fixtures.CoveredPaths.Add("Body.PickUpItem/SharedItemHooks.Pickup");
+        }),
+        ["item.nativeHostDrop"] = Apply(Both, "item", Item, (r, c) =>
+        {
+            r.Items.NativeHostDrop(c);
+            r.Fixtures.CoveredPaths.Add("Body.DropItem/SharedItemHooks.Drop");
+        }),
+        ["item.nativeHostThrow"] = Apply(Both, "item direction", c => { Item(c); Scalar(c, "direction", -1, 1); },
+            (r, c) =>
+            {
+                r.Items.NativeHostThrow(c);
+                r.Fixtures.CoveredPaths.Add("Body.ThrowItem/SharedItemHooks.Throw");
+            }),
+        ["item.nativeWear"] = Apply(Both, "peer item", PeerItem, (r, c) =>
+        {
+            r.Items.NativeWear(c);
+            r.Fixtures.CoveredPaths.Add("Body.WearWearable/SharedItemHooks.Placement");
+        }),
+        ["item.containerLoad"] = Apply(Both, "container item", c => { String(c, "container"); String(c, "item"); },
+            (r, c) =>
+            {
+                r.Items.ContainerLoad(c);
+                r.Fixtures.CoveredPaths.Add("Container.LoadItem/SharedItemHooks.Placement");
+            }),
+        ["item.swap"] = Apply(Both, "peer item slot", c =>
+        {
+            PeerItem(c);
+            if (c["slot"] is not null) Integer(c, "slot", 0, 254);
+        }, (r, c) => r.Items.Swap(c)),
         ["item.remove"] = Apply(Both, "item", Item, (r, c) => r.Items.Remove(String(c, "item"))),
         ["item.place"] = Apply(Both, "item position", c => { Item(c); Position(c); }, (r, c) => r.Items.Place(String(c, "item"), c)),
         ["item.condition"] = Apply(Both, "item condition", c => { Item(c); Scalar(c, "condition", 0, 1); },
@@ -126,6 +180,19 @@ internal static class ScenarioCommands
             Integer(c, "recipe", 0, 10000);
             if (c["peer"] is not null) Peer(c);
         }, (r, c) => r.Items.Craft(Integer(c, "recipe", 0, 10000), c.Value<string>("peer"))),
+        ["craft.fault"] = Apply(Both, "point", c => String(c, "point"), (_, c) =>
+        {
+            string point = String(c, "point");
+            CraftFaultInjection.Handler = hit =>
+            {
+                if (hit != point) return;
+                CraftFaultInjection.Clear();
+                throw new InvalidOperationException($"Injected craft fault at {point}.");
+            };
+            return;
+        }),
+        ["recipe.matchAudit"] = Apply(Both, "peer recipe", c => { Peer(c); Integer(c, "recipe", 0, 10000); },
+            (r, c) => r.AuditRecipeMatch(String(c, "peer"), Integer(c, "recipe", 0, 10000))),
         ["terrain.hit"] = Apply(Both, "peer target damage", c => { Peer(c); Damage(c); }, (r, c) =>
         {
             var cell = r.Fixtures.Terrain.Cell(String(c, "target"));

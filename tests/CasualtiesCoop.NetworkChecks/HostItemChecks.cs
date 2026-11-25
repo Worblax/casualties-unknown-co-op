@@ -143,5 +143,7 @@ internal static class HostItemChecks
             Applied = payload;
             return true;
         }
+
+        public void ApplyRemoteState(ItemState state) { }
     }
 }

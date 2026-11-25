@@ -42,12 +42,15 @@ internal sealed class SharedItemReplication : IDisposable
     private float nextRecipeRefresh;
     private float nextRegistrationScan;
     private bool recipeRefresh;
+    internal int ReportsSent { get; private set; }
+    internal int RegistrationBinds { get; private set; }
     private readonly SharedItemInventory inventory = new();
     private readonly SharedItemObjects objects = new();
     private readonly SharedItemHostScene? hostScene;
     private readonly GuestItemSession? guest;
     private readonly SharedItemProjection? projection;
     private readonly SharedItemCrafting? crafting;
+    private readonly Dictionary<ulong, float> localPlacementUntil = new();
 
     internal SharedItemReplication(SessionPeers peers, PlayerPositionLookup playerPosition, IMonotonicClock clock,
         IRemoteItemVisuals? remoteVisuals = null)
@@ -57,14 +60,15 @@ internal sealed class SharedItemReplication : IDisposable
 
         if (peers.IsHost)
         {
-            hostScene = new SharedItemHostScene(peers, playerPosition, clock, inventory, objects);
+            hostScene = new SharedItemHostScene(peers, playerPosition, clock, inventory, objects, remoteVisuals);
             hostScene.Session.OperationResponded += (_, _, _) => recipeRefresh = true;
             hostScene.Session.CraftStateChanged += () => recipeRefresh = true;
         }
         else
         {
             guest = new GuestItemSession(peers, clock);
-            projection = new SharedItemProjection(inventory, objects, clock, peers.LocalParticipant, remoteVisuals);
+            projection = new SharedItemProjection(inventory, objects, clock, peers.LocalParticipant, remoteVisuals,
+                LocalPlacementPending);
             guest.StateAccepted += OnStateChanged;
             guest.ResultAccepted += OnResult;
             guest.RegistrationAccepted += OnRegistrationAccepted;
@@ -75,13 +79,25 @@ internal sealed class SharedItemReplication : IDisposable
 
     internal SharedItemHostScene? TestHostScene => hostScene;
     internal GuestItemSession? TestGuest => guest;
+    internal bool CraftPending => crafting?.HasPending == true;
+    internal int LastCraftCreatedCount => crafting?.LastCreatedCount ?? -1;
+    internal int LastCraftCompletion => crafting?.LastCompletion ?? -1;
+    internal int LastScopeUsed => crafting?.LastScopeUsed ?? -1;
+    internal int LastScopeCreated => crafting?.LastScopeCreated ?? -1;
+    internal int LastLiquidTargets => crafting?.LastLiquidTargets ?? -1;
     internal ulong LastOperation(ulong player) => hostScene?.Session.LastOperation(player) ?? 0;
+    internal ulong LastCraftOperation(ulong player) => hostScene?.Session.LastCraftOperation(player) ?? 0;
+    internal ulong LastRegistrationOperation(ulong player) =>
+        hostScene?.Session.LastRegistrationOperation(player) ?? 0;
+    internal ulong LastClientKey(ulong player) => hostScene?.Session.LastClientKey(player) ?? 0;
 
     internal void SuspendForRecovery() => guest?.SuspendForRecovery();
 
-    internal void BeginRecovery(ulong confirmedOperation, bool freshBody)
+    internal void BeginRecovery(ulong confirmedOperation, ulong confirmedCraftOperation,
+        ulong confirmedRegistrationOperation, ulong confirmedClientKey, bool freshBody)
     {
-        guest?.ResumeAfterOffer(confirmedOperation);
+        guest?.ResumeAfterOffer(confirmedOperation, confirmedCraftOperation, confirmedRegistrationOperation,
+            confirmedClientKey);
         projection?.BeginRecovery(freshBody);
     }
 
@@ -98,7 +114,6 @@ internal sealed class SharedItemReplication : IDisposable
             return;
         }
 
-        projection!.Tick(guest!.Replicas, guest.Synced);
         guest.Tick();
         crafting?.Tick();
         if (guest.Synced)
@@ -114,6 +129,7 @@ internal sealed class SharedItemReplication : IDisposable
                 TickOwnedState();
             }
         }
+        projection!.Tick(guest.Replicas, guest.Synced);
     }
 
     private void OnStateChanged(ItemState? previous, ItemState state)
@@ -321,6 +337,27 @@ internal sealed class SharedItemReplication : IDisposable
 
     internal bool IsReserved(int slot) => guest?.IsReserved(slot) == true;
 
+    internal bool TryNativeSwap(Body body, int first, int second)
+    {
+        if (inventory.Applying || !inventory.Body || inventory.Body != body) return true;
+        Item? left = body.GetItem(first);
+        Item? right = body.GetItem(second);
+        if (!IsTracked(left) && !IsTracked(right)) return true;
+        if (IsReserved(first) || IsReserved(second)) return false;
+        if ((left && !CanChangePlacement(left)) || (right && !CanChangePlacement(right))) return false;
+        inventory.Applying = true;
+        try
+        {
+            body.SwapSlots(first, second);
+        }
+        finally
+        {
+            inventory.Applying = false;
+        }
+        nextGuestState = 0;
+        return false;
+    }
+
     internal Sprite? PendingSprite(int slot) =>
         guest is { Pending: { } request } && guest.IsReserved(slot) ? projection!.SpriteFor(request.ItemId) : null;
 
@@ -419,12 +456,17 @@ internal sealed class SharedItemReplication : IDisposable
                 continue;
             if (guest.TryReportState(state.Id, state.Revision, item!.condition, payload, placement, parent, slot, location))
             {
+                ReportsSent++;
+                localPlacementUntil[state.Id] = now + 1.5f;
                 reported[state.Id] = new ReportedState { Revision = state.Revision, Payload = payload,
                     Condition = item.condition, Placement = placement, Parent = parent, Slot = slot,
                     Location = location, NextSend = now + 1f };
             }
         }
     }
+
+    private bool LocalPlacementPending(ulong id) =>
+        localPlacementUntil.TryGetValue(id, out float until) && clock.Now < until;
 
     private bool EffectiveOwnedBy(ulong id, ParticipantId player)
     {
@@ -457,6 +499,12 @@ internal sealed class SharedItemReplication : IDisposable
     {
         Body? body = inventory.Body;
         if (guest is not { Synced: true } || !body)
+        {
+            return false;
+        }
+        // Items produced by an executing recipe belong to the craft commit. Registering them
+        // separately would reserve their slot before the host validates the commit.
+        if (CraftExecutionScope.Current is { } scope && scope.Created.Contains(item))
         {
             return false;
         }
@@ -522,12 +570,6 @@ internal sealed class SharedItemReplication : IDisposable
     private (ItemPlacement Placement, ulong Parent, byte Slot) CurrentPlacement(Item item)
     {
         Body? body = inventory.Body;
-        if (item.TryGetParentContainer(out Container container) &&
-            container.TryGetComponent<Item>(out Item containerItem))
-        {
-            return (ItemPlacement.Container,
-                projection!.TryGetId(containerItem, out ulong parent) ? parent : 0, ItemWire.NoSlot);
-        }
         if (body)
         {
             for (int index = 0; index < body.slots.Length; index++)
@@ -535,6 +577,12 @@ internal sealed class SharedItemReplication : IDisposable
                 if (body.GetItem(index) == item) return (ItemPlacement.Inventory, 0, (byte)index);
             }
             if (body.GetAllWearables().Contains(item)) return (ItemPlacement.Worn, 0, ItemWire.NoSlot);
+        }
+        if (item.TryGetParentContainer(out Container container) &&
+            container.TryGetComponent<Item>(out Item containerItem))
+        {
+            return (ItemPlacement.Container,
+                projection!.TryGetId(containerItem, out ulong parent) ? parent : 0, ItemWire.NoSlot);
         }
         return (ItemPlacement.World, 0, ItemWire.NoSlot);
     }
@@ -550,6 +598,11 @@ internal sealed class SharedItemReplication : IDisposable
     internal void FinishCraft(Recipe recipe) => crafting?.Finish(recipe);
 
     internal bool TryGetState(ulong id, out ItemState state) => TryGetById(id, out state);
+    internal int LocalPlacementOf(ulong id)
+    {
+        Item? item = hostScene is not null ? hostScene.FindTracked(id) : projection!.FindReplica(id);
+        return item ? (int)CurrentPlacement(item).Placement : -1;
+    }
     internal Dictionary<ulong, ItemState>.ValueCollection ReplicaStates =>
         guest?.Replicas.States ?? new Dictionary<ulong, ItemState>().Values;
     internal bool ApplyReplicaState(Item item, byte[] payload, float condition, ItemPlacement placement) =>
@@ -619,6 +672,7 @@ internal sealed class SharedItemReplication : IDisposable
         pendingRegistrations.Remove(clientKey);
         registrationObjects.Remove(pending.Item.GetInstanceID());
         projection!.BindCreated(itemId, pending.Item);
+        RegistrationBinds++;
     }
 
     private void OnResult(SharedItemRequest request, ItemDecision decision)

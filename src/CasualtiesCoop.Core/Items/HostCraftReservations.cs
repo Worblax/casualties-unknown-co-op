@@ -29,6 +29,7 @@ internal sealed class HostCraftReservations
     private readonly IMonotonicClock clock;
     private readonly Dictionary<ParticipantId, Reservation> active = new();
     private readonly Dictionary<ParticipantId, List<CraftOperationRecord>> history = new();
+    private readonly Dictionary<ParticipantId, ulong> lastOperation = new();
     internal string LastFailure { get; private set; } = string.Empty;
 
     internal HostCraftReservations(AuthoritativeItemRegistry items, IMonotonicClock clock)
@@ -54,6 +55,14 @@ internal sealed class HostCraftReservations
                 return false;
             }
             return Record(player, request, CraftOperationState.Rejected, ItemDecision.Conflict, out decision);
+        }
+
+        // The terminal cache is bounded. Once an operation is older than the last processed
+        // operation it must never be executed again, even if its result has been evicted.
+        if (lastOperation.TryGetValue(player, out ulong last) && request.Operation <= last)
+        {
+            decision = ItemDecision.Conflict;
+            return false;
         }
 
         if (plan is null || plan.Index != request.Recipe || request.ItemIds.Length is < 1 or > ItemCraftWire.MaxIngredients ||
@@ -218,7 +227,9 @@ internal sealed class HostCraftReservations
             if (!updated.Add(update.Id) || removed.Contains(update.Id) ||
                 !items.TryGet(update.Id, out ItemState state) || state.Removed ||
                 state.Revision != update.Revision || !ItemWire.IsPayload(update.Payload) ||
-                !IsFinite(update.Condition) || update.Condition is < 0f or > 1f)
+                // Vanilla recipes subtract an ingredient's condition directly and may produce a
+                // small negative value; the native transaction validates the actual recipe effect.
+                !IsFinite(update.Condition) || update.Condition is < -1f or > 1f)
             {
                 LastFailure = $"updated id {update.Id} is invalid or has a stale revision";
                 return false;
@@ -347,6 +358,9 @@ internal sealed class HostCraftReservations
         return found is not null && found.Terminal;
     }
 
+    internal ulong LastOperation(ParticipantId player) =>
+        lastOperation.TryGetValue(player, out ulong value) ? value : 0;
+
     // Terminal history is retained across a reconnect so a retried commit can replay its result.
     // Only the live reservation is cancelled when the connection is lost.
     internal void Forget(ParticipantId player)
@@ -464,6 +478,7 @@ internal sealed class HostCraftReservations
 
     private void Update(ParticipantId player, ulong operation, CraftOperationState state, ItemDecision decision)
     {
+        Advance(player, operation);
         CraftOperationRecord? record = Find(player, operation);
         if (record is null)
         {
@@ -476,6 +491,7 @@ internal sealed class HostCraftReservations
 
     private void Append(ParticipantId player, CraftOperationRecord record)
     {
+        Advance(player, record.Operation);
         if (!history.TryGetValue(player, out List<CraftOperationRecord>? records))
         {
             history[player] = records = new List<CraftOperationRecord>();
@@ -496,5 +512,13 @@ internal sealed class HostCraftReservations
         result = decision;
         Append(player, new CraftOperationRecord(request.Operation, request.Recipe, state, decision));
         return false;
+    }
+
+    private void Advance(ParticipantId player, ulong operation)
+    {
+        if (!lastOperation.TryGetValue(player, out ulong previous) || operation > previous)
+        {
+            lastOperation[player] = operation;
+        }
     }
 }

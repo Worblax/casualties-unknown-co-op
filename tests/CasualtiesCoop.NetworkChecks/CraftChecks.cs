@@ -199,6 +199,7 @@ internal static class CraftChecks
         public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location, out float condition)
         { location = request.Location; condition = 1; return ItemDecision.Accepted; }
         public bool TryApplyState(ulong item, byte[] payload) => true;
+        public void ApplyRemoteState(ItemState state) { }
         public bool TryGetRecipe(int recipe, out CraftRecipePlan? plan) => RecipeCatalog.TryGet(recipe, out plan);
         public ItemDecision CheckCraftIngredient(ParticipantId player, ulong item) =>
             Accessible.Contains(item) ? ItemDecision.Accepted : ItemDecision.Unavailable;

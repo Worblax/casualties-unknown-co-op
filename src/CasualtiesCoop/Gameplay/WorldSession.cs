@@ -336,6 +336,13 @@ internal sealed partial class WorldSession : IDisposable, IRemoteItemVisuals
             remote.View is not null && remote.View.AttachHeldItem(slot, item);
     }
 
+    bool IRemoteItemVisuals.AttachWornItem(ParticipantId owner, Item item)
+    {
+        ulong address = peers.AddressOf(owner);
+        return address != 0 && remotes.TryGetValue(address, out RemotePlayer? remote) &&
+            remote.View is not null && remote.View.AttachWornItem(item);
+    }
+
     void IRemoteItemVisuals.DetachHeldItem(Item item)
     {
         foreach (RemotePlayer remote in remotes.Values) remote.View?.DetachHeldItem(item);

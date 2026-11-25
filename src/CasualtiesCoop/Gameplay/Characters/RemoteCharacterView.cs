@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CasualtiesCoop.Gameplay.Items;
 using CasualtiesCoop.Networking;
 using TMPro;
 using UnityEngine;
@@ -21,21 +22,30 @@ internal sealed class RemoteCharacterView : IDisposable
         internal readonly Vector3 Position;
         internal readonly Quaternion Rotation;
         internal readonly Vector3 Scale;
+        internal readonly int SortingOrder;
 
-        internal HandAnchor(Transform parent, Vector3 position, Quaternion rotation, Vector3 scale)
+        internal HandAnchor(Transform parent, Vector3 position, Quaternion rotation, Vector3 scale, int sortingOrder)
         {
             Parent = parent;
             Position = position;
             Rotation = rotation;
             Scale = scale;
+            SortingOrder = sortingOrder;
         }
     }
-    private readonly Dictionary<int, HandAnchor> hands = new();
+    private readonly Dictionary<int, HandAnchor> slots = new();
+    private readonly Dictionary<string, Transform> limbsByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly int charType;
+    private readonly bool hasTemplate;
+
+    internal RemoteCharacterView(byte character, string displayName) : this(character, displayName, null!) { }
 
     internal RemoteCharacterView(byte character, string displayName, TMP_FontAsset font)
     {
         root = new GameObject("Co-op remote character");
         Body? template = LoadCharacter(character);
+        hasTemplate = template;
+        charType = template ? template!.charType : 0;
         FacialExpression? expression = template ? template!.GetComponentInChildren<FacialExpression>(true) : null;
         face = expression ? new CharacterFace(expression!) : null;
         limbs = template ? new GameObject[Math.Min(template!.limbs.Length, CharacterPoseWire.MaxLimbs)] : Array.Empty<GameObject>();
@@ -45,6 +55,10 @@ internal sealed class RemoteCharacterView : IDisposable
             GameObject limb = new(source.name);
             limb.transform.SetParent(root.transform, false);
             limbs[index] = limb;
+            limbsByName[source.name] = limb.transform;
+            limbsByName[template.limbs[index].name] = limb.transform;
+            if (!string.IsNullOrEmpty(template.limbs[index].shortName))
+                limbsByName[template.limbs[index].shortName] = limb.transform;
             foreach (SpriteRenderer sprite in source.GetComponentsInChildren<SpriteRenderer>(true))
             {
                 // Nested body limbs each have their own network transform.
@@ -81,16 +95,18 @@ internal sealed class RemoteCharacterView : IDisposable
         {
             for (int index = 0; index < template!.slots.Length; index++)
             {
-                if (!template.slots[index].isHand) continue;
                 Transform slot = template.slots[index].transform;
                 int limbIndex = Array.FindIndex(template.limbs, limb => slot.IsChildOf(limb.transform));
                 Transform source = limbIndex >= 0 && limbIndex < limbs.Length
                     ? limbs[limbIndex].transform : root.transform;
-                Vector3 sourceScale = source.lossyScale;
+                Transform templateLimb = limbIndex >= 0 && limbIndex < template.limbs.Length
+                    ? template.limbs[limbIndex].transform : template.transform;
+                Vector3 sourceScale = templateLimb.lossyScale;
                 Vector3 slotScale = slot.lossyScale;
-                hands[index] = new HandAnchor(source, source.InverseTransformPoint(slot.position),
-                    Quaternion.Inverse(source.rotation) * slot.rotation,
-                    new Vector3(slotScale.x / sourceScale.x, slotScale.y / sourceScale.y, 1f));
+                slots[index] = new HandAnchor(source, templateLimb.InverseTransformPoint(slot.position),
+                    Quaternion.Inverse(templateLimb.rotation) * slot.rotation,
+                    new Vector3(SafeScale(slotScale.x, sourceScale.x), SafeScale(slotScale.y, sourceScale.y),
+                        SafeScale(slotScale.z, sourceScale.z)), template.slots[index].spriteSortOrder);
             }
         }
 
@@ -177,31 +193,101 @@ internal sealed class RemoteCharacterView : IDisposable
 
     internal void Hide() => root.SetActive(false);
 
+    internal void ShowAt(Vector2 position)
+    {
+        root.transform.position = new Vector3(position.x, position.y, 0f);
+        root.SetActive(true);
+    }
+
+    internal int ChildItemCount()
+    {
+        int count = 0;
+        foreach (Item item in root.GetComponentsInChildren<Item>(true))
+            if (item && item.gameObject.activeInHierarchy) count++;
+        return count;
+    }
+
+    internal int EnabledChildColliderCount()
+    {
+        int count = 0;
+        foreach (Collider2D collider in root.GetComponentsInChildren<Collider2D>(true))
+            if (collider && collider.enabled) count++;
+        return count;
+    }
+
+    internal bool HasFiniteChildItemTransform()
+    {
+        foreach (Item item in root.GetComponentsInChildren<Item>(true))
+        {
+            if (!item) continue;
+            Vector3 p = item.transform.localPosition;
+            Vector3 s = item.transform.localScale;
+            if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsInfinity(p.x) || float.IsInfinity(p.y) ||
+                float.IsNaN(s.x) || float.IsNaN(s.y) || s.x == 0f || s.y == 0f) return false;
+        }
+        return true;
+    }
+
     internal bool AttachHeldItem(byte slot, Item item)
     {
-        if (!item || !hands.TryGetValue(slot, out HandAnchor anchor)) return false;
+        if (!item || !slots.TryGetValue(slot, out HandAnchor anchor)) return false;
         item.transform.SetParent(anchor.Parent, false);
         item.transform.localPosition = anchor.Position;
-        item.transform.localRotation = anchor.Rotation;
-        item.transform.localScale = anchor.Scale;
+        item.transform.localRotation = anchor.Rotation * Quaternion.Euler(0f, 0f, item.Stats.slotRotation);
+        float parentScale = Mathf.Max(0.0001f, Mathf.Abs(anchor.Parent.localScale.x));
+        item.transform.localScale = new Vector3(anchor.Scale.x / parentScale, anchor.Scale.y, anchor.Scale.z);
         item.rb.simulated = false;
         item.gameObject.SetActive(true);
-        SpriteRenderer? source = anchor.Parent.GetComponentInChildren<SpriteRenderer>(true);
         SpriteRenderer? sprite = item.GetComponent<SpriteRenderer>();
         if (sprite)
         {
             sprite.enabled = true;
-            if (source) sprite.sortingOrder = source.sortingOrder + 1;
+            sprite.sortingOrder = anchor.SortingOrder;
         }
+        HeldItemVisualState.Disable(item);
+        return true;
+    }
+
+    internal bool AttachWornItem(Item item)
+    {
+        if (!item || !item.Stats.wearable || !hasTemplate) return false;
+        Transform? limb = null;
+        if (!string.IsNullOrEmpty(item.Stats.desiredWearLimb))
+            limbsByName.TryGetValue(item.Stats.desiredWearLimb, out limb);
+        limb ??= limbs.Length > 0 ? limbs[0].transform : root.transform;
+        item.transform.SetParent(limb, false);
+        item.transform.localPosition = Vector3.zero;
+        item.transform.localRotation = Quaternion.identity;
+        item.transform.localScale = Vector3.one;
+        item.rb.simulated = false;
+        item.gameObject.SetActive(true);
+        SpriteRenderer? sprite = item.GetComponent<SpriteRenderer>();
+        if (sprite)
+        {
+            sprite.enabled = true;
+            sprite.sortingOrder = (limb.GetComponent<SpriteRenderer>()?.sortingOrder ?? 0) + item.Stats.wearableVisualOffset;
+            if (item.TryGetComponent<WearableSpriteSwap>(out WearableSpriteSwap swap) &&
+                charType >= 0 && charType < swap.sprites.Count && swap.sprites[charType])
+            {
+                sprite.sprite = swap.sprites[charType];
+                if (charType < swap.customScale.Count && swap.customScale[charType] != 0f)
+                    item.transform.localScale = Vector3.one * swap.customScale[charType];
+            }
+        }
+        HeldItemVisualState.Disable(item);
         return true;
     }
 
     internal void DetachHeldItem(Item item)
     {
         if (!item || !item.transform.IsChildOf(root.transform)) return;
+        HeldItemVisualState.Restore(item);
         item.transform.SetParent(null, true);
         item.gameObject.SetActive(false);
     }
+
+    private static float SafeScale(float source, float divisor) =>
+        Mathf.Abs(divisor) < 0.0001f ? 1f : source / divisor;
 
     public void Dispose() => UnityEngine.Object.Destroy(root);
 }

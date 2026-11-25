@@ -74,6 +74,7 @@ internal sealed class SharedItemObjects
         item.transform.SetParent(null, true);
         item.transform.localScale = Vector3.one;
         item.transform.SetPositionAndRotation(new Vector3(at.X, at.Y, 0), Quaternion.Euler(0, 0, at.Angle));
+        RestoreWorldPresentation(item);
         if (GetPrefab(item.id) is { } prefab && item.TryGetComponent<SpriteRenderer>(out SpriteRenderer sprite) &&
             prefab.TryGetComponent<SpriteRenderer>(out SpriteRenderer source))
         {
@@ -87,5 +88,40 @@ internal sealed class SharedItemObjects
             item.rb.angularVelocity = at.Spin;
             item.rb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
         }
+    }
+
+    private void RestoreWorldPresentation(Item item)
+    {
+        GameObject? prefab = GetPrefab(item.id);
+        if (!prefab || !item.rb)
+        {
+            return;
+        }
+
+        if (prefab.TryGetComponent<Rigidbody2D>(out Rigidbody2D sourceBody))
+        {
+            item.rb.bodyType = sourceBody.bodyType;
+            item.rb.gravityScale = sourceBody.gravityScale;
+            item.rb.constraints = sourceBody.constraints;
+            item.rb.collisionDetectionMode = sourceBody.collisionDetectionMode;
+            item.rb.sleepMode = sourceBody.sleepMode;
+            item.rb.interpolation = sourceBody.interpolation;
+        }
+        if (item.TryGetComponent<SpriteRenderer>(out SpriteRenderer sprite))
+        {
+            sprite.enabled = true;
+        }
+
+        Collider2D[] sourceColliders = prefab.GetComponents<Collider2D>();
+        Collider2D[] targetColliders = item.GetComponents<Collider2D>();
+        for (int index = 0; index < targetColliders.Length; index++)
+        {
+            targetColliders[index].enabled = sourceColliders.Length > index ? sourceColliders[index].enabled : true;
+            if (sourceColliders.Length > index)
+            {
+                targetColliders[index].isTrigger = sourceColliders[index].isTrigger;
+            }
+        }
+        item.gameObject.layer = prefab.layer;
     }
 }

@@ -41,7 +41,8 @@ internal sealed class NoOpCraftTransaction : ICraftWorldTransaction
 {
     public bool TryApply() => true;
     public bool Bind(IReadOnlyList<CraftCreatedResult> results, IReadOnlyList<CraftCreatedItem> specs) => true;
-    public void Confirm() { }
+    public bool Confirm() => true;
+    public void FinalizeCommit() { }
     public void Dispose() { }
 }
 
@@ -59,6 +60,7 @@ internal sealed class CraftWorld : IItemWorld, ICraftWorldTransaction
     public ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
         out float condition) { location = request.Location; condition = 1; return ItemDecision.Accepted; }
     public bool TryApplyState(ulong item, byte[] payload) => true;
+    public void ApplyRemoteState(ItemState state) { }
     public bool TryGetRecipe(int recipe, out CraftRecipePlan? plan) => RecipeCatalog.TryGet(recipe, out plan);
     public ItemDecision CheckCraftIngredient(ParticipantId player, ulong item) => ItemDecision.Accepted;
     public bool IsKnownDefinition(string definition) => definition is "stick" or "rock" or "knife" or "rope" or "flask";
@@ -87,6 +89,7 @@ internal sealed class CraftWorld : IItemWorld, ICraftWorldTransaction
 
     public bool TryApply() => !RejectApply;
     public bool Bind(IReadOnlyList<CraftCreatedResult> results, IReadOnlyList<CraftCreatedItem> specs) => true;
-    public void Confirm() { }
+    public bool Confirm() => true;
+    public void FinalizeCommit() { }
     public void Dispose() { }
 }

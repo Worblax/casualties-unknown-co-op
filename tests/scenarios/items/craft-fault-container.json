@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "name": "items.craft-fault-container",
+  "level": "UNITY_ACTORS",
+  "seed": 158,
+  "timeoutMs": 120000,
+  "network": { "latencyMs": 25, "jitterMs": 3, "unreliableLoss": 0 },
+  "limits": { "items": 8, "bodies": 4 },
+  "setup": [
+    { "op": "world.loadSandbox" },
+    { "op": "peer.add", "id": "host", "role": "host" },
+    { "op": "character.spawn", "id": "left", "character": 0, "position": [-3, 0] },
+    { "op": "character.intelligence", "target": "left", "value": 5 },
+    { "op": "peer.add", "id": "alice", "role": "guest", "mode": "NativeActor", "body": "left" },
+    { "op": "item.spawn", "id": "bag", "catalogId": "foliagebag", "position": [-0.9, 0.5] },
+    { "op": "item.spawn", "id": "thread", "catalogId": "string", "position": [-0.3, 0.5] },
+    { "op": "item.spawn", "id": "ropeA", "catalogId": "rope", "position": [0.3, 0.5] },
+    { "op": "item.spawn", "id": "ropeB", "catalogId": "rope", "position": [0.9, 0.5] },
+    { "op": "item.spawn", "id": "trinket", "catalogId": "stick", "position": [0, 1.1] }
+  ],
+  "steps": [
+    { "op": "wait.ready" },
+    { "op": "character.place", "target": "left", "position": [0, 0] },
+    { "op": "assert.equal", "query": "items.isContainer", "item": "bag", "expected": 1 },
+    { "op": "item.containerLoad", "container": "bag", "item": "trinket" },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.hostPlacement", "item": "trinket", "expected": 2 } },
+    { "op": "assert.eventually", "timeoutMs": 10000, "condition": { "op": "items.definitionConverged", "target": "stick", "expected": 1 } },
+    { "op": "craft.fault", "point": "confirm-unload" },
+    { "op": "item.craft", "peer": "alice", "recipe": 16 },
+    { "op": "assert.eventually", "timeoutMs": 15000, "condition": { "op": "items.craftPending", "target": "alice", "expected": 0 } },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "foliagebag", "expected": 1 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "string", "expected": 1 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "rope", "expected": 2 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "slingbag", "expected": 0 },
+    { "op": "assert.equal", "query": "items.authoritativeDefinitionCount", "target": "stick", "expected": 1 },
+    { "op": "assert.equal", "query": "items.hostPlacement", "item": "trinket", "expected": 2 },
+    { "op": "assert.eventually", "timeoutMs": 5000, "condition": { "op": "items.hostNativeDefinitionCount", "target": "foliagebag", "expected": 1 } },
+    { "op": "assert.eventually", "timeoutMs": 5000, "condition": { "op": "items.hostNativeDefinitionCount", "target": "rope", "expected": 2 } },
+    { "op": "assert.eventually", "timeoutMs": 5000, "condition": { "op": "items.hostNativeDefinitionCount", "target": "stick", "expected": 1 } },
+    { "op": "assert.equal", "query": "runtime.unhandledExceptions", "expected": 0 }
+  ]
+}

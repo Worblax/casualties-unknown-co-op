@@ -184,6 +184,131 @@ internal sealed class ItemTestAdapter : IDisposable
             throw new InvalidOperationException($"Guest {peer} could not submit the throw.");
     }
 
+    internal void NativeDrop(JObject action)
+    {
+        string peer = ScenarioDocument.String(action, "peer");
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.NativeBody is null)
+            throw new FormatException($"Native drop requires a NativeActor peer, got {peer}.");
+        Item replica = ReplicaFor(peer, ScenarioDocument.String(action, "item"));
+        if (!actor.NativeBody.HoldingItem(replica))
+            throw new InvalidOperationException($"Guest {peer} does not hold the item replica.");
+        Cluster.RunAs(actor, _ =>
+        {
+            actor.NativeBody!.DropItem(replica);
+            return true;
+        });
+    }
+
+    internal void NativeThrow(JObject action)
+    {
+        string peer = ScenarioDocument.String(action, "peer");
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.NativeBody is null)
+            throw new FormatException($"Native throw requires a NativeActor peer, got {peer}.");
+        Item replica = ReplicaFor(peer, ScenarioDocument.String(action, "item"));
+        float direction = ScenarioDocument.Scalar(action, "direction", -1, 1);
+        if (actor.NativeBody.GetItem(actor.NativeBody.handSlot) != replica)
+            throw new InvalidOperationException($"Guest {peer} does not hold the item in the active hand.");
+        Cluster.RunAs(actor, _ =>
+        {
+            actor.NativeBody!.targetLookPos = actor.NativeBody.transform.position + new Vector3(direction * 10, 3, 0);
+            actor.NativeBody.ThrowItem(0.35f);
+            return true;
+        });
+    }
+
+    internal void NativePickupPeer(JObject action)
+    {
+        string peer = ScenarioDocument.String(action, "peer");
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.NativeBody is null)
+            throw new FormatException($"Native pickup requires a NativeActor peer, got {peer}.");
+        Item replica = ReplicaFor(peer, ScenarioDocument.String(action, "item"));
+        int slot = Array.FindIndex(actor.NativeBody.slots,
+            candidate => candidate.isHand && candidate.transform.childCount == 0);
+        if (slot < 0) throw new TestBlocked("The guest Body has no empty hand slot.");
+        slots[peer + "/" + ScenarioDocument.String(action, "item")] = (byte)slot;
+        Cluster.RunAs(actor, _ =>
+        {
+            actor.NativeBody!.PickUpItem(replica, slot, force: false);
+            return true;
+        });
+    }
+
+    internal void NativeHostDrop(JObject action)
+    {
+        Item item = ItemFor(ScenarioDocument.String(action, "item"));
+        if (!Cluster.Body.HoldingItem(item))
+            throw new InvalidOperationException("The host does not hold the item.");
+        Cluster.Body.DropItem(item);
+    }
+
+    internal void BindAlias(string alias, string definition, string? peer)
+    {
+        if (items.ContainsKey(alias)) throw new FormatException($"Duplicate item alias {alias}.");
+        ItemState match;
+        if (peer is not null && peer != "host")
+        {
+            if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.Guest is null)
+                throw new FormatException($"Unknown guest {peer}.");
+            match = actor.Guest.Replicas.States.FirstOrDefault(state => !state.Removed && state.Definition == definition);
+            if (match.Id == 0) throw new TestBlocked($"Guest {peer} has no replica of {definition}.");
+        }
+        else
+        {
+            match = Cluster.Host.Session.Snapshot()
+                .FirstOrDefault(state => !state.Removed && state.Definition == definition);
+            if (match.Id == 0) throw new TestBlocked($"The host has no authoritative {definition}.");
+        }
+        if (Cluster.Host.FindTracked(match.Id) is not { } item)
+            throw new TestBlocked($"The host has no native object for {definition}.");
+        items[alias] = item;
+        ids[alias] = match.Id;
+    }
+
+    internal void NativeHostThrow(JObject action)
+    {
+        Item item = ItemFor(ScenarioDocument.String(action, "item"));
+        float direction = ScenarioDocument.Scalar(action, "direction", -1, 1);
+        if (Cluster.Body.GetItem(Cluster.Body.handSlot) != item)
+            throw new InvalidOperationException("The host does not hold the item in the active hand.");
+        Cluster.Body.targetLookPos = Cluster.Body.transform.position + new Vector3(direction * 10, 3, 0);
+        Cluster.Body.ThrowItem(0.35f);
+    }
+
+    internal void NativeWear(JObject action)
+    {
+        string peer = ScenarioDocument.String(action, "peer");
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) || actor.NativeBody is null)
+            throw new FormatException($"Native wear requires a NativeActor peer, got {peer}.");
+        Item replica = ReplicaFor(peer, ScenarioDocument.String(action, "item"));
+        if (!replica.Stats.wearable)
+            throw new TestBlocked($"{replica.id} is not wearable.");
+        Cluster.RunAs(actor, _ =>
+        {
+            actor.NativeBody!.WearWearable(replica);
+            return true;
+        });
+        if (actor.NativeBody.GetWearableBySlotID(replica.Stats.wearSlotId) != replica)
+            throw new InvalidOperationException($"Guest {peer} could not wear {replica.id}.");
+    }
+
+    internal void ContainerLoad(JObject action)
+    {
+        Item containerItem = ItemFor(ScenarioDocument.String(action, "container"));
+        Item child = ItemFor(ScenarioDocument.String(action, "item"));
+        if (!containerItem.container) throw new TestBlocked($"{containerItem.id} is not a container.");
+        containerItem.container.LoadItem(child);
+        if (!child.TryGetParentContainer(out Container loaded) || loaded != containerItem.container)
+            throw new InvalidOperationException($"Could not load {child.id} into {containerItem.id}.");
+    }
+
+    private Item ReplicaFor(string peer, string alias)
+    {
+        if (!Cluster.Actors.TryGetValue(peer, out VirtualSessionCluster.Actor? actor) ||
+            actor.ItemReplication?.FindReplica(IdFor(alias)) is not { } replica || !replica)
+            throw new InvalidOperationException($"Guest {peer} has no replica for {alias}.");
+        return replica;
+    }
+
     internal void Swap(JObject action)
     {
         string peer = ScenarioDocument.String(action, "peer");
@@ -194,15 +319,19 @@ internal sealed class ItemTestAdapter : IDisposable
             throw new InvalidOperationException($"Guest {peer} does not own the item.");
         Body body = actor.NativeBody ?? throw new TestBlocked("Swap requires a native Body.");
         int from = replica.Slot;
-        int to = -1;
-        for (int index = 0; index < body.slots.Length; index++)
+        int to = action["slot"]?.Type == JTokenType.Integer
+            ? ScenarioDocument.Integer(action, "slot", 0, 254) : -1;
+        if (to < 0)
         {
-            if (index != from && body.GetItem(index) == null) { to = index; break; }
+            for (int index = 0; index < body.slots.Length; index++)
+            {
+                if (index != from && body.GetItem(index) == null) { to = index; break; }
+            }
         }
         if (from == ItemWire.NoSlot || to < 0 || to == from)
             throw new TestBlocked("The native Body has no second empty pickup slot.");
         Cluster.RunAs(actor, _ => { body.SwapSlots(from, to); return true; });
-        if (body.GetItem(to) != ItemFor(alias))
+        if (body.GetItem(to) != ReplicaFor(peer, alias))
             throw new InvalidOperationException($"Guest {peer} could not move the item to slot {to}.");
         slots[peer + "/" + alias] = (byte)to;
     }
@@ -213,12 +342,18 @@ internal sealed class ItemTestAdapter : IDisposable
         ItemFor(alias).transform.position = new Vector3(position.X, position.Y, 0f);
     }
 
-    internal void SetCondition(string alias, float condition) => ItemFor(alias).condition = Mathf.Clamp01(condition);
+    internal void SetCondition(string alias, float condition)
+    {
+        Item item = ItemFor(alias);
+        item.condition = Mathf.Clamp01(condition);
+        Cluster.Host.Observe(item);
+    }
 
     internal void SetWet(string alias, bool wet)
     {
         Item item = ItemFor(alias);
         item.wetTime = wet ? Time.time : -1000f;
+        Cluster.Host.Observe(item);
     }
 
     internal void SetGun(string alias, int rounds, int magazine, bool hasMag, bool safe, bool racked)
@@ -236,6 +371,7 @@ internal sealed class ItemTestAdapter : IDisposable
             2 => GunScript.RoundInChamber.Casing,
             _ => GunScript.RoundInChamber.None
         };
+        Cluster.Host.Observe(item);
     }
 
     internal void SetLiquid(string alias, string liquid, float amount, bool clear)
@@ -246,6 +382,7 @@ internal sealed class ItemTestAdapter : IDisposable
         if (clear) water.stack.Clear();
         water.AddLiquid(liquid, amount);
         water.UpdateCondition();
+        Cluster.Host.Observe(item);
     }
 
     internal void Craft(int recipe, string? peer)
@@ -273,6 +410,8 @@ internal sealed class ItemTestAdapter : IDisposable
         ["items.hostSlotContainsAuthority"] = (r, alias, _, item) => r.slots.TryGetValue("host/" + alias, out byte slot) &&
             r.Cluster.Body.GetItem(slot) == item && r.Cluster.Body.HoldingItem(item) ? 1 : 0,
         ["items.guestWorldReplica"] = (r, _, id, item) => r.Cluster.HasWorldReplica(id, item) ? 1 : 0,
+        ["items.worldReplicaHover"] = (r, _, id, _) => r.Cluster.WorldReplicaHover(id, out _) ? 1 : 0,
+        ["items.guestHoverDescription"] = (r, _, id, _) => r.Cluster.HoverDescription(id, out _) ? 1 : 0,
         ["items.typeAlcohol"] = (_, _, _, item) => item && item.id == "alcohol" && item.GetComponent<WaterContainerItem>() ? 1 : 0,
         ["items.replicated"] = (r, _, id, _) => r.Replicated(id, ownedOnly: false) ? 1 : 0,
         ["items.removed"] = (r, _, id, _) => !r.Cluster.Host.Session.TryGet(id, out _) ? 1 : 0,
@@ -292,6 +431,14 @@ internal sealed class ItemTestAdapter : IDisposable
         ["items.hostGunRounds"] = (r, alias, _, item) => item && item.TryGetComponent<GunScript>(out var gun) ? gun.roundsInMag : -1,
         ["items.hostLiquidMl"] = (r, alias, _, item) => item && item.TryGetComponent<WaterContainerItem>(out var water)
             ? Mathf.RoundToInt(water.CurrentTotal) : -1,
+        ["items.hostLiquidPositive"] = (_, _, _, item) => item && item.TryGetComponent<WaterContainerItem>(out var water)
+            ? (water.CurrentTotal > 0f ? 1 : 0) : 0,
+        ["items.hostLiquidBiochem"] = (_, _, _, item) => item && item.TryGetComponent<WaterContainerItem>(out var water)
+            ? (water.stack.Count == 1 && water.stack[0].liquidId == "biochem" ? 1 : 0) : 0,
+        ["items.hostLiquidLumalgae"] = (_, _, _, item) => item && item.TryGetComponent<WaterContainerItem>(out var water)
+            ? (water.HasLiquid("lumalgae") ? 1 : 0) : 0,
+        ["items.isContainer"] = (_, _, _, item) => item && item.container ? 1 : 0,
+        ["items.qualityHeatsource"] = (_, _, _, item) => item && item.Stats.qualities.Any(value => value.id == "heatsource") ? 1 : 0,
         ["items.guestSlotContainsReplica"] = (r, alias, id, item) => r.Cluster.ProjectedActor is { } actor &&
             r.slots.TryGetValue(actor.Name + "/" + alias, out byte slot) && r.Cluster.HoldsReplica(slot, id, item) ? 1 : 0
     };
@@ -384,6 +531,150 @@ internal sealed class ItemTestAdapter : IDisposable
 
     internal int CountNativeDefinition(string definition) =>
         Item.allItems.Count(item => item && item.id == definition);
+    internal int CountHostNativeDefinition(string definition) =>
+        Cluster.Host.Session.Snapshot().Count(state => !state.Removed && state.Definition == definition &&
+            Cluster.Host.FindTracked(state.Id) is { } item && item && !SharedItemProjection.IsReplica(item));
+    internal int AuthoritativeLiquidState(string definition, bool biochem)
+    {
+        foreach (ItemState state in Cluster.Host.Session.Snapshot())
+        {
+            if (state.Removed || state.Definition != definition) continue;
+            Item? item = Cluster.Host.FindTracked(state.Id);
+            if (!item)
+            {
+                item = Item.allItems.FirstOrDefault(candidate => candidate && candidate.id == definition &&
+                    candidate.GetComponentInChildren<WaterContainerItem>(true));
+            }
+            WaterContainerItem? water = item ? item.GetComponentInChildren<WaterContainerItem>(true) : null;
+            if (!item || !water) continue;
+            if (water.CurrentTotal <= 0f) return 0;
+            if (!biochem) return 1;
+            return water.stack.Count == 1 && water.stack[0].liquidId == "biochem" ? 1 : 0;
+        }
+        return -1;
+    }
+    internal int RecipeIngredientsFor(string actor, int recipe)
+    {
+        if (recipe < 0 || recipe >= Recipes.recipes.Count ||
+            !Cluster.Actors.TryGetValue(actor, out VirtualSessionCluster.Actor? member) || member.ItemReplication is null)
+            return -1;
+        int count = -1;
+        Cluster.RunAs(member, _ =>
+        {
+            count = Recipes.recipes[recipe].GetItemsForRecipe()?.Count ?? 0;
+            return true;
+        });
+        return count;
+    }
+    internal int CraftCandidateCount(string actor)
+    {
+        if (!Cluster.Actors.TryGetValue(actor, out VirtualSessionCluster.Actor? member) || member.ItemReplication is null)
+            return -1;
+        int count = -1;
+        Cluster.RunAs(member, items => { count = items.CraftCandidates().Count(); return true; });
+        return count;
+    }
+    internal int LiquidPayloadRoundTrip(string alias)
+    {
+        Item source = ItemFor(alias);
+        byte[] payload = ItemStateCodec.Capture(source);
+        var objects = new SharedItemObjects();
+        Item? clone = objects.CreateReplica(source.id, default);
+        if (!clone) return -1;
+        int result = 0;
+        try
+        {
+            if (objects.Apply(clone, payload, source.condition, ItemPlacement.World) &&
+                clone.TryGetComponent<WaterContainerItem>(out WaterContainerItem water) && water.HasLiquid("lumalgae"))
+                result = 1;
+        }
+        finally
+        {
+            UnityEngine.Object.Destroy(clone.gameObject);
+        }
+        return result;
+    }
+    internal int GuestDefinitionLiquid(string actor, string definition, bool biochem) =>
+        Cluster.GuestDefinitionLiquid(actor, definition, biochem);
+    internal int RegistrationBinds(string actor) => Cluster.Actors.TryGetValue(actor, out var member)
+        ? member.ItemReplication?.RegistrationBinds ?? -1 : -1;
+    internal int LastCraftCreatedCount(string actor) => Cluster.Actors.TryGetValue(actor, out var member)
+        ? member.ItemReplication?.LastCraftCreatedCount ?? -1 : -1;
+    internal int LastCraftCompletion(string actor) => Cluster.Actors.TryGetValue(actor, out var member)
+        ? member.ItemReplication?.LastCraftCompletion ?? -1 : -1;
+    internal int LastScopeUsed(string actor) => Cluster.Actors.TryGetValue(actor, out var member)
+        ? member.ItemReplication?.LastScopeUsed ?? -1 : -1;
+    internal int LastScopeCreated(string actor) => Cluster.Actors.TryGetValue(actor, out var member)
+        ? member.ItemReplication?.LastScopeCreated ?? -1 : -1;
+    internal int LastLiquidTargets(string actor) => Cluster.Actors.TryGetValue(actor, out var member)
+        ? member.ItemReplication?.LastLiquidTargets ?? -1 : -1;
+    internal int PayloadLiquidState(string definition, bool biochem)
+    {
+        foreach (ItemState state in Cluster.Host.Session.Snapshot())
+        {
+            if (state.Removed || state.Definition != definition) continue;
+            var objects = new SharedItemObjects();
+            Item? item = objects.CreateReplica(state.Definition, state.Location);
+            if (!item) return -1;
+            try
+            {
+                if (!objects.Apply(item, state.Payload, state.Condition, state.Placement)) return -2;
+                WaterContainerItem? water = item.GetComponentInChildren<WaterContainerItem>(true);
+                if (!water) return -3;
+                if (water.CurrentTotal <= 0f) return 0;
+                if (!biochem) return 1;
+                return water.stack.Count == 1 && water.stack[0].liquidId == "biochem" ? 1 : 0;
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(item.gameObject);
+            }
+        }
+        return -4;
+    }
+    internal int AnyLiquidBiochem()
+    {
+        foreach (ItemState state in Cluster.Host.Session.Snapshot())
+        {
+            if (state.Removed) continue;
+            Item? item = Cluster.Host.FindTracked(state.Id);
+            if (!item) continue;
+            WaterContainerItem? water = item.GetComponentInChildren<WaterContainerItem>(true);
+            if (water && water.stack.Any(value => value.liquidId == "biochem" && value.amount > 0f)) return 1;
+        }
+        return 0;
+    }
+    internal int ResourceExists(string definition) => Resources.Load<GameObject>(definition) ? 1 : 0;
+    internal object RecipeMatchDetails(string actor, int recipe)
+    {
+        if (recipe < 0 || recipe >= Recipes.recipes.Count ||
+            !Cluster.Actors.TryGetValue(actor, out VirtualSessionCluster.Actor? member) || member.ItemReplication is null)
+            return Array.Empty<object>();
+        object result = Array.Empty<object>();
+        Cluster.RunAs(member, items =>
+        {
+            List<Item> candidates = items.CraftCandidates().ToList();
+            Recipe source = Recipes.recipes[recipe];
+            result = source.items.Select((ingredient, index) => new
+            {
+                index,
+                quality = ingredient.quality?.id,
+                liquid = ingredient.isLiquid,
+                specific = ingredient.specificId,
+                minimum = ingredient.minimumCondition,
+                candidates = candidates.Select(candidate => new
+                {
+                    id = candidate.id,
+                    matches = ingredient.DoesUseItemType(candidate),
+                    liquid = candidate.TryGetComponent<WaterContainerItem>(out WaterContainerItem water)
+                        ? water.stack.Select(value => new { value.liquidId, value.amount }).ToArray() : null,
+                    qualities = candidate.Stats.qualities.Select(value => value.id).ToArray()
+                }).ToArray()
+            }).ToArray();
+            return true;
+        });
+        return result;
+    }
 
     internal int CountAuthoritativeDefinition(string definition) =>
         Cluster.Host.Session.Snapshot().Count(state => !state.Removed && state.Definition == definition);
@@ -441,6 +732,45 @@ internal sealed class ItemTestAdapter : IDisposable
     }
 
     internal bool Holds(Body body, string alias) => body.HoldingItem(ItemFor(alias));
+
+    internal int RemoteHeldCount(string actor) =>
+        Cluster.RemoteVisuals is { } visuals && Cluster.Actors.TryGetValue(actor, out var member)
+            ? visuals.ChildItemCount(member.Participant) : -1;
+
+    internal int RemoteEnabledColliders(string actor) =>
+        Cluster.RemoteVisuals is { } visuals && Cluster.Actors.TryGetValue(actor, out var member)
+            ? visuals.EnabledChildColliderCount(member.Participant) : -1;
+
+    internal int RemoteFiniteTransform(string actor) =>
+        Cluster.RemoteVisuals is { } visuals && Cluster.Actors.TryGetValue(actor, out var member) &&
+        visuals.HasFiniteChildItemTransform(member.Participant) ? 1 : 0;
+
+    internal int RemoteAttachAttempts() => Cluster.RemoteVisuals?.AttachAttempts ?? -1;
+    internal int GuestReportsSent(string actor) => Cluster.GuestReportsSent(actor);
+    internal string HoverDetails(string alias)
+    {
+        Cluster.HoverDescription(IdFor(alias), out string detail);
+        return detail;
+    }
+    internal object NativeDetails() => Item.allItems.Where(item => item).Select(item => new
+    {
+        instance = item.GetInstanceID(), definition = item.id, replica = SharedItemProjection.IsReplica(item),
+        active = item.gameObject.activeSelf, parent = item.transform.parent ? item.transform.parent.name : null,
+        hostId = Cluster.Host.TryGetId(item, out ulong hostId) ? hostId : 0
+    }).OrderBy(value => value.instance).ToArray();
+    internal int HostReportsReceived() => Cluster.Host.Session.ReportsReceived;
+    internal int GuestNativePlacement(string actor, string item) => Cluster.GuestNativePlacement(actor, IdFor(item));
+    internal int GuestCraftPending(string actor) => Cluster.GuestCraftPending(actor);
+    internal int GuestReplicaLiquidPositive(string actor, string item) =>
+        Cluster.GuestReplicaLiquidPositive(actor, IdFor(item));
+    internal int GuestReplicaLiquidMl(string actor, string item) => Cluster.GuestReplicaLiquidMl(actor, IdFor(item));
+    internal int GuestReplicaLiquidLumalgae(string actor, string item) =>
+        Cluster.GuestReplicaLiquidLumalgae(actor, IdFor(item));
+    internal ulong IdForAlias(string alias) => IdFor(alias);
+    internal int LastCraftDecision() => Cluster.CraftDetails.Count == 0 ? -1 :
+        (int)Cluster.CraftDetails[^1].Decision;
+    internal int LastCraftOperation() => Cluster.CraftDetails.Count == 0 ? -1 :
+        (int)Cluster.CraftDetails[^1].Operation;
 
     internal (ulong Id, ItemState State) StateForLabel(string alias)
     {

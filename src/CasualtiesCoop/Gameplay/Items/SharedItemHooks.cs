@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CasualtiesCoop.Core.Items;
 using CasualtiesCoop.Session;
 using CasualtiesCoop.Diagnostics;
 using CasualtiesCoop.Runtime;
@@ -124,10 +125,11 @@ internal static class SharedItemHooks
     private static bool Throw(Body __instance, float force) =>
         Items?.MayDrop(__instance, __instance.GetItem(__instance.handSlot), true, force) ?? true;
 
-    private static bool Swap(Body __instance, int slot1, int slot2) => Items is not { } shared ||
-        (!shared.IsReserved(slot1) && !shared.IsReserved(slot2) && shared.CanUse(__instance.GetItem(slot1)) &&
-            shared.CanUse(__instance.GetItem(slot2)) && shared.CanChangePlacement(__instance.GetItem(slot1)) &&
-            shared.CanChangePlacement(__instance.GetItem(slot2)));
+    private static bool Swap(Body __instance, int slot1, int slot2)
+    {
+        if (Items is not { } shared || shared.ApplyingAuthoritativeChange) return true;
+        return shared.TryNativeSwap(__instance, slot1, slot2);
+    }
 
     private static bool UseHand(Body __instance)
     {
@@ -186,10 +188,16 @@ internal static class SharedItemHooks
     private static void BeforeUseItem(Item item) => CraftExecutionScope.Current?.BeginUse(item);
     private static void AfterUseItem(Item item) => CraftExecutionScope.Current?.EndUse();
 
-    private static void BeforeSpawnResult() =>
+    private static void BeforeSpawnResult()
+    {
         CoopDiagnostics.Trace("Items", $"Recipe spawn begin, used={CraftExecutionScope.Current?.Used.Count ?? -1}.");
-    private static void AfterSpawnResult() =>
+        CraftFaultInjection.Hit("vanilla-spawn-result");
+    }
+    private static void AfterSpawnResult()
+    {
         CoopDiagnostics.Trace("Items", $"Recipe spawn end, created={CraftExecutionScope.Current?.Created.Count ?? -1}.");
+        CraftFaultInjection.Hit("vanilla-spawn-result-after");
+    }
 
     private static void BeforeCreate() { }
     private static void AfterCreate(ref GameObject __result) => CraftExecutionScope.Current?.RecordCreated(__result);

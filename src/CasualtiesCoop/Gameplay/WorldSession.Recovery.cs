@@ -116,7 +116,8 @@ internal sealed partial class WorldSession
         Vector2 at = new(previous.X, previous.Y);
         if (previous.Player == 0 || !IsWorldPosition(at)) at = initialSpawn;
         return new SessionRejoinState(plan, attempt, previous.Sequence, remote?.SoundSequence ?? 0,
-            lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer), at.x, at.y, IsWorldPosition(at));
+            lights.LastSequence(peer), Items.LastOperation(peer), Fluids.LastDrink(peer), Items.LastCraftOperation(peer),
+            Items.LastRegistrationOperation(peer), Items.LastClientKey(peer), at.x, at.y, IsWorldPosition(at));
     }
 
     internal void RestoreFrom(SessionRejoinState state)
@@ -126,7 +127,8 @@ internal sealed partial class WorldSession
         poseSampler.Resume(state.PoseSequence);
         AdvanceSequence(ref soundSequence, state.SoundSequence);
         lights.AdvanceLocalSequence(state.LightSequence);
-        Items.BeginRecovery(state.ItemOperation, freshBody: !SceneReady);
+        Items.BeginRecovery(state.ItemOperation, state.CraftOperation, state.RegistrationOperation,
+            state.LastClientKey, freshBody: !SceneReady);
         Fluids.BeginRecovery(state.DrinkOperation);
         WorldChunks.Resume(state.Attempt);
     }

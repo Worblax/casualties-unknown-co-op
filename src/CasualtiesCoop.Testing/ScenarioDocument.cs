@@ -97,7 +97,7 @@ internal sealed class ScenarioDocument
         root[key] is JValue { Type: JTokenType.Boolean } value ? value.Value<bool>() : throw new FormatException($"Missing boolean {key}.");
 
     internal static JObject[] Commands(JObject root, string key) =>
-        root[key] is JArray { Count: > 0 and <= 48 } array && array.All(value => value is JObject)
+        root[key] is JArray { Count: > 0 and <= 256 } array && array.All(value => value is JObject)
             ? array.Cast<JObject>().ToArray() : throw new FormatException($"Invalid commands {key}.");
 }
 

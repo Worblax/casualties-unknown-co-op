@@ -125,13 +125,14 @@ internal static class WireCompatibilityChecks
     {
         RoomLaunchPlan plan = new(Session, Attempt, "normal", RoomOptions.Sandbox,
             new LaunchPlayer[] { new(1, 0), new(2, 3) });
-        SessionRejoinState state = new(plan, Attempt, 1, 2, 3, Operation, ItemId, 1, -2, true);
+        SessionRejoinState state = new(plan, Attempt, 1, 2, 3, Operation, ItemId, 5, 6, 7, 1, -2, true);
         const string planBytes = "04" + SessionBytes + AttemptBytes + "1006026E6F726D616C010000000000000000020000000000000003";
         byte[] frame = Match("SessionRejoinState", SessionRejoinWire.WriteState(state),
             "16" + SessionBytes + AttemptBytes + "010000000200000003000000" + OperationBytes + ItemIdBytes +
-            "0000803F000000C001" + planBytes);
+            "0000803F000000C001" + "050000000000000006000000000000000700000000000000" + planBytes);
         Require(SessionRejoinWire.TryReadState(frame, Session, out SessionRejoinState copy) &&
             copy.Attempt == Attempt && copy.ItemOperation == Operation && copy.DrinkOperation == ItemId &&
+            copy.CraftOperation == 5 && copy.RegistrationOperation == 6 && copy.LastClientKey == 7 &&
             copy.HasPosition && copy.Y == -2 && copy.Plan.TryGetPlayer(2, out LaunchPlayer player) && player.Character == 3,
             "SessionRejoinState fixture decodes");
         Require(!SessionRejoinWire.TryReadState(frame, Attempt, out _), "SessionRejoinState rejects another session");

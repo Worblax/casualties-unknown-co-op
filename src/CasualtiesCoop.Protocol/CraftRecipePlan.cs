@@ -9,6 +9,8 @@ internal sealed class CraftRecipePlan
     internal string ResultContainerDefinition = string.Empty;
     internal bool ResultIsLiquid;
     internal int ResultAmount;
+    internal float ResultCondition = 1f;
+    internal bool DontDrainResultLiquid;
     internal CraftIngredientPlan[] Ingredients = System.Array.Empty<CraftIngredientPlan>();
 }
 

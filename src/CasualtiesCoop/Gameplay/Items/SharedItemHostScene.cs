@@ -24,6 +24,7 @@ internal sealed class SharedItemHostScene : IItemWorld
     private readonly PlayerPositionLookup playerPosition;
     private readonly SharedItemInventory inventory;
     private readonly SharedItemObjects objects;
+    private readonly IRemoteItemVisuals? remoteVisuals;
     private readonly Dictionary<ulong, (Item Item, int UnityId)> byId = new();
     private readonly Dictionary<int, ulong> byObject = new();
     private readonly Dictionary<ulong, byte[]> payloads = new();
@@ -35,13 +36,14 @@ internal sealed class SharedItemHostScene : IItemWorld
     private float nextDiscovery;
 
     internal SharedItemHostScene(SessionPeers peers, PlayerPositionLookup playerPosition, IMonotonicClock clock,
-        SharedItemInventory inventory, SharedItemObjects objects)
+        SharedItemInventory inventory, SharedItemObjects objects, IRemoteItemVisuals? remoteVisuals = null)
     {
         this.peers = peers;
         this.playerPosition = playerPosition;
         this.clock = clock;
         this.inventory = inventory;
         this.objects = objects;
+        this.remoteVisuals = remoteVisuals;
         Session = new HostItemSession(peers, this, clock);
         Session.OperationResponded += TraceOperation;
         Session.CraftFailure += message =>
@@ -53,10 +55,17 @@ internal sealed class SharedItemHostScene : IItemWorld
 
     internal HostItemSession Session { get; }
     internal bool TryGetId(Item item, out ulong id) => byObject.TryGetValue(item.GetInstanceID(), out id);
+    internal Item? FindTracked(ulong id) => byId.TryGetValue(id, out var tracked) ? tracked.Item : null;
+    internal string LastCraftPrepareFailure { get; private set; } = string.Empty;
+    internal void NoteCraftPrepareFailure(string reason) => LastCraftPrepareFailure = reason;
 
     internal void Observe(Item? item)
     {
         if (!item || !item)
+        {
+            return;
+        }
+        if (SharedItemProjection.IsReplica(item))
         {
             return;
         }
@@ -99,21 +108,54 @@ internal sealed class SharedItemHostScene : IItemWorld
         {
             byId.Remove(id);
             payloads.Remove(id);
+            order.Remove(id);
         }
         removed.Clear();
     }
 
-    public bool HasRecipe(int recipe) => recipe >= 0 && recipe < Recipes.recipes.Count;    public void RemoveItem(ulong id)
+    public bool HasRecipe(int recipe) => recipe >= 0 && recipe < Recipes.recipes.Count;
+
+    public void RemoveItem(ulong id) => RemoveItemSafe(id);
+
+    private void RemoveItemSafe(ulong id, bool destroy = true)
+    {
+        if (!byId.TryGetValue(id, out var tracked)) return;
+        Untrack(id);
+        if (!tracked.Item) return;
+        if (!destroy)
+        {
+            tracked.Item.rb.simulated = false;
+            try
+            {
+                tracked.Item.gameObject.SetActive(false);
+                UnityEngine.Object.Destroy(tracked.Item.gameObject);
+            }
+            catch (Exception exception)
+            {
+                CoopDiagnostics.Trace("Items", $"Reconciled item {id} by hiding it: {exception}");
+                if (tracked.Item) tracked.Item.gameObject.SetActive(false);
+            }
+            return;
+        }
+        try
+        {
+            tracked.Item.gameObject.SetActive(false);
+            UnityEngine.Object.Destroy(tracked.Item.gameObject);
+        }
+        catch (Exception exception)
+        {
+            CoopDiagnostics.Trace("Items", $"Failed to destroy item {id}: {exception}");
+            if (tracked.Item) tracked.Item.gameObject.SetActive(false);
+        }
+    }
+
+    private void Untrack(ulong id)
     {
         if (!byId.TryGetValue(id, out var tracked)) return;
         byId.Remove(id);
         byObject.Remove(tracked.UnityId);
         payloads.Remove(id);
-        if (tracked.Item)
-        {
-            tracked.Item.gameObject.SetActive(false);
-            UnityEngine.Object.Destroy(tracked.Item.gameObject);
-        }
+        order.Remove(id);
     }
     public ItemDecision CheckCraftIngredient(ParticipantId player, ulong id)
     {
@@ -138,6 +180,42 @@ internal sealed class SharedItemHostScene : IItemWorld
         return item && objects.Apply(item!, payload, state.Condition, state.Placement);
     }
 
+    public void ApplyRemoteState(ItemState state)
+    {
+        if (state.Removed)
+        {
+            RemoveItemSafe(state.Id);
+            return;
+        }
+        Item? item = EnsureItem(state.Id, state);
+        if (!item) return;
+        if (state.Placement == ItemPlacement.World && state.Owner.IsNone)
+        {
+            remoteVisuals?.DetachHeldItem(item);
+            objects.PutInWorld(item, state.Location, authoritative: true);
+            return;
+        }
+        if (state.Owner.IsNone || state.Owner == peers.LocalParticipant) return;
+
+        remoteVisuals?.DetachHeldItem(item);
+        if (state.Placement == ItemPlacement.Inventory && remoteVisuals?.AttachHeldItem(state.Owner, state.Slot, item) == true)
+        {
+            item.rb.simulated = false;
+            return;
+        }
+        if (state.Placement == ItemPlacement.Worn && remoteVisuals?.AttachWornItem(state.Owner, item) == true)
+        {
+            item.rb.simulated = false;
+            return;
+        }
+        if (state.Placement == ItemPlacement.Container && byId.TryGetValue(state.Parent, out var parent) && parent.Item &&
+            inventory.TryAttach(parent.Item, item))
+        {
+            return;
+        }
+        item.gameObject.SetActive(false);
+    }
+
     public bool TryGetRecipe(int recipe, out CraftRecipePlan? plan)
     {
         plan = null;
@@ -160,6 +238,8 @@ internal sealed class SharedItemHostScene : IItemWorld
             ResultContainerDefinition = source.result.isLiquid ? "craftingbottle" : source.result.id,
             ResultIsLiquid = source.result.isLiquid,
             ResultAmount = source.result.amount,
+            ResultCondition = source.result.resultCondition,
+            DontDrainResultLiquid = source.result.dontDrainResultLiquid,
             Ingredients = ingredients
         };
         return true;
@@ -232,7 +312,12 @@ internal sealed class SharedItemHostScene : IItemWorld
         IReadOnlyList<ItemState> ingredients)
     {
         var native = new CraftSceneTransaction(this, commit, plan, ingredients);
-        return native.Prepare() ? native : null;
+        if (native.Prepare())
+        {
+            return native;
+        }
+        native.Dispose();
+        return null;
     }
 
     private bool itemsOwnedBy(ulong id, ParticipantId player) => Session.TryGet(id, out ItemState state) &&
@@ -243,17 +328,60 @@ internal sealed class SharedItemHostScene : IItemWorld
 
     private sealed class CraftSceneTransaction : ICraftWorldTransaction
     {
+        // Guests simulate the recipe on their own copy, so a condition can drift by a fraction
+        // of a tick before the commit arrives. Payloads still have to match exactly.
+        private const float ConditionTolerance = 0.01f;
+
+        private sealed class Snapshot
+        {
+            internal Item Item = null!;
+            internal ulong Id;
+            internal ParticipantId Owner;
+            internal byte[] Payload = Array.Empty<byte>();
+            internal float Condition;
+            internal ItemPlacement Placement;
+            internal ulong ParentId;
+            internal byte Slot;
+            internal ItemLocation Location;
+            internal Transform? ParentTransform;
+            internal Vector3 LocalPosition;
+            internal Quaternion LocalRotation;
+            internal Vector3 LocalScale;
+            internal bool ActiveSelf;
+            internal bool Simulated;
+            internal bool Attempted;
+        }
+
+        private sealed class ContainerContents
+        {
+            internal Container Container = null!;
+            internal readonly List<Content> Items = new();
+        }
+
+        private sealed class Content
+        {
+            internal Item Item = null!;
+            internal Vector3 LocalPosition;
+            internal Quaternion LocalRotation;
+            internal Vector3 LocalScale;
+            internal bool ActiveSelf;
+            internal bool Simulated;
+        }
+
         private readonly SharedItemHostScene scene;
         private readonly ItemCraftCommit commit;
         private readonly CraftRecipePlan plan;
         private readonly IReadOnlyList<ItemState> ingredients;
-        private readonly List<(Item Item, byte[] Payload, float Condition, ItemPlacement Placement, ulong Parent, byte Slot)> updates = new();
+        private readonly List<Snapshot> updates = new();
         private readonly List<(ulong Id, Item Item)> removals = new();
         private readonly List<(CraftCreatedItem Spec, Item Item)> created = new();
         private readonly List<GameObject> temporary = new();
-        private readonly List<ulong> payloads = new();
+        private readonly List<(ulong Id, Item Item)> sceneEntries = new();
+        private readonly List<ulong> bound = new();
+        private readonly List<ContainerContents> containers = new();
         private bool applied;
         private bool confirmed;
+        private bool finalized;
         private bool disposed;
 
         internal CraftSceneTransaction(SharedItemHostScene scene, ItemCraftCommit commit, CraftRecipePlan plan,
@@ -267,57 +395,101 @@ internal sealed class SharedItemHostScene : IItemWorld
 
         internal bool Prepare()
         {
+            bool ready = false;
+            scene.NoteCraftPrepareFailure(string.Empty);
             try
             {
                 Recipe recipe = Recipes.recipes[commit.Recipe];
                 if (recipe.items.Count != plan.Ingredients.Length || recipe.items.Count != ingredients.Count)
+                {
+                    scene.NoteCraftPrepareFailure("recipe ingredient count mismatch");
                     return false;
+                }
 
                 var exclusions = new List<Item>();
                 for (int index = 0; index < recipe.items.Count; index++)
                 {
                     ItemState state = ingredients[index];
-                    Item? item = scene.EnsureItem(state.Id, state);
+                    Item? item = EnsureSceneItem(state);
                     Item? matched = item ? recipe.items[index].GetMatchingItem(new List<Item> { item }, exclusions) : null;
-                    if (!item || matched != item) return false;
+                    if (!item || matched != item)
+                    {
+                        scene.NoteCraftPrepareFailure($"ingredient {index} does not match the recipe");
+                        return false;
+                    }
                     if (recipe.items[index].destroyItem && !recipe.items[index].isLiquid) exclusions.Add(item);
                 }
 
                 foreach (ulong id in commit.Removed)
                 {
-                    if (!scene.byId.TryGetValue(id, out var tracked) || !tracked.Item) return false;
+                    if (!scene.byId.TryGetValue(id, out var tracked) || !tracked.Item)
+                    {
+                        scene.NoteCraftPrepareFailure($"removed item {id} is not tracked");
+                        return false;
+                    }
                     removals.Add((id, tracked.Item));
                 }
                 foreach (CraftUpdatedItem update in commit.Updated)
                 {
-                    if ((!scene.byId.TryGetValue(update.Id, out var tracked) || !tracked.Item) &&
-                        (!scene.Session.TryGet(update.Id, out ItemState current) ||
-                         (scene.EnsureItem(update.Id, current) is not { } ensured) ||
-                         !scene.byId.TryGetValue(update.Id, out tracked)))
+                    if (!scene.Session.TryGet(update.Id, out ItemState current))
+                    {
+                        scene.NoteCraftPrepareFailure($"updated item {update.Id} is not authoritative");
                         return false;
-                    if (!tracked.Item ||
-                        !ItemStateCodec.CanApply(tracked.Item, update.Payload)) return false;
-                    updates.Add((tracked.Item, ItemStateCodec.Capture(tracked.Item), tracked.Item.condition,
-                        scene.Placement(tracked.Item).Placement, scene.ParentId(tracked.Item),
-                        scene.Placement(tracked.Item).Slot));
+                    }
+                    Item? item = EnsureSceneItem(current);
+                    if (!item || !ItemStateCodec.CanApply(item, update.Payload))
+                    {
+                        scene.NoteCraftPrepareFailure($"updated item {update.Id} payload cannot be applied");
+                        return false;
+                    }
+                    updates.Add(Capture(item, current));
                 }
 
-                if (!ValidateIngredientChanges(recipe)) return false;
+                if (!ValidateIngredientChanges(recipe))
+                {
+                    scene.NoteCraftPrepareFailure("ingredient changes do not match the vanilla recipe");
+                    return false;
+                }
 
                 foreach (CraftCreatedItem spec in commit.Created)
                 {
-                    if (!scene.objects.SupportsDefinition(spec.Definition)) return false;
+                    if (!scene.objects.SupportsDefinition(spec.Definition))
+                    {
+                        scene.NoteCraftPrepareFailure($"result definition {spec.Definition} is unavailable");
+                        return false;
+                    }
                     Item? item = scene.objects.CreateReplica(spec.Definition, spec.Location);
-                    if (!item) return false;
+                    if (!item)
+                    {
+                        scene.NoteCraftPrepareFailure("result replica could not be created");
+                        return false;
+                    }
                     item.gameObject.SetActive(false);
+                    if (!scene.objects.Apply(item, spec.Payload, spec.Condition, spec.Placement))
+                    {
+                        scene.NoteCraftPrepareFailure("result payload cannot be applied");
+                        return false;
+                    }
                     created.Add((spec, item));
+                    if (created.Count == 1) CraftFaultInjection.Hit("prepare-result");
                 }
+                if (!ValidateResultChanges())
+                {
+                    if (scene.LastCraftPrepareFailure.Length == 0)
+                        scene.NoteCraftPrepareFailure("result changes do not match the vanilla recipe");
+                    return false;
+                }
+                ready = true;
                 return true;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                CleanupPrepared();
+                scene.NoteCraftPrepareFailure($"prepare exception: {exception}");
                 return false;
+            }
+            finally
+            {
+                if (!ready) CleanupPrepared();
             }
         }
 
@@ -325,19 +497,26 @@ internal sealed class SharedItemHostScene : IItemWorld
         {
             try
             {
-                foreach (var update in updates)
+                for (int index = 0; index < updates.Count; index++)
                 {
+                    Snapshot update = updates[index];
+                    // Mark before mutating: Apply can fail after changing some component fields.
+                    update.Attempted = true;
+                    if (index == 1) CraftFaultInjection.Hit("apply-second-ingredient");
                     if (!scene.objects.Apply(update.Item, update.Payload, update.Condition, update.Placement))
                     {
                         throw new InvalidOperationException();
                     }
+                    if (index == 0) CraftFaultInjection.Hit("apply-first-ingredient");
                 }
-                foreach (var entry in created)
+                for (int index = 0; index < created.Count; index++)
                 {
+                    var entry = created[index];
                     if (!scene.objects.Apply(entry.Item, entry.Spec.Payload, entry.Spec.Condition, entry.Spec.Placement))
                     {
                         throw new InvalidOperationException();
                     }
+                    if (index == 0) CraftFaultInjection.Hit("apply-result");
                 }
                 applied = true;
                 return true;
@@ -379,27 +558,23 @@ internal sealed class SharedItemHostScene : IItemWorld
                 scene.byId[binding.Result.Item] = (binding.Item, instance);
                 scene.byObject[instance] = binding.Result.Item;
                 scene.payloads[binding.Result.Item] = binding.Spec.Payload;
+                scene.order.Add(binding.Result.Item);
+                bound.Add(binding.Result.Item);
+                if (bound.Count == 1) CraftFaultInjection.Hit("bind-id");
             }
             return true;
         }
 
-        public void Confirm()
+        public bool Confirm()
         {
-            if (!applied || confirmed) return;
+            if (!applied) return false;
+            if (confirmed) return true;
             try
             {
-                foreach (var removal in removals)
-                {
-                    if (scene.byId.TryGetValue(removal.Id, out var tracked) && tracked.Item &&
-                        tracked.Item.TryGetComponent<Container>(out Container container))
-                    {
-                        container.UnloadAllItems();
-                    }
-                    scene.RemoveItem(removal.Id);
-                }
+                CraftFaultInjection.Hit("confirm-start");
                 foreach (var entry in created)
                 {
-                    if (!entry.Item) continue;
+                    if (!entry.Item) throw new InvalidOperationException("Craft result disappeared before confirmation.");
                     if (entry.Spec.Placement == ItemPlacement.World)
                     {
                         scene.objects.PutInWorld(entry.Item, entry.Spec.Location, authoritative: true);
@@ -409,33 +584,219 @@ internal sealed class SharedItemHostScene : IItemWorld
                         entry.Item.gameObject.SetActive(false);
                     }
                 }
-            }
-            catch (Exception)
-            {
-            }
-            finally
-            {
+                CraftFaultInjection.Hit("confirm-placement");
+
+                // Container unloading is the last fallible step. The snapshot lets Rollback
+                // restore a partially unloaded container.
+                foreach (var removal in removals)
+                {
+                    if (!scene.byId.TryGetValue(removal.Id, out var tracked) || !tracked.Item ||
+                        !tracked.Item.TryGetComponent<Container>(out Container container))
+                    {
+                        continue;
+                    }
+                    containers.Add(CaptureContents(container));
+                    CraftFaultInjection.Hit("confirm-unload");
+                    container.UnloadAllItems();
+                    CraftFaultInjection.Hit("confirm-unload-after");
+                }
                 confirmed = true;
+                return true;
             }
+            catch (Exception exception)
+            {
+                CoopDiagnostics.Trace("Craft", $"Native confirmation failed: {exception}");
+                Rollback();
+                return false;
+            }
+        }
+
+        public void FinalizeCommit()
+        {
+            if (!confirmed || finalized) return;
+            finalized = true;
+            foreach (var removal in removals)
+            {
+                try
+                {
+                    CraftFaultInjection.Hit("finalize-destroy");
+                    scene.RemoveItemSafe(removal.Id);
+                }
+                catch (Exception exception)
+                {
+                    // Destruction is irreversible. Reconcile by making any survivor inert and
+                    // untracked so the registry and playable world cannot diverge.
+                    CoopDiagnostics.Trace("Craft", $"Native destruction failed for {removal.Id}: {exception}");
+                    scene.RemoveItemSafe(removal.Id, destroy: false);
+                }
+            }
+            applied = false;
         }
 
         public void Dispose()
         {
             if (disposed) return;
             disposed = true;
+            if (confirmed && !finalized) FinalizeCommit();
             if (!confirmed) Rollback();
             CleanupPrepared();
         }
 
         private void Rollback()
         {
-            if (!applied) return;
-            foreach (var update in updates)
+            for (int index = updates.Count - 1; index >= 0; index--)
             {
-                if (!update.Item) continue;
-                scene.objects.Apply(update.Item, update.Payload, update.Condition, update.Placement);
+                if (!updates[index].Attempted) continue;
+                Restore(updates[index]);
+                updates[index].Attempted = false;
             }
+            for (int index = containers.Count - 1; index >= 0; index--) RestoreContents(containers[index]);
+            containers.Clear();
+            foreach (ulong id in bound) scene.Untrack(id);
+            bound.Clear();
             applied = false;
+        }
+
+        private Item? EnsureSceneItem(ItemState state)
+        {
+            bool existed = scene.byId.TryGetValue(state.Id, out var tracked) && tracked.Item;
+            Item? item = scene.EnsureItem(state.Id, state);
+            if (item && !existed && scene.byId.TryGetValue(state.Id, out var entry))
+            {
+                sceneEntries.Add((state.Id, item));
+            }
+            return item;
+        }
+
+        private Snapshot Capture(Item item, ItemState state)
+        {
+            (ItemPlacement placement, ParticipantId owner, byte slot) = scene.Placement(item);
+            var snapshot = new Snapshot
+            {
+                Item = item,
+                Id = state.Id,
+                Owner = state.Owner,
+                Payload = ItemStateCodec.Capture(item),
+                Condition = item.condition,
+                Placement = placement,
+                ParentId = scene.ParentId(item),
+                Slot = slot,
+                Location = SharedItemObjects.Read(item),
+                ParentTransform = item.transform.parent,
+                LocalPosition = item.transform.localPosition,
+                LocalRotation = item.transform.localRotation,
+                LocalScale = item.transform.localScale,
+                ActiveSelf = item.gameObject.activeSelf,
+                Simulated = item.rb ? item.rb.simulated : false
+            };
+            return snapshot;
+        }
+
+        private void Restore(Snapshot snapshot)
+        {
+            Item item = snapshot.Item;
+            if (!item) return;
+
+            if (item.TryGetParentContainer(out Container oldParent)) oldParent.UnloadItem(item, null);
+            scene.inventory.TryDrop(item);
+            scene.objects.Apply(item, snapshot.Payload, snapshot.Condition, snapshot.Placement);
+
+            bool placed = snapshot.Placement switch
+            {
+                ItemPlacement.World => RestoreWorld(snapshot),
+                ItemPlacement.Inventory => RestoreInventory(snapshot),
+                ItemPlacement.Worn => RestoreWorn(snapshot),
+                ItemPlacement.Container => RestoreContainer(snapshot),
+                _ => false
+            };
+            if (!placed)
+            {
+                if (snapshot.ParentTransform)
+                {
+                    item.transform.SetParent(snapshot.ParentTransform, false);
+                    item.transform.localPosition = snapshot.LocalPosition;
+                    item.transform.localRotation = snapshot.LocalRotation;
+                    item.transform.localScale = snapshot.LocalScale;
+                }
+                else
+                {
+                    item.transform.SetParent(null, true);
+                    item.transform.SetPositionAndRotation(new Vector3(snapshot.Location.X, snapshot.Location.Y, 0),
+                        Quaternion.Euler(0, 0, snapshot.Location.Angle));
+                    item.transform.localScale = snapshot.LocalScale;
+                }
+            }
+            item.gameObject.SetActive(snapshot.ActiveSelf);
+            if (item.rb) item.rb.simulated = snapshot.Simulated;
+        }
+
+        private bool RestoreWorld(Snapshot snapshot)
+        {
+            scene.objects.PutInWorld(snapshot.Item, snapshot.Location, authoritative: true);
+            return true;
+        }
+
+        private bool RestoreInventory(Snapshot snapshot)
+        {
+            if (snapshot.Owner == scene.peers.LocalParticipant)
+            {
+                return scene.inventory.TryPickUp(snapshot.Item, snapshot.Slot);
+            }
+            snapshot.Item.transform.SetParent(null, true);
+            snapshot.Item.gameObject.SetActive(false);
+            if (snapshot.Item.rb) snapshot.Item.rb.simulated = false;
+            return true;
+        }
+
+        private bool RestoreWorn(Snapshot snapshot) =>
+            snapshot.Owner == scene.peers.LocalParticipant && scene.inventory.TryWear(snapshot.Item);
+
+        private bool RestoreContainer(Snapshot snapshot)
+        {
+            if (!scene.byId.TryGetValue(snapshot.ParentId, out var parent) || !parent.Item) return false;
+            return scene.inventory.TryAttach(parent.Item, snapshot.Item);
+        }
+
+        private static ContainerContents CaptureContents(Container container)
+        {
+            var snapshot = new ContainerContents { Container = container };
+            foreach (Transform child in container.transform)
+            {
+                if (!child.TryGetComponent<Item>(out Item item)) continue;
+                snapshot.Items.Add(new Content
+                {
+                    Item = item,
+                    LocalPosition = item.transform.localPosition,
+                    LocalRotation = item.transform.localRotation,
+                    LocalScale = item.transform.localScale,
+                    ActiveSelf = item.gameObject.activeSelf,
+                    Simulated = item.rb ? item.rb.simulated : false
+                });
+            }
+            return snapshot;
+        }
+
+        private void RestoreContents(ContainerContents snapshot)
+        {
+            if (!snapshot.Container) return;
+            Item? containerItem = snapshot.Container.GetComponent<Item>();
+            foreach (Content content in snapshot.Items)
+            {
+                if (!content.Item) continue;
+                if (containerItem)
+                {
+                    scene.inventory.TryAttach(containerItem, content.Item);
+                }
+                else
+                {
+                    content.Item.transform.SetParent(snapshot.Container.transform, false);
+                }
+                content.Item.transform.localPosition = content.LocalPosition;
+                content.Item.transform.localRotation = content.LocalRotation;
+                content.Item.transform.localScale = content.LocalScale;
+                content.Item.gameObject.SetActive(content.ActiveSelf);
+                if (content.Item.rb) content.Item.rb.simulated = content.Simulated;
+            }
         }
 
         private bool ValidateIngredientChanges(Recipe recipe)
@@ -450,13 +811,15 @@ internal sealed class SharedItemHostScene : IItemWorld
 
             foreach (ulong id in reusable)
             {
-                if (!updatesById.TryGetValue(id, out CraftUpdatedItem expected) || expected.Condition is < 0f or > 1f ||
+                if (!updatesById.TryGetValue(id, out CraftUpdatedItem expected) ||
+                    expected.Condition is < -ConditionTolerance or > 1f ||
                     !scene.byId.TryGetValue(id, out var tracked) || !tracked.Item)
                     return false;
                 GameObject cloneObject = UnityEngine.Object.Instantiate(tracked.Item.gameObject);
                 cloneObject.SetActive(false);
                 cloneObject.transform.SetParent(null, true);
                 temporary.Add(cloneObject);
+                if (temporary.Count == 1) CraftFaultInjection.Hit("prepare-temp-copy");
                 if (!cloneObject.TryGetComponent<Item>(out Item clone)) return false;
                 ItemState initial = default;
                 for (int index = 0; index < ingredients.Count; index++)
@@ -471,17 +834,165 @@ internal sealed class SharedItemHostScene : IItemWorld
                 }
                 if (!clone) return false;
                 byte[] actual = ItemStateCodec.Capture(clone);
-                if (Math.Abs(clone.condition - expected.Condition) > 0.0001f ||
+                if (Math.Abs(clone.condition - expected.Condition) > ConditionTolerance ||
                     !actual.AsSpan().SequenceEqual(expected.Payload))
                     return false;
             }
             return true;
         }
 
+        private bool ValidateResultChanges()
+        {
+            var reservationIds = new HashSet<ulong>(ingredients.Select(value => value.Id));
+            int liquidTargets = 0;
+            foreach (CraftUpdatedItem update in commit.Updated)
+            {
+                if (reservationIds.Contains(update.Id) || commit.Removed.Contains(update.Id)) continue;
+                Snapshot? original = updates.FirstOrDefault(value => value.Id == update.Id);
+                if (original is null || !original.Item) continue;
+                if (original.Payload.AsSpan().SequenceEqual(update.Payload)) continue;
+                WaterContainerItem? water = original.Item.GetComponent<WaterContainerItem>();
+                if (!water) continue;
+                if (!plan.ResultIsLiquid || ++liquidTargets > 1) return false;
+                if (!ValidateLiquidTarget(original, update)) return false;
+            }
+
+            if (plan.ResultIsLiquid)
+            {
+                if (created.Count > 1) return false;
+                if (created.Count == 0) return liquidTargets == 1;
+                if (liquidTargets != 0) return false;
+                var entry = created[0];
+                if (!ValidateCreatedLiquid(entry.Spec, entry.Item)) return false;
+            }
+
+            foreach (var entry in created)
+            {
+                if (!plan.ResultIsLiquid && !ValidateCreatedSolid(entry.Spec)) return false;
+            }
+            return true;
+        }
+
+        private bool ValidateLiquidTarget(Snapshot original, CraftUpdatedItem update)
+        {
+            GameObject? cloneObject = null;
+            try
+            {
+                cloneObject = UnityEngine.Object.Instantiate(original.Item.gameObject);
+                cloneObject.SetActive(false);
+                cloneObject.transform.SetParent(null, true);
+                temporary.Add(cloneObject);
+                if (!cloneObject.TryGetComponent<Item>(out Item clone) ||
+                    !clone.TryGetComponent<WaterContainerItem>(out WaterContainerItem water)) return false;
+                if (!scene.objects.Apply(clone, original.Payload, original.Condition, original.Placement)) return false;
+                float before = water.CurrentTotal;
+                if (!scene.objects.Apply(clone, update.Payload, update.Condition, update.Placement)) return false;
+                float after = water.CurrentTotal;
+                float added = after - before;
+                if (!IsResultAmountValid(added)) return false;
+                if (!scene.objects.Apply(clone, original.Payload, original.Condition, original.Placement)) return false;
+                water.AddLiquid(plan.ResultDefinition, added);
+                if (Math.Abs(clone.condition - update.Condition) > 0.0001f) return false;
+                return ItemStateCodec.Capture(clone).AsSpan().SequenceEqual(update.Payload);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private bool ValidateCreatedLiquid(CraftCreatedItem spec, Item item)
+        {
+            if (spec.Definition != plan.ResultContainerDefinition ||
+                float.IsNaN(spec.Condition) || spec.Condition < 0f || spec.Condition > 1f)
+            {
+                scene.NoteCraftPrepareFailure($"liquid result definition/condition is invalid: " +
+                    $"{spec.Definition} condition={spec.Condition}");
+                return false;
+            }
+            if (!item.TryGetComponent<WaterContainerItem>(out WaterContainerItem water) ||
+                water.stack.Count != 1 || water.stack[0].liquidId != plan.ResultDefinition ||
+                !IsResultAmountValid(water.CurrentTotal))
+            {
+                scene.NoteCraftPrepareFailure($"liquid result stack is invalid for {spec.Definition}: " +
+                    $"stacks={(water ? water.stack.Count : -1)} amount={(water ? water.CurrentTotal : -1f)}");
+                return false;
+            }
+            float amount = water.CurrentTotal;
+            bool matches = MatchesFreshResult(spec, baseline => baseline.GetComponent<WaterContainerItem>()
+                .AddLiquid(plan.ResultDefinition, amount));
+            if (!matches)
+            {
+                scene.NoteCraftPrepareFailure($"liquid result payload does not match a fresh {spec.Definition}");
+            }
+            return matches;
+        }
+
+        private bool ValidateCreatedSolid(CraftCreatedItem spec)
+        {
+            if (!IsResultConditionValid(spec.Condition)) return false;
+            return MatchesFreshResult(spec, baseline =>
+            {
+                if (baseline.TryGetComponent<BatteryItem>(out BatteryItem battery)) battery.UnloadBattery(true);
+                if (!plan.DontDrainResultLiquid && baseline.TryGetComponent<WaterContainerItem>(out WaterContainerItem water))
+                {
+                    water.stack = new List<LiquidStack>();
+                    baseline.condition = 0f;
+                }
+            });
+        }
+
+        private bool MatchesFreshResult(CraftCreatedItem spec, Action<Item> shape)
+        {
+            Item? baseline = scene.objects.CreateReplica(spec.Definition, spec.Location);
+            if (!baseline) return false;
+            try
+            {
+                baseline.condition = spec.Condition;
+                shape(baseline);
+                return ItemStateCodec.Capture(baseline).AsSpan().SequenceEqual(spec.Payload);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                if (baseline) UnityEngine.Object.Destroy(baseline.gameObject);
+            }
+        }
+
+        private bool IsResultAmountValid(float amount)
+        {
+            if (!(amount > 0f) || float.IsNaN(amount) || float.IsInfinity(amount)) return false;
+            float maximum = Math.Max(0f, plan.ResultCondition);
+            return amount <= maximum + 0.0001f && (maximum <= 0.0001f || amount >= maximum * 0.19f);
+        }
+
+        private bool IsResultConditionValid(float condition)
+        {
+            if (float.IsNaN(condition) || condition < 0f || condition > 1f) return false;
+            float maximum = Math.Max(0f, plan.ResultCondition);
+            return condition <= maximum + 0.0001f &&
+                (maximum <= 0.0001f || condition >= maximum * 0.19f || Math.Abs(condition - maximum) <= 0.0001f);
+        }
+
         private void CleanupPrepared()
         {
             if (!confirmed)
             {
+                foreach (ulong id in bound) scene.Untrack(id);
+                bound.Clear();
+                foreach (var entry in sceneEntries)
+                {
+                    scene.Untrack(entry.Id);
+                    if (entry.Item)
+                    {
+                        entry.Item.gameObject.SetActive(false);
+                        UnityEngine.Object.Destroy(entry.Item.gameObject);
+                    }
+                }
+                sceneEntries.Clear();
                 foreach (var entry in created)
                 {
                     if (!entry.Item) continue;
@@ -490,11 +1001,20 @@ internal sealed class SharedItemHostScene : IItemWorld
                 }
                 created.Clear();
             }
+            else
+            {
+                bound.Clear();
+                sceneEntries.Clear();
+                created.Clear();
+            }
             foreach (GameObject clone in temporary)
             {
                 if (clone) UnityEngine.Object.Destroy(clone);
             }
             temporary.Clear();
+            updates.Clear();
+            removals.Clear();
+            containers.Clear();
         }
     }
     private void Discover()
@@ -506,7 +1026,7 @@ internal sealed class SharedItemHostScene : IItemWorld
             {
                 break;
             }
-            if (!item || TryGetId(item, out _))
+            if (!item || SharedItemProjection.IsReplica(item) || TryGetId(item, out _))
             {
                 continue;
             }
@@ -542,6 +1062,7 @@ internal sealed class SharedItemHostScene : IItemWorld
         byId[state.Id] = (item, instance);
         byObject[instance] = state.Id;
         payloads[state.Id] = payload;
+        order.Add(state.Id);
         return true;
     }
 
@@ -566,7 +1087,8 @@ internal sealed class SharedItemHostScene : IItemWorld
             return;
         }
 
-        if ((force || !payloads.TryGetValue(id, out byte[]? previous) || !previous.SequenceEqual(payload)) &&
+        if ((force || !payloads.TryGetValue(id, out byte[]? previous) || !previous.SequenceEqual(payload) ||
+             Math.Abs(item.condition - state.Condition) > 0.001f) &&
             Session.TryCommitPayload(id, state.Revision, item.condition, payload, out state))
         {
             payloads[id] = payload;
@@ -613,10 +1135,6 @@ internal sealed class SharedItemHostScene : IItemWorld
 
     private (ItemPlacement Placement, ParticipantId Owner, byte Slot) Placement(Item item)
     {
-        if (item.TryGetParentContainer(out _))
-        {
-            return (ItemPlacement.Container, default, ItemWire.NoSlot);
-        }
         Body? body = inventory.Body;
         if (body)
         {
@@ -631,6 +1149,10 @@ internal sealed class SharedItemHostScene : IItemWorld
             {
                 return (ItemPlacement.Worn, peers.LocalParticipant, ItemWire.NoSlot);
             }
+        }
+        if (item.TryGetParentContainer(out _))
+        {
+            return (ItemPlacement.Container, default, ItemWire.NoSlot);
         }
         return (ItemPlacement.World, default, ItemWire.NoSlot);
     }
@@ -665,6 +1187,7 @@ internal sealed class SharedItemHostScene : IItemWorld
         byId[id] = (item, instance);
         byObject[instance] = id;
         payloads[id] = state.Payload;
+        order.Add(id);
         return item;
     }
 
@@ -777,7 +1300,10 @@ internal sealed class SharedItemHostScene : IItemWorld
         else
         {
             item.rb.simulated = false;
-            item!.gameObject.SetActive(false);
+            if (remoteVisuals?.AttachHeldItem(player, slot, item) != true)
+            {
+                item!.gameObject.SetActive(false);
+            }
         }
 
         condition = item.condition;
@@ -806,13 +1332,13 @@ internal sealed class SharedItemHostScene : IItemWorld
             return ItemDecision.Unavailable;
         }
         bool local = player == peers.LocalParticipant;
-        if (local ? !inventory.HoldsSlot(item!, request.Slot) || !inventory.TryDrop(item!)
-                  : item!.transform.parent)
+        if (local && (!inventory.HoldsSlot(item!, request.Slot) || !inventory.TryDrop(item!)))
         {
             return ItemDecision.Unavailable;
         }
 
         byte[] payload = request.Payload.Length > 0 ? request.Payload : state.Payload;
+        remoteVisuals?.DetachHeldItem(item!);
         if (!objects.Apply(item!, payload, state.Condition, ItemPlacement.World))
         {
             return ItemDecision.Unavailable;

@@ -14,12 +14,16 @@ internal readonly struct SessionRejoinState
     internal readonly uint LightSequence;
     internal readonly ulong ItemOperation;
     internal readonly ulong DrinkOperation;
+    internal readonly ulong CraftOperation;
+    internal readonly ulong RegistrationOperation;
+    internal readonly ulong LastClientKey;
     internal readonly float X;
     internal readonly float Y;
     internal readonly bool HasPosition;
 
     internal SessionRejoinState(RoomLaunchPlan plan, Guid attempt, uint poseSequence, uint soundSequence, uint lightSequence,
-        ulong itemOperation, ulong drinkOperation, float x, float y, bool hasPosition)
+        ulong itemOperation, ulong drinkOperation, ulong craftOperation, ulong registrationOperation, ulong lastClientKey,
+        float x, float y, bool hasPosition)
     {
         Plan = plan;
         Attempt = attempt;
@@ -28,6 +32,9 @@ internal readonly struct SessionRejoinState
         LightSequence = lightSequence;
         ItemOperation = itemOperation;
         DrinkOperation = drinkOperation;
+        CraftOperation = craftOperation;
+        RegistrationOperation = registrationOperation;
+        LastClientKey = lastClientKey;
         X = x;
         Y = y;
         HasPosition = hasPosition;
@@ -37,7 +44,7 @@ internal readonly struct SessionRejoinState
 internal static class SessionRejoinWire
 {
     private const int ReferenceSize = 33;
-    private const int StateHeaderSize = 70;
+    private const int StateHeaderSize = 94;
 
     internal static byte[] WriteReference(MessageKind frame, Guid session, Guid attempt)
     {
@@ -66,6 +73,9 @@ internal static class SessionRejoinWire
         GameplayWire.WriteFloat(message.AsSpan(61), state.X);
         GameplayWire.WriteFloat(message.AsSpan(65), state.Y);
         message[69] = state.HasPosition ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(70), state.CraftOperation);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(78), state.RegistrationOperation);
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(86), state.LastClientKey);
         plan.CopyTo(message, StateHeaderSize);
         return message;
     }
@@ -91,7 +101,9 @@ internal static class SessionRejoinWire
         state = new SessionRejoinState(plan, attempt,
             BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(33)), BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(37)),
             BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(41)), BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(45)),
-            BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(53)), x, y, message[69] != 0);
+            BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(53)), BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(70)),
+            BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(78)), BinaryPrimitives.ReadUInt64LittleEndian(message.Slice(86)),
+            x, y, message[69] != 0);
         return true;
     }
 }

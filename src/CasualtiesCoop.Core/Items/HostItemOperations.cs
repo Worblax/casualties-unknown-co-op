@@ -13,6 +13,7 @@ internal interface IItemWorld
     ItemDecision Drop(ParticipantId player, ulong item, SharedItemRequest request, out ItemLocation location,
         out float condition);
     bool TryApplyState(ulong item, byte[] payload);
+    void ApplyRemoteState(ItemState state);
     bool TryGetRecipe(int recipe, out CraftRecipePlan? plan);
     ItemDecision CheckCraftIngredient(ParticipantId player, ulong item);
     ICraftWorldTransaction? BeginCraft(ItemCraftCommit commit, CraftRecipePlan plan,
@@ -28,7 +29,12 @@ internal interface ICraftWorldTransaction : IDisposable
 {
     bool TryApply();
     bool Bind(IReadOnlyList<CraftCreatedResult> results, IReadOnlyList<CraftCreatedItem> specs);
-    void Confirm();
+    // Confirm performs every remaining fallible native action. A false result means nothing
+    // irreversible happened and the transaction can still be rolled back.
+    bool Confirm();
+    // FinalizeCommit destroys consumed ingredients and is the only irreversible native step.
+    // It must reconcile a failed Unity operation instead of throwing.
+    void FinalizeCommit();
 }
 
 internal sealed class HostItemOperations
